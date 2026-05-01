@@ -44,9 +44,16 @@ jobs:
         # packages uninstalled — tests then fail to import qgis_puppeteer.
         run: uv sync --all-packages --all-extras --dev
 
-      # No test suites exist yet, so this job only proves that the workspace
-      # resolves and installs on every matrix cell. The per-package test steps
-      # are added together with the first test suite.
+      # Tests are split per package so failure attribution is clear in CI logs.
+      # All three suites are 100% mocked — no real QGIS process required.
+      - name: Test qgis-puppeteer (core)
+        run: uv run pytest packages/qgis-puppeteer/tests -q
+
+      - name: Test pytest-qgis-puppeteer
+        run: uv run pytest packages/pytest-qgis-puppeteer/tests -q
+
+      - name: Test qgis_puppet plugin
+        run: uv run pytest plugins/qgis_puppet/tests -q
 
   lint:
     name: lint (ruff)
