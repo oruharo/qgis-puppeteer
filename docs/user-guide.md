@@ -18,11 +18,13 @@ selector・Locator・dialog handler 等の機能リファレンスをまとめ�
 4. [Selector リファレンス](#selector-リファレンス)
 5. [Locator API](#locator-api)
 6. [Dialog handler（想定外モーダルの自動応答）](#dialog-handler)
-7. [複数 QGIS（multi-instance）](#multi-instance)
-8. [Permissions / 信頼モード](#permissions)
-9. [環境変数リファレンス](#環境変数リファレンス)
-10. [Troubleshooting](#troubleshooting)
-11. [Roadmap](#roadmap)
+7. [Signal spy / wait_for_signal](#signal-spy--wait_for_signal)
+8. [Uncaught Qt/Python 例外と test fail linkage](#uncaught-exceptions)
+9. [複数 QGIS（multi-instance）](#multi-instance)
+10. [Permissions / 信頼モード](#permissions)
+11. [環境変数リファレンス](#環境変数リファレンス)
+12. [Troubleshooting](#troubleshooting)
+13. [Roadmap](#roadmap)
 
 ---
 
@@ -219,7 +221,11 @@ async def test_open_login_dialog(qgis):
 | `list_instances.json` | Hub に register されている Worker 一覧 |
 | `meta.json` | `nodeid` / 解決済 `qgis_bin` / `qgis_args` / `qgis_command` / 例外 type+message / env name / instances サマリ |
 | `traceback.txt` | pytest の `longrepr` テキスト |
+| `uncaught_exceptions.json` | テスト実行中に Qt/Python から uncaught でキャッチされた例外（[Uncaught 例外](#uncaught-exceptions) 参照） |
 | `hub_stdout.log` / `hub_stderr.log` | Hub プロセスの直近最大 500 行 |
+
+`--env=all` / `--env=A,B` で meta-parent モードで動かした場合、parent 側で
+`outputs/summary.json` も追加で書かれる（per-env stats + totals + 集約 exit code）。
 
 CI 上で diagnostic バンドルだけ artifact として upload しておくと、
 失敗時に full transcript を読まずに原因の当たりが付けやすくなる。
@@ -253,6 +259,31 @@ strategy = "named"      # "fail" にすると marker 必須（推奨は段階移
 default_name = "smoke"
 ```
 
+#### env の継承（`extends`）
+
+共通設定を base env にまとめ、差分だけ子で書く:
+
+```toml
+[[environments]]
+name = "base"
+qgis_args = ["--profile=test"]
+env = { MYAPP_LOG_LEVEL = "DEBUG" }
+
+[[environments]]
+name = "with_auth"
+extends = "base"                       # base の qgis_bin/qgis_python/qgis_command を継承
+qgis_args = ["--feature=auth"]         # base の args の **後ろ** に append される
+env = { MYAPP_AUTH_ENABLED = "1" }     # base の env と shallow merge（同キーは子優先）
+```
+
+ルール:
+
+- `extends` は **既出の env name** だけ参照可（前方参照禁止 / 自己参照禁止）。違反は TOML load 時に `ValueError`。
+- `qgis_bin` / `qgis_python` / `qgis_command` は scalar 継承（子で上書き可）。
+- `qgis_args` は **append**（base の後ろに子）。
+- `env` table は **shallow merge**（同 key は子優先）。
+- 多段（`a → b → c`）は宣言順に解決されるので OK。
+
 テスト側で env に所属を宣言:
 
 ```python
@@ -280,7 +311,12 @@ pytest --env=smoke                # smoke env のテストだけ
 pytest --env=with_auth -k login   # 標準 -k と併用可
 pytest --env=smoke,with_auth      # 2 つの env を順次実行
 pytest --env=all                  # 全 env を順次実行（meta-parent モード）
+pytest --list-envs                # 利用可能な env を `name<TAB>description` 形式で出力して exit
+pytest --env=all --env-strict     # ある env だけ exit 5 (no tests collected) を 1 に昇格
 ```
+
+- `--list-envs` は `--env` 指定有無に関わらず使える（`pytest_configure` 早期で hook して `pytest.exit(0)`）。
+- `--env-strict` は meta-parent モード専用。1 env でも「テストが拾えなかった」を fail 扱いにしたい CI 用途。**全 env が 5** のときは引き続き 5 のまま（CI が green と誤検知しないためのガード）。hard error (2/3/4) は strict 関係なく即時伝播。
 
 `--env=all` / `--env=A,B` は meta-parent モード。親 invocation が env ごとに
 子 `pytest.main()` を順次起動し、各 env の exit code を集約する:
@@ -295,6 +331,21 @@ pytest --env=all                  # 全 env を順次実行（meta-parent モー
 
 artifacts は `outputs/<env_name>/diagnostics/` に env 別に分離される。
 詳細・優先順位（`CLI > env > toml > ini`）は ADR-0003 を参照。
+
+#### JUnit XML の env prefix
+
+`--junit-xml=...` 併用時、各子 invocation の `<testcase classname="...">` は
+`<env_name>::<元 classname>` に書き換わる。CI 側で env を縦軸にした集計表が
+そのまま作れる。stdlib の `xml.etree.ElementTree` で後処理しているので追加 dep 不要、
+かつ idempotent（既に prefix されているものは触らない）。
+
+#### `--maxfail` の env 横断累積
+
+`--env=all --maxfail=N` のとき、parent 側で各 env の fail 数を `_env_stats.json`
+経由で読み、累積 fail が N に達した時点で残り env を skip する。次の child を
+spawn する直前に `--maxfail=<remaining>` を inject するので、child 単体での
+fail-fast 挙動も活きる。skip された env は `summary.json` 内で
+`skipped_reason="not_run_due_to_cumulative_maxfail"` として記録される。
 
 ### 6. テスト中だけ QGIS を再起動する: `@pytest.mark.fresh_qgis`
 
@@ -516,6 +567,21 @@ qgis.locator({"class": "QPushButton", "index": 0}).click()
 
 エラー時の diagnostics には match_count + 上位 10 件の候補（class /
 object_name / text）が含まれるので、ログから即原因が分かる。
+
+### `qgis_check_actionability`（low-level RPC）
+
+Locator の auto-wait は内部でこの RPC を poll している。selector が当該
+widget をどう判定したか単発で確認したい場合に直接呼べる:
+
+```python
+result = qgis.call("qgis_check_actionability", {
+    "selector": {"object_name": "ok_btn"},
+})
+# {exists, visible, enabled, not_covered, editable, ...}
+```
+
+`expect()` の `to_be_visible()` / `to_be_enabled()` も同 RPC を再利用しており、
+selector ambiguous は即時 abort される。
 
 ### scope の挙動
 
@@ -757,6 +823,114 @@ await client.call("qgis_register_dialog_handler", {
 - 同じ modal instance を 2 回処理しない（id ベースの状態管理）
 - 複数 handler が match する場合は **登録順で先勝ち**
 - modal が閉じたら状態リセット → 同じ条件の modal が再度開けば再度処理
+
+---
+
+## Signal spy / wait_for_signal
+
+Qt signal の発火検証用ハンドラ。`test.*` namespace に置かれており、QGIS 側で
+`QPUPPETEER_ALLOW_TEST_HANDLERS=1` が立っているときだけ登録される（pytest fixture
+は subprocess に自動付与）。本番ユーザー環境では露出しないので、テストコードからのみ呼ぶ。
+
+### 提供 RPC コマンド
+
+| コマンド | 用途 |
+|---|---|
+| `test.signal_spy_start` | spy を開始（`{spy_id, matched, diagnostics}` を返す） |
+| `test.signal_spy_get_emissions` | 発火履歴を取り出す（`since_index` で差分取得可） |
+| `test.signal_spy_count` | 発火回数のみ |
+| `test.signal_spy_stop` | spy 停止（`{ok}`） |
+| `test.wait_for_signal` | local `QEventLoop` で blocking wait（`{fired, args, timed_out}`） |
+
+### Spy で「複数回発火」を検証
+
+```python
+def test_combo_emits_currentIndexChanged(qgis):
+    spy = qgis.call("test.signal_spy_start", {
+        "selector": {"object_name": "myCombo"},
+        "signal": "currentIndexChanged",
+        "max_emissions": 100,        # 上限（任意）
+    })
+    spy_id = spy["spy_id"]
+
+    qgis.locator({"object_name": "myCombo"}).select("Option B")
+    qgis.locator({"object_name": "myCombo"}).select("Option C")
+
+    result = qgis.call("test.signal_spy_get_emissions", {"spy_id": spy_id})
+    assert result["count"] == 2
+    # emissions: [{args: [...], ts: ...}, ...]
+
+    qgis.call("test.signal_spy_stop", {"spy_id": spy_id})
+```
+
+### `wait_for_signal` で「特定の発火を待つ」
+
+非同期処理完了の通知を待つケース。`timeout_ms` 既定 5000:
+
+```python
+def test_async_load(qgis):
+    qgis.locator({"object_name": "load_btn"}).click()
+    result = qgis.call("test.wait_for_signal", {
+        "selector": {"object_name": "loader"},
+        "signal": "loadFinished",
+        "timeout_ms": 10000,
+    })
+    assert result["fired"] is True
+    assert result["timed_out"] is False
+```
+
+selector が widget を引き当てられない場合、`{"fired": False, "matched": False,
+"diagnostics": {...}}` が返る（例外にはしない）。signal 名が widget に存在しない
+場合のみ `ValueError`。
+
+---
+
+## Uncaught exceptions
+
+Qt の slot で発生した Python 例外は、デフォルトで C++→Python 境界に飲まれて
+stderr 出力されるだけになる。これだと「QGIS 内部が壊れているのにテストは pass」
+する事故が起きる。pytest-qgis-puppeteer は ring buffer + pytest hook で
+これを **テスト fail に昇格** させる（ADR-0002 §17）。
+
+### 仕組み
+
+- Worker 側 `qgis_tools.exception_recorder` が `sys.excepthook` を chain して、
+  発生した例外を 200 件の deque に `{type, message, traceback, ts, thread}` で記録。
+- pytest plugin が `pytest_runtest_call` の前で deque をクリア、
+  `pytest_runtest_makereport` の後でクエリして例外があれば:
+  - **pass → fail** に promote（`longrepr` に整形済 traceback を書く）
+  - 既に fail なら `report.sections` に追記
+  - diagnostic bundle に `uncaught_exceptions.json` を追加
+
+### opt-out
+
+特定プロジェクトで無効化したい場合は `pyproject.toml` で:
+
+```toml
+[tool.pytest.ini_options]
+qgis_fail_on_uncaught_exception = false   # 既定: true
+```
+
+dev モード（`QPUPPETEER_E2E_USE_RUNNING_QGIS=1`）下では自動 skip される
+（既存の長期 QGIS が抱えている過去の例外を拾ってしまうため）。
+
+### 手動 API
+
+ハンドラを直接呼びたい場合:
+
+```python
+recent = await client.call("qgis_get_recent_exceptions", {"limit": 50})
+# {exceptions: [{type, message, traceback, ts, thread}, ...]}
+
+await client.call("qgis_clear_recent_exceptions", {})
+```
+
+`AutomationClient` には sync ラッパも:
+
+```python
+qgis.get_recent_exceptions(limit=50)
+qgis.clear_recent_exceptions()
+```
 
 ---
 
@@ -1047,8 +1221,7 @@ except WidgetNotActionableError as e:
 - **Auto-wait `stable` チェック** — アニメーション中操作の吸収
 - **Auto-wait `receives_events`** — hit-test ベースの occlusion 検出
 - **入れ子 modal** — modal stack 内の特定 widget 取得
-- **pytest-xdist 並列実行** — 複数 Worker での並列テスト
-- **Selector 拡張** — `text_re`（正規表現）、attr マッチ、Locator chain
+- **pytest-xdist 並列実行 / env 並列実行** — 複数 Worker での並列テスト
 - **Hub/Worker プロトコル拡張** — push event / deferred 実行モード
 - **Test isolation 強化** — 専用 QGIS profile 自動構築 / プラグイン state reset
 - **HTML サマリレポート** — `summary.json` → スタンドアロン HTML
