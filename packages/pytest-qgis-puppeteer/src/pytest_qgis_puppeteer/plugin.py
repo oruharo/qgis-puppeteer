@@ -60,6 +60,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import pytest
+
 from pytest_qgis_puppeteer._action_recorder import ActionRecorder
 from pytest_qgis_puppeteer._environments import (
     EnvironmentsConfig,
