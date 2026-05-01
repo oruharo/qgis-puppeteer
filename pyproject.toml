@@ -1,0 +1,75 @@
+# Workspace root pyproject.toml
+# このファイル自体は PyPI に publish しない (workspace 管理用)
+# 配置先: qgis-puppeteer/pyproject.toml
+
+[project]
+name = "qgis-puppeteer-monorepo"
+version = "0.0.0"
+description = "Workspace root for qgis-puppeteer monorepo (not published)"
+requires-python = ">=3.10"
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+qgis-puppeteer = { workspace = true }
+pytest-qgis-puppeteer = { workspace = true }
+
+# ----------------------------------------------------------------------
+# Pytest 統合設定 (workspace 全体)
+# 各パッケージの pyproject.toml で局所的に override 可能
+# ----------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = [
+    "packages/qgis-puppeteer/tests",
+    "packages/pytest-qgis-puppeteer/tests",
+]
+asyncio_mode = "auto"
+markers = [
+    "integration: integration test (slower, real Hub/Worker)",
+    "slow: tests taking > 5s",
+]
+
+# ----------------------------------------------------------------------
+# Lint / format
+# ----------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM"]
+ignore = [
+    # `WorkerRegisterTimeout` 等 stdlib 風命名を許す。Python 標準にも
+    # `TimeoutError` / `KeyboardInterrupt` 等 -Error suffix なしの例があるため。
+    "N818",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# QGIS plugin entry points: classFactory / initGui / unload は QGIS 側 API の
+# 名前なので変更不可。N802 (function-name) を該当ファイルでだけ無視。
+"plugins/qgis_puppet/__init__.py" = ["N802"]
+"plugins/qgis_puppet/plugin.py" = ["N802"]
+# Bench script は数学的慣習で大文字 1 文字変数を使う
+"packages/qgis-puppeteer/scripts/bench_rtt.py" = ["N806"]
+# Tests: pytest.raises(Exception) を許容（broad ok。具体例外型は別 lint で見る）
+"packages/qgis-puppeteer/tests/test_protocol.py" = ["B017"]
+"packages/qgis-puppeteer/tests/test_integration_hub_client.py" = ["B017"]
+
+[tool.pyright]
+include = ["packages"]
+strict = [
+    "packages/qgis-puppeteer/src",
+    "packages/pytest-qgis-puppeteer/src",
+]
+
+# ----------------------------------------------------------------------
+# Dev dependencies (workspace 共通)
+# ----------------------------------------------------------------------
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.5",
+    "pyright>=1.1",
+]

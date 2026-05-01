@@ -1,0 +1,58 @@
+# Core package: qgis-puppeteer
+# 配置先: qgis-puppeteer/packages/qgis-puppeteer/pyproject.toml
+
+[project]
+name = "qgis-puppeteer"
+version = "0.1.0"
+description = "Control QGIS from Claude Desktop and pytest via WebSocket (Hub / Worker / MCP gateway)"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [
+    { name = "oruharo", email = "9918931+oruharo@users.noreply.github.com" },
+]
+keywords = ["qgis", "mcp", "claude", "automation", "websocket"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "websockets>=12.0",        # AutomationClient / Hub の WS
+    # PyQt5 / qgis は QGIS バンドル経由 (Worker / Hub 起動時) なので pip 依存にしない
+]
+
+[project.optional-dependencies]
+# Claude Desktop / MCP gateway を使うときに追加で必要
+mcp = ["mcp>=1.0"]
+
+[project.urls]
+Homepage = "https://github.com/oruharo/qgis-puppeteer"
+Repository = "https://github.com/oruharo/qgis-puppeteer"
+Documentation = "https://github.com/oruharo/qgis-puppeteer/blob/main/docs/architecture/"
+Issues = "https://github.com/oruharo/qgis-puppeteer/issues"
+
+[project.scripts]
+# Hub をコマンドラインから直接起動できるようにする
+qgis-puppeteer-hub = "qgis_puppeteer.hub:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/qgis_puppeteer"]
+
+# ローカル動作確認用 ini-options (workspace root から override される)
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

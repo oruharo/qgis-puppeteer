@@ -1,0 +1,56 @@
+# Pytest plugin: pytest-qgis-puppeteer
+# 配置先: qgis-puppeteer/packages/pytest-qgis-puppeteer/pyproject.toml
+
+[project]
+name = "pytest-qgis-puppeteer"
+version = "0.1.0"
+description = "Pytest plugin for E2E testing QGIS via qgis-puppeteer (Locator, web-first assertions, diagnostic bundles)"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [
+    { name = "oruharo", email = "9918931+oruharo@users.noreply.github.com" },
+]
+keywords = ["pytest", "qgis", "e2e", "testing", "automation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: Pytest",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "qgis-puppeteer>=0.1.0",
+    # Python 3.11 未満では tomllib 不在のため tomli を使う（_environments の TOML loader）
+    "tomli>=2.0; python_version<'3.11'",
+]
+
+[project.urls]
+Homepage = "https://github.com/oruharo/qgis-puppeteer"
+Repository = "https://github.com/oruharo/qgis-puppeteer"
+Documentation = "https://github.com/oruharo/qgis-puppeteer/blob/main/docs/architecture/0002-e2e-test-architecture.md"
+Issues = "https://github.com/oruharo/qgis-puppeteer/issues"
+
+# pytest プラグインとして自動有効化
+[project.entry-points.pytest11]
+qgis_puppeteer = "pytest_qgis_puppeteer.plugin"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pytest_qgis_puppeteer"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

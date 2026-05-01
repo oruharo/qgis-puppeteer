@@ -1,0 +1,27 @@
+# QGIS Puppet plugin metadata.
+
+[general]
+name=QGIS Puppet
+qgisMinimumVersion=3.34
+description=Worker plugin for qgis-puppeteer (control QGIS from Claude Desktop and pytest)
+version=0.1.0
+author=oruharo
+email=9918931+oruharo@users.noreply.github.com
+
+about=Thin QGIS plugin that wraps qgis_puppeteer.Worker. On load it dials out to the local qgis-puppeteer Hub (auto-spawning it if needed) and registers this QGIS process as an addressable instance. Tool dispatch is forwarded from the MCP gateway. See https://github.com/oruharo/qgis-puppeteer.
+
+tracker=https://github.com/oruharo/qgis-puppeteer/issues
+repository=https://github.com/oruharo/qgis-puppeteer
+homepage=https://github.com/oruharo/qgis-puppeteer
+
+license=GPL-3.0-or-later
+
+hasProcessingProvider=no
+
+tags=python,mcp,automation,worker,e2e,testing
+
+category=Plugins
+experimental=True
+deprecated=False
+server=False
+icon=icon.png

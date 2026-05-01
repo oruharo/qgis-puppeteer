@@ -1,0 +1,4 @@
+# qgis_puppet QGIS プラグインが実行時に import する Python ライブラリ。
+# plugin.py の `from qgis_puppeteer.worker import Worker` を解決するために必要。
+# ホストアプリケーションが plugin を取り込む際、ここを読んで依存関係を解決する。
+qgis-puppeteer
