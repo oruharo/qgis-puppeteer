@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="900" viewBox="0 0 1300 900">
+  <defs>
+    <marker id="arrow-blue" markerWidth="12" markerHeight="12" refX="10" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#4285f4"/>
+    </marker>
+    <marker id="arrow-red" markerWidth="12" markerHeight="12" refX="10" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#ea4335"/>
+    </marker>
+    <marker id="arrow-gray" markerWidth="12" markerHeight="12" refX="10" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#546e7a"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1300" height="900" fill="#fafafa"/>
+
+  <text x="650" y="40" text-anchor="middle" font-family="sans-serif" font-size="22" font-weight="bold" fill="#222">QGIS Puppeteer Architecture</text>
+  <text x="650" y="65" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#666">外部 MCP 名: qgis-puppeteer   /   内部: McpGateway + Hub + Worker + AutomationClient</text>
+
+  <!-- ===== MCP protocol layer band ===== -->
+  <rect x="30" y="210" width="600" height="210" rx="14" fill="#fffde7" stroke="#f9a825" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <text x="55" y="235" font-family="sans-serif" font-size="13" font-weight="bold" fill="#ef6c00">MCP Protocol Layer</text>
+  <text x="55" y="252" font-family="sans-serif" font-size="11" fill="#a16800">(Claude Desktop との接続に専念。MCP を知るのはここだけ)</text>
+
+  <!-- ===== Automation layer band ===== -->
+  <rect x="30" y="450" width="1240" height="430" rx="14" fill="#f1f8e9" stroke="#558b2f" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <text x="55" y="475" font-family="sans-serif" font-size="13" font-weight="bold" fill="#33691e">QGIS Puppeteer Layer (qgis_puppeteer)</text>
+  <text x="55" y="492" font-family="sans-serif" font-size="11" fill="#558b2f">(MCP 非依存。誰が叩いても共通の自動化基盤)</text>
+
+  <!-- ===== Top: External entry points ===== -->
+  <!-- Claude Desktop -->
+  <rect x="80" y="100" width="260" height="90" rx="8" fill="#e8f0fe" stroke="#4285f4" stroke-width="2"/>
+  <text x="210" y="130" text-anchor="middle" font-family="sans-serif" font-size="16" font-weight="bold" fill="#1a73e8">Claude Desktop</text>
+  <text x="210" y="152" text-anchor="middle" font-family="sans-serif" font-size="12" fill="#444">LLM UI (ユーザー操作)</text>
+  <text x="210" y="172" text-anchor="middle" font-family="sans-serif" font-size="11" fill="#888">Code / Chat</text>
+
+  <!-- Pytest -->
+  <rect x="950" y="100" width="260" height="90" rx="8" fill="#fce8e6" stroke="#ea4335" stroke-width="2"/>
+  <text x="1080" y="130" text-anchor="middle" font-family="sans-serif" font-size="16" font-weight="bold" fill="#c5221f">pytest (E2E)</text>
+  <text x="1080" y="152" text-anchor="middle" font-family="sans-serif" font-size="12" fill="#444">外部プロセス</text>
+  <text x="1080" y="172" text-anchor="middle" font-family="sans-serif" font-size="11" fill="#888">uv run pytest test_e2e/</text>
+
+  <!-- ===== McpGateway block (inside MCP layer) ===== -->
+  <rect x="80" y="270" width="500" height="130" rx="8" fill="#fff4e5" stroke="#f9a825" stroke-width="2.5"/>
+
+  <!-- External MCP identity badge -->
+  <rect x="100" y="290" width="200" height="95" rx="6" fill="#fffde7" stroke="#f9a825" stroke-width="1.5" stroke-dasharray="3 3"/>
+  <text x="200" y="312" text-anchor="middle" font-family="sans-serif" font-size="11" font-weight="bold" fill="#a16800">外部 MCP 識別子</text>
+  <text x="200" y="336" text-anchor="middle" font-family="monospace" font-size="16" font-weight="bold" fill="#b45309">qgis-puppeteer</text>
+  <text x="200" y="358" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#a16800">claude_desktop_config.json</text>
+  <text x="200" y="374" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#a16800">の mcpServers の key</text>
+
+  <!-- McpGateway internal class -->
+  <rect x="320" y="290" width="240" height="95" rx="6" fill="#ffe0b2" stroke="#ef6c00" stroke-width="2"/>
+  <text x="440" y="314" text-anchor="middle" font-family="sans-serif" font-size="16" font-weight="bold" fill="#e65100">McpGateway</text>
+  <text x="440" y="334" text-anchor="middle" font-family="sans-serif" font-size="11" fill="#666">MCP サーバープロセス</text>
+  <text x="440" y="352" text-anchor="middle" font-family="sans-serif" font-size="11" fill="#666">MCP (stdio) ⇄ WS 変換</text>
+  <text x="440" y="370" text-anchor="middle" font-family="monospace" font-size="10" fill="#888">qgis_puppeteer.gateways.mcp</text>
+
+  <!-- ===== AutomationClient (inside automation layer) ===== -->
+  <rect x="930" y="300" width="290" height="100" rx="8" fill="#e8f5e9" stroke="#2e7d32" stroke-width="2.5"/>
+  <text x="1075" y="328" text-anchor="middle" font-family="sans-serif" font-size="18" font-weight="bold" fill="#1b5e20">AutomationClient</text>
+  <text x="1075" y="350" text-anchor="middle" font-family="sans-serif" font-size="12" fill="#444">自動化クライアント</text>
+  <text x="1075" y="368" text-anchor="middle" font-family="sans-serif" font-size="11" fill="#666">WS クライアントラッパ</text>
+  <text x="1075" y="388" text-anchor="middle" font-family="monospace" font-size="10" fill="#888">qgis_puppeteer.AutomationClient</text>
+
+  <!-- Arrows: Claude -> qgis-puppeteer (the external-visible face) -->
+  <line x1="210" y1="190" x2="200" y2="288" stroke="#4285f4" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <text x="225" y="235" font-family="sans-serif" font-size="11" fill="#1a73e8" font-weight="600">MCP (stdio)</text>
+  <text x="225" y="250" font-family="sans-serif" font-size="10" fill="#1a73e8">mcp__qgis-puppeteer__*</text>
+
+  <!-- Arrows: Pytest -> AutomationClient -->
+  <line x1="1080" y1="190" x2="1075" y2="298" stroke="#ea4335" stroke-width="2" marker-end="url(#arrow-red)"/>
+  <text x="1095" y="235" font-family="sans-serif" font-size="11" fill="#c5221f" font-weight="600">import / spawn</text>
+
+  <!-- ===== Hub (center of automation layer) ===== -->
+  <rect x="500" y="540" width="300" height="110" rx="12" fill="#c8e6c9" stroke="#2e7d32" stroke-width="3"/>
+  <text x="650" y="576" text-anchor="middle" font-family="sans-serif" font-size="24" font-weight="bold" fill="#1b5e20">Hub</text>
+  <text x="650" y="599" text-anchor="middle" font-family="sans-serif" font-size="12" fill="#444">中央集約プロセス (単一ポート :9876)</text>
+  <text x="650" y="617" text-anchor="middle" font-family="sans-serif" font-size="11" fill="#666">McpGateway / Client ⇄ Worker ルーティング</text>
+  <text x="650" y="635" text-anchor="middle" font-family="monospace" font-size="10" fill="#888">qgis_puppeteer.Hub</text>
+
+  <!-- Arrows: McpGateway -> Hub -->
+  <line x1="440" y1="385" x2="510" y2="560" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow-gray)"/>
+  <text x="380" y="480" font-family="sans-serif" font-size="11" fill="#455a64" font-weight="600">WebSocket</text>
+
+  <!-- Arrows: AutomationClient -> Hub -->
+  <line x1="930" y1="380" x2="790" y2="560" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow-gray)"/>
+  <text x="860" y="480" font-family="sans-serif" font-size="11" fill="#455a64" font-weight="600">WebSocket</text>
+
+  <!-- ===== Worker A + QGIS A ===== -->
+  <rect x="80" y="710" width="220" height="100" rx="8" fill="#ede7f6" stroke="#6a1b9a" stroke-width="2"/>
+  <text x="190" y="740" text-anchor="middle" font-family="sans-serif" font-size="16" font-weight="bold" fill="#4a148c">Worker</text>
+  <text x="190" y="760" text-anchor="middle" font-family="sans-serif" font-size="12" fill="#444">QGIS-A プラグイン</text>
+  <text x="190" y="780" text-anchor="middle" font-family="sans-serif" font-size="11" fill="#666">Hub に dial out</text>
+  <text x="190" y="798" text-anchor="middle" font-family="monospace" font-size="10" fill="#888">plugins/qgis_puppet/</text>
+
+  <rect x="80" y="822" width="220" height="40" rx="6" fill="#f5f5f5" stroke="#9e9e9e" stroke-width="1.5" stroke-dasharray="4"/>
+  <text x="190" y="846" text-anchor="middle" font-family="sans-serif" font-size="12" font-weight="600" fill="#616161">QGIS-A (label=A)</text>
+
+  <line x1="190" y1="810" x2="190" y2="822" stroke="#9e9e9e" stroke-width="1.5"/>
+
+  <!-- ===== Worker B + QGIS B ===== -->
+  <rect x="540" y="710" width="220" height="100" rx="8" fill="#ede7f6" stroke="#6a1b9a" stroke-width="2"/>
+  <text x="650" y="740" text-anchor="middle" font-family="sans-serif" font-size="16" font-weight="bold" fill="#4a148c">Worker</text>
+  <text x="650" y="760" text-anchor="middle" font-family="sans-serif" font-size="12" fill="#444">QGIS-B プラグイン</text>
+  <text x="650" y="780" text-anchor="middle" font-family="sans-serif" font-size="11" fill="#666">Hub に dial out</text>
+  <text x="650" y="798" text-anchor="middle" font-family="monospace" font-size="10" fill="#888">plugins/qgis_puppet/</text>
+
+  <rect x="540" y="822" width="220" height="40" rx="6" fill="#f5f5f5" stroke="#9e9e9e" stroke-width="1.5" stroke-dasharray="4"/>
+  <text x="650" y="846" text-anchor="middle" font-family="sans-serif" font-size="12" font-weight="600" fill="#616161">QGIS-B (label=B)</text>
+
+  <line x1="650" y1="810" x2="650" y2="822" stroke="#9e9e9e" stroke-width="1.5"/>
+
+  <!-- ===== Worker C + QGIS C ===== -->
+  <rect x="1000" y="710" width="220" height="100" rx="8" fill="#ede7f6" stroke="#6a1b9a" stroke-width="2"/>
+  <text x="1110" y="740" text-anchor="middle" font-family="sans-serif" font-size="16" font-weight="bold" fill="#4a148c">Worker</text>
+  <text x="1110" y="760" text-anchor="middle" font-family="sans-serif" font-size="12" fill="#444">QGIS-C プラグイン</text>
+  <text x="1110" y="780" text-anchor="middle" font-family="sans-serif" font-size="11" fill="#666">Hub に dial out</text>
+  <text x="1110" y="798" text-anchor="middle" font-family="monospace" font-size="10" fill="#888">plugins/qgis_puppet/</text>
+
+  <rect x="1000" y="822" width="220" height="40" rx="6" fill="#f5f5f5" stroke="#9e9e9e" stroke-width="1.5" stroke-dasharray="4"/>
+  <text x="1110" y="846" text-anchor="middle" font-family="sans-serif" font-size="12" font-weight="600" fill="#616161">QGIS-C (label=C)</text>
+
+  <line x1="1110" y1="810" x2="1110" y2="822" stroke="#9e9e9e" stroke-width="1.5"/>
+
+  <!-- ===== Worker -> Hub arrows ===== -->
+  <line x1="270" y1="710" x2="510" y2="638" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow-gray)"/>
+  <text x="315" y="690" font-family="sans-serif" font-size="11" fill="#455a64" font-weight="600">WS (Worker → Hub)</text>
+
+  <line x1="650" y1="710" x2="650" y2="652" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow-gray)"/>
+  <text x="665" y="685" font-family="sans-serif" font-size="11" fill="#455a64" font-weight="600">WS</text>
+
+  <line x1="1030" y1="710" x2="790" y2="638" stroke="#546e7a" stroke-width="2" marker-end="url(#arrow-gray)"/>
+  <text x="890" y="690" font-family="sans-serif" font-size="11" fill="#455a64" font-weight="600">WS (Worker → Hub)</text>
+</svg>
