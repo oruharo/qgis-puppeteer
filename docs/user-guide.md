@@ -583,6 +583,31 @@ result = qgis.call("qgis_check_actionability", {
 `expect()` の `to_be_visible()` / `to_be_enabled()` も同 RPC を再利用しており、
 selector ambiguous は即時 abort される。
 
+### `qgis_click_widget` / `qgis_set_widget_value` のエラーコード
+
+これらの低レベル RPC は失敗時に **例外を投げず** `{"success": false, "error": "<code>"}`
+を返す（呼び出し側で分岐する想定）。Locator (`click()` / `fill()` 等) を使う場合は
+auto-wait で吸収されるか、対応する例外に変換される。
+
+| `error` コード | 発生 RPC | 意味 | Locator での扱い |
+|---|---|---|---|
+| `widget_not_found` | 両方 | scope 内に該当 widget が無い | `_wait_actionable` が `exists=False` と見て poll を継続、timeout で `WidgetNotActionableError` |
+| `selector_ambiguous` | 両方 | 複数マッチ + `index` 未指定（strict mode） | poll を続けず即 `SelectorAmbiguousError` |
+| `widget_disabled` | 両方 | `widget.isEnabled() == False` | poll で待機。timeout 内に enabled になれば成功 |
+| `widget_readonly` | set のみ | `isReadOnly() == True` の input への書き込み | `fill()` は `editable=True` を auto-wait |
+| `widget_not_clickable` | click のみ | `QAbstractButton` / `QAction` / `click()` 持ちのいずれでもない | 例外なくそのまま返る |
+| `combo_item_not_found` | set のみ | `QComboBox` に該当テキストが無い | 例外なくそのまま返る |
+| `tab_not_found` | set のみ | `QTabWidget` に該当タブが無い | 例外なくそのまま返る |
+| `list_item_not_found` | set のみ | `QListWidget` に該当アイテムが無い | 例外なくそのまま返る |
+| `unsupported_widget_type` | set のみ | 値設定に未対応の widget クラス | 例外なくそのまま返る |
+| `set_value_failed` | set のみ | setter 内部で例外（`message` フィールドに詳細） | 例外なくそのまま返る |
+| `row_index_required` | set のみ | View 系に int 以外の値を渡した | 例外なくそのまま返る |
+| `no_model` | set のみ | View に model が未設定 | 例外なくそのまま返る |
+
+**重要**: `qgis_click_widget` を直接呼ぶとき disabled な widget は **即座に
+`widget_disabled` で返り、`click()` は呼ばれない**。リトライしないので、
+非同期で enabled に変わるのを待ちたい場合は Locator (`click()`) を使う。
+
 ### scope の挙動
 
 - **`modal`**（既定）: `activeModalWidget()` 配下を検索。なければ
@@ -1112,6 +1137,26 @@ await client.call("qgis_clear_session_permissions")
 1. `qgis_snapshot_ui` で UI ツリーをダンプして objectName / class を確認
 2. `scope="modal"` で見つからない場合 `"active_window"` や `"any"` を試す
 3. `root_object_name="QgisApp"` を付けて main window scope に切り替え
+
+### `widget_disabled`
+
+**症状**: `qgis_click_widget` / `qgis_set_widget_value` で
+`error: "widget_disabled"`、または Locator が `WidgetNotActionableError`
+（メッセージに `enabled=False`）。
+
+**原因**: 対象 widget が `isEnabled() == False`。前段の入力が満たされていない、
+非同期処理中で操作禁止になっている、UI 状態の更新待ち、等。
+
+**対処**:
+
+1. 低レベル RPC は **即返り・リトライ無し**。`Locator.click()` を使えば
+   auto-wait で enabled になるのを待つ（既定 5s）
+2. 待っても enabled にならない場合は **前提条件が欠けている**ので、UI フロー
+   を見直す（必須項目の入力、別ウィジェットの先行操作 等）
+3. `qgis_check_actionability` を 1 回呼んで `{enabled: bool, ...}` を確認すると
+   切り分けが速い
+4. snapshot の各ノードに `enabled` フィールドが入っているので
+   `qgis_snapshot_ui` で全体を見渡すのも有効
 
 ### `widget_readonly`
 
