@@ -125,6 +125,42 @@ def snapshot_ui(
     return result
 
 
+def _resolve_actionable_widget(selector: dict) -> tuple[QWidget | None, dict | None]:
+    """Resolve selector and apply common preconditions for click/set 系 RPC。
+
+    `_find_widget` 失敗時のエラーコード変換（``selector_ambiguous`` /
+    ``widget_not_found``）と ``isEnabled()`` チェックをまとめる。
+
+    Returns:
+        ``(widget, None)`` 成功時、または ``(None, error_dict)`` 失敗時。
+        ``error_dict`` は ``{"success": False, "error": ..., ...}`` 形式で
+        そのまま RPC 応答として返せる。
+    """
+    widget, diagnostics = _find_widget(selector)
+    if widget is None:
+        # Strict mode の ambiguous は別エラーコードで返す（caller / Locator が
+        # 「selector を直せ」と即判断できるよう）
+        error_code = (
+            "selector_ambiguous"
+            if diagnostics.get("reason") == "selector_ambiguous"
+            else "widget_not_found"
+        )
+        return None, {
+            "success": False,
+            "error": error_code,
+            "diagnostics": diagnostics,
+        }
+
+    if not widget.isEnabled():
+        return None, {
+            "success": False,
+            "error": "widget_disabled",
+            "widget": _widget_summary(widget),
+        }
+
+    return widget, None
+
+
 def click_widget(selector: dict, iface=None) -> dict:
     """Click a widget located by selector.
 
@@ -136,27 +172,9 @@ def click_widget(selector: dict, iface=None) -> dict:
         Dictionary with success flag and widget metadata.
     """
     del iface  # unused
-    widget, diagnostics = _find_widget(selector)
-    if widget is None:
-        # Strict mode の ambiguous は別エラーコードで返す（caller / Locator が
-        # 「selector を直せ」と即判断できるよう）
-        error_code = (
-            "selector_ambiguous"
-            if diagnostics.get("reason") == "selector_ambiguous"
-            else "widget_not_found"
-        )
-        return {
-            "success": False,
-            "error": error_code,
-            "diagnostics": diagnostics,
-        }
-
-    if not widget.isEnabled():
-        return {
-            "success": False,
-            "error": "widget_disabled",
-            "widget": _widget_summary(widget),
-        }
+    widget, error = _resolve_actionable_widget(selector)
+    if error is not None:
+        return error
 
     if isinstance(widget, QAbstractButton):
         widget.click()
@@ -190,25 +208,9 @@ def set_widget_value(selector: dict, value: Any, iface=None) -> dict:
         Dictionary with success flag, prior value, and widget metadata.
     """
     del iface
-    widget, diagnostics = _find_widget(selector)
-    if widget is None:
-        error_code = (
-            "selector_ambiguous"
-            if diagnostics.get("reason") == "selector_ambiguous"
-            else "widget_not_found"
-        )
-        return {
-            "success": False,
-            "error": error_code,
-            "diagnostics": diagnostics,
-        }
-
-    if not widget.isEnabled():
-        return {
-            "success": False,
-            "error": "widget_disabled",
-            "widget": _widget_summary(widget),
-        }
+    widget, error = _resolve_actionable_widget(selector)
+    if error is not None:
+        return error
 
     # readOnly な input への setValue は Qt 側で no-op になる（例: QLineEdit の
     # setText が値を変えない）が、テスト側からは「成功した」ように見えて
@@ -647,79 +649,8 @@ def _find_widget(selector: dict) -> tuple[QWidget | None, dict]:
     if not roots:
         return None, {"reason": "no_root_widget", "scope": scope}
 
-    object_name = selector.get("object_name")
-    text = selector.get("text")
-    class_name = selector.get("class")
-    title = selector.get("title")
-    placeholder = selector.get("placeholder")
-    label_text = selector.get("label")
-
-    # `label` 指定があれば buddy map を 1 度だけ構築する。`label` 未指定なら
-    # 不要なツリー走査を避けるため lazily に解決する。
-    buddy_map: dict[int, str] | None = None
-
-    candidates: list[QWidget] = []
-    for root in roots:
-        for widget in _walk_widgets(root):
-            if class_name is not None and type(widget).__name__ != class_name:
-                continue
-            if object_name is not None and widget.objectName() != object_name:
-                continue
-            if text is not None:
-                widget_text = _widget_text(widget)
-                if widget_text != text:
-                    continue
-            if title is not None and (
-                not hasattr(widget, "windowTitle") or widget.windowTitle() != title
-            ):
-                continue
-            if placeholder is not None:
-                if not hasattr(widget, "placeholderText"):
-                    continue
-                try:
-                    if widget.placeholderText() != placeholder:
-                        continue
-                except Exception:  # noqa: BLE001
-                    continue
-            if label_text is not None:
-                if buddy_map is None:
-                    buddy_map = _build_buddy_label_map(roots)
-                if buddy_map.get(id(widget)) != label_text:
-                    continue
-            candidates.append(widget)
-
-        # Also search QActions (not QWidgets) under this root.
-        if class_name in (None, "QAction") and (object_name is not None or text is not None):
-            for action in root.findChildren(QAction):
-                if object_name is not None and action.objectName() != object_name:
-                    continue
-                if text is not None and action.text() != text:
-                    continue
-                if class_name is not None and class_name != "QAction":
-                    continue
-                candidates.append(action)  # QAction isn't a QWidget but we treat it similarly
-
-    if not candidates:
-        return None, {
-            "reason": "no_match",
-            "selector": selector,
-            "searched_roots": [_widget_summary(r) for r in roots],
-        }
-
-    # Strict mode と index 解釈は共通ロジック (selector_match.resolve_with_index)
-    # に委譲。snapshot 側 (_find_in_snapshot) と完全に同じ semantics を保つ。
-    # records は widget_summary（後段の diagnostics に出すために必要）。
-    records = [_widget_summary(c) for c in candidates]
-    chosen_record, diagnostics = resolve_with_index(records, selector)
-    if chosen_record is None:
-        if diagnostics.get("reason") == "selector_ambiguous":
-            diagnostics["selector"] = selector
-        return None, diagnostics
-
-    # records と candidates は同じ index 並びなので、確定 record の位置を取って
-    # 元の widget を返す。`index` 未指定単一マッチも `index=N` 指定も対応できる。
-    chosen_index = records.index(chosen_record)
-    return candidates[chosen_index], diagnostics
+    candidates = _collect_candidates(roots, selector)
+    return _finalize_match(candidates, selector, roots)
 
 
 def _find_widget_within(root: QWidget, selector: dict) -> tuple[QWidget | None, dict]:
@@ -750,7 +681,25 @@ def _find_widget_within(root: QWidget, selector: dict) -> tuple[QWidget | None, 
         assert parent_widget is not None
         return _find_widget_within(parent_widget, leaf)
 
-    # match keys（_find_widget と同一）
+    roots = [root]
+    candidates = _collect_candidates(roots, selector)
+    return _finalize_match(candidates, selector, roots)
+
+
+def _collect_candidates(roots: list[QWidget], selector: dict) -> list[QWidget]:
+    """selector の match キーで roots 配下の QWidget / QAction を絞り込む。
+
+    `_find_widget` と `_find_widget_within` で共有する純粋なフィルタ。scope /
+    `root_object_name` / `index` / strict mode は呼び出し側の責務。
+
+    `label` 指定があれば buddy map を 1 度だけ lazy 構築する（無指定なら
+    余計なツリー走査を発生させない）。
+
+    QAction は QWidget ツリーに乗らないので `findChildren(QAction)` で別途
+    収集する（class 指定が None / "QAction" のときのみ、かつ object_name / text
+    の少なくとも一方が指定されているとき：素のフィルタなしで全 QAction を
+    返すのは候補爆発するため）。
+    """
     object_name = selector.get("object_name")
     text = selector.get("text")
     class_name = selector.get("class")
@@ -758,53 +707,63 @@ def _find_widget_within(root: QWidget, selector: dict) -> tuple[QWidget | None, 
     placeholder = selector.get("placeholder")
     label_text = selector.get("label")
 
-    roots = [root]
     buddy_map: dict[int, str] | None = None
     candidates: list[QWidget] = []
-    for widget in _walk_widgets(root):
-        if class_name is not None and type(widget).__name__ != class_name:
-            continue
-        if object_name is not None and widget.objectName() != object_name:
-            continue
-        if text is not None:
-            widget_text = _widget_text(widget)
-            if widget_text != text:
+    for root in roots:
+        for widget in _walk_widgets(root):
+            if class_name is not None and type(widget).__name__ != class_name:
                 continue
-        if title is not None and (
-            not hasattr(widget, "windowTitle") or widget.windowTitle() != title
-        ):
-            continue
-        if placeholder is not None:
-            if not hasattr(widget, "placeholderText"):
+            if object_name is not None and widget.objectName() != object_name:
                 continue
-            try:
-                if widget.placeholderText() != placeholder:
+            if text is not None:
+                widget_text = _widget_text(widget)
+                if widget_text != text:
                     continue
-            except Exception:  # noqa: BLE001
+            if title is not None and (
+                not hasattr(widget, "windowTitle") or widget.windowTitle() != title
+            ):
                 continue
-        if label_text is not None:
-            if buddy_map is None:
-                buddy_map = _build_buddy_label_map(roots)
-            if buddy_map.get(id(widget)) != label_text:
-                continue
-        candidates.append(widget)
+            if placeholder is not None:
+                if not hasattr(widget, "placeholderText"):
+                    continue
+                try:
+                    if widget.placeholderText() != placeholder:
+                        continue
+                except Exception:  # noqa: BLE001
+                    continue
+            if label_text is not None:
+                if buddy_map is None:
+                    buddy_map = _build_buddy_label_map(roots)
+                if buddy_map.get(id(widget)) != label_text:
+                    continue
+            candidates.append(widget)
 
-    # QAction も拾う（_find_widget と同様）
-    if class_name in (None, "QAction") and (object_name is not None or text is not None):
-        for action in root.findChildren(QAction):
-            if object_name is not None and action.objectName() != object_name:
-                continue
-            if text is not None and action.text() != text:
-                continue
-            if class_name is not None and class_name != "QAction":
-                continue
-            candidates.append(action)
+        if class_name in (None, "QAction") and (object_name is not None or text is not None):
+            for action in root.findChildren(QAction):
+                if object_name is not None and action.objectName() != object_name:
+                    continue
+                if text is not None and action.text() != text:
+                    continue
+                if class_name is not None and class_name != "QAction":
+                    continue
+                candidates.append(action)
+    return candidates
 
+
+def _finalize_match(
+    candidates: list[QWidget], selector: dict, roots: list[QWidget]
+) -> tuple[QWidget | None, dict]:
+    """候補リスト → 確定 widget + diagnostics への変換（strict / index 解釈含む）。
+
+    `selector_match.resolve_with_index` に委譲することで snapshot 側
+    (`_find_in_snapshot`) と同一 semantics を保証する。``records`` は
+    `_widget_summary` 形式（diagnostics の `candidates` に出す前提）。
+    """
     if not candidates:
         return None, {
             "reason": "no_match",
             "selector": selector,
-            "searched_roots": [_widget_summary(root)],
+            "searched_roots": [_widget_summary(r) for r in roots],
         }
 
     records = [_widget_summary(c) for c in candidates]
@@ -814,6 +773,8 @@ def _find_widget_within(root: QWidget, selector: dict) -> tuple[QWidget | None, 
             diagnostics["selector"] = selector
         return None, diagnostics
 
+    # records と candidates は同じ index 並びなので、確定 record の位置を取って
+    # 元の widget を返す。`index` 未指定単一マッチも `index=N` 指定も対応できる。
     chosen_index = records.index(chosen_record)
     return candidates[chosen_index], diagnostics
 
