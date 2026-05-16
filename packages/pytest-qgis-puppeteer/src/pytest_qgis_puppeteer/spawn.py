@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from qgis_puppeteer.launcher import generate_launch_token, inject_launch_token
+
 if TYPE_CHECKING:
     from pytest_qgis_puppeteer.automation_client import E2EAutomationClient
 
@@ -147,12 +149,17 @@ def spawn_qgis(
         )
 
     cmd = _build_command(qgis_bin=qgis_bin, args=args, command=command)
+    # ADR-0005 D6: launch_token を発番・注入して決定的に相関する（pid diff の
+    # heuristic を廃止。pid 再利用 / 並列 spawn race に強い）。
+    launch_token = generate_launch_token()
     spawn_env = _build_env(base=os.environ, hub_port=hub_port, user_env=env)
+    spawn_env = inject_launch_token(spawn_env, launch_token, label=label)
 
-    # spawn 前の instance を記録しておき、後で diff を取って自分の pid を pin する
-    pre_existing_pids = {info.pid for info in automation_client.list_instances()}
-
-    logger.info("spawn_qgis: launching %s", " ".join(str(c) for c in cmd))
+    logger.info(
+        "spawn_qgis: launching %s (launch_token=%s)",
+        " ".join(str(c) for c in cmd),
+        launch_token,
+    )
     proc = subprocess.Popen(
         cmd,
         env=spawn_env,
@@ -165,10 +172,9 @@ def spawn_qgis(
     drain_threads = _start_drain_threads(proc, captured_stdout, captured_stderr)
 
     try:
-        instance_id = _wait_for_worker_by_pid(
+        instance_id = _wait_for_worker_by_token(
             automation_client,
-            pid=proc.pid,
-            pre_existing_pids=pre_existing_pids,
+            launch_token=launch_token,
             timeout_s=register_timeout_s,
         )
     except WorkerRegisterTimeout:
@@ -317,28 +323,27 @@ def _join_drain_threads(threads: list[threading.Thread], *, timeout_s: float) ->
         t.join(timeout=timeout_s)
 
 
-def _wait_for_worker_by_pid(
+def _wait_for_worker_by_token(
     automation_client: E2EAutomationClient,
     *,
-    pid: int,
-    pre_existing_pids: set[int],
+    launch_token: str,
     timeout_s: float,
     poll_interval_s: float = 0.25,
 ) -> str:
-    """``list_instances()`` を poll し、自分の pid に一致する Worker の instance_id を返す。
+    """``list_instances()`` を poll し、自分の launch_token に一致する Worker を返す。
 
-    spawn 前後の diff で「新規追加され、かつ pid が proc.pid と一致する」ものだけを
-    自分の Worker と認める。multi-instance / xdist 並列下の race を避けるために
-    pid フィルタが必須（ADR-0004 §"`instance_id` の解決方法"）。
+    ADR-0005 D6: pid diff heuristic を廃止し、helper が注入した
+    ``launch_token`` で **決定的** に相関する。pid 再利用や xdist 並列 spawn の
+    race に左右されない（U9）。
     """
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         for info in automation_client.list_instances():
-            if info.pid == pid and info.pid not in pre_existing_pids:
+            if getattr(info, "launch_token", None) == launch_token:
                 return info.instance_id
         time.sleep(poll_interval_s)
     raise WorkerRegisterTimeout(
-        f"QGIS subprocess (pid={pid}) did not register to Hub within {timeout_s}s"
+        f"QGIS subprocess (launch_token={launch_token}) did not register to Hub within {timeout_s}s"
     )
 
 

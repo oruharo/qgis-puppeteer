@@ -128,6 +128,11 @@ class WorkerConfig:
     pid: int
     label: str | None = None
     project: str | None = None
+    # ADR-0005 D6: 公式 launch helper が QPUPPETEER_LAUNCH_TOKEN 経由で
+    # 注入する相関トークン。helper 非経由起動なら None。
+    launch_token: str | None = None
+    # ADR-0005 D4: active 同 label 衝突ポリシー（"takeover"/"suffix"/None=reject）。
+    conflict_policy: str | None = None
 
 
 # ============================================================
@@ -241,6 +246,8 @@ class WorkerState:
             label=self.config.label,
             project=self.config.project,
             previous_instance_id=self.previous_instance_id,
+            launch_token=self.config.launch_token,
+            conflict_policy=self.config.conflict_policy,
         )
 
     def on_register_ack(self, ack: RegisterAck) -> None:

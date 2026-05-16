@@ -983,8 +983,12 @@ start qgis-bin.exe --profile=qgis-b
 ```python
 # 一覧
 instances = await client.list_instances()
-# [InstanceInfo(instance_id="worker-a-1234", label="A", pid=1234, project="..."),
-#  InstanceInfo(instance_id="worker-b-5678", label="B", pid=5678, project="...")]
+# [InstanceInfo(instance_id="w-7k3p9q2m4x8a", label="A", pid=1234, project="...",
+#               launch_token=None, registered_seq=1),
+#  InstanceInfo(instance_id="w-2f5e1c8b0d6a", label="B", pid=5678, project="...",
+#               launch_token="lt-...", registered_seq=2)]
+# instance_id は pid 非依存の不透明 nonce（ADR-0005）。再起動で変わるので
+# ハードコードせず label / @label / launch_token で参照する。
 
 # A に切り替え
 await client.call("qgis_use_instance", {"label": "A"})
@@ -1016,6 +1020,63 @@ def test_cross_instance(qgis_a, qgis_b):
 `spawn_qgis()` で test 内から QGIS を立てる場合（ADR-0004、Phase 1 実装済）は
 [Quickstart §7](#quickstart-pytest-e2e) を参照。`per-call` の `instance=` 指定 >
 sticky `use_instance()` > Hub 既定、の優先順位で routing される。
+
+### 同一 label での連続再起動（ADR-0005）
+
+開発ループで「同じ label のまま QGIS を kill → 再起動」を繰り返すのは
+**一級サポートされたフロー**。旧プロセスが Hub の grace 期間中でも、新プロセス
+は衝突せず label を**継承（SUPERSEDE）**して登録される。
+
+- `qgis_use_instance("A")` は一度呼べば再起動を跨いで有効。sticky は
+  instance_id を凍結せず **label を保持**し、dispatch ごとに Hub が
+  「現在 live な A」へ再解決する（再起動の谷間だけ `instance_not_found`）。
+- `instance_id` は再起動で必ず変わる（不透明 nonce）。固定参照しないこと。
+- selector 解決順: `launch_token` > `@label` > `label` > `instance_id` >
+  project basename（`pid` 指定は廃止）。
+
+### 公式 launch helper と `launch_token`（決定的な相関）
+
+「自分が起動したインスタンスを確実に特定したい」自動化では、素の QGIS を
+直接起動せず **公式 launch helper** を使う。helper が相関トークンを発番・
+env 注入し、stdout に返す:
+
+```bat
+qgis-puppeteer-launch --label A -- qgis-bin.exe --profile=qgis-a
+:: stdout: launch_token=lt-7k3p9q2m4x8a0b1c
+```
+
+返ってきた `lt-...` を selector に渡せば、pid 再利用や同時起動に左右されず
+**決定的**にそのインスタンスへ到達できる:
+
+```python
+token = "lt-7k3p9q2m4x8a0b1c"  # helper の stdout から取得
+info = await client.wait_for_instance(token, timeout_s=30)  # register 待ち
+await client.call("qgis_list_layers", {"instance": token})
+```
+
+pytest の `spawn_qgis()` は内部でこの仕組みを使い、pid diff ではなく
+`launch_token` で spawn 分を相関する（ADR-0005 D6）。
+
+規約も token も無い手動起動では `client.current_max_seq()` → 起動依頼 →
+`client.wait_for_new_instance(since_seq)` で best-effort に拾えるが、同時
+起動が重なると取り違え得る（**racy**。helper 経由を推奨）。
+
+### 同時同 label 衝突のポリシー（env で選択）
+
+2 台が**同時に active** な同 label を登録した場合の挙動を起動時 env で選ぶ:
+
+| env | モード | 挙動 |
+|---|---|---|
+| （無指定） | `reject`（既定） | `label_conflict` で 2 台目を弾く（事故を気づかせる） |
+| `QPUPPETEER_WORKER_TAKEOVER=1` | `takeover` | 既存 active を強制 evict し新 worker が label を奪取（kill -9 直後の確実な継承 / 開発ループ向け） |
+| `QPUPPETEER_WORKER_LABEL_SUFFIX=1` | `suffix` | `A (2)` 等へ自動 rename して登録（未登録放置を避ける CI 探索向け） |
+
+連続再起動する開発では **label 明示 + `QPUPPETEER_WORKER_TAKEOVER=1`** を推奨。
+takeover を既定にしないのは同時 multi-instance の安全性を守るため。
+
+なお Hub は WS ping/pong で active の生存を監視し、kill -9 等で TCP が
+half-open のまま残った旧 entry を ~20s で grace へ落とす（`reject` 既定でも
+少し待てば SUPERSEDE で素直に継承できる）。
 
 ---
 
@@ -1078,7 +1139,10 @@ await client.call("qgis_clear_session_permissions")
 
 | 変数 | 既定 | 用途 |
 |---|---|---|
-| `QPUPPETEER_WORKER_LABEL` | — | self-reported label。空なら Hub が自動採番 |
+| `QPUPPETEER_WORKER_LABEL` | — | self-reported label（安定ロール名）。空なら Hub が自動採番 |
+| `QPUPPETEER_LAUNCH_TOKEN` | — | 公式 launch helper が注入する相関トークン（ADR-0005 D6）。通常は手で設定せず `qgis-puppeteer-launch` 経由 |
+| `QPUPPETEER_WORKER_TAKEOVER` | unset | `1` で同時同 label 衝突時に既存 active を奪取（ADR-0005 D4。連続再起動の開発ループ向け） |
+| `QPUPPETEER_WORKER_LABEL_SUFFIX` | unset | `1` で同時同 label 衝突時に `A (2)` 等へ自動 rename |
 | `QPUPPETEER_HUB_PYTHON` | — | Hub spawn 用 Python launcher を明示指定（自動検出失敗時） |
 | `QPUPPETEER_HUB_LOG_FILE` | `<TEMP>/qgis_puppet.spawn.log` | Hub subprocess の stdout/stderr 出力先 |
 | `QPUPPETEER_HUB_LOCK_PATH` | OS 一時ディレクトリ | Hub auto-spawn 用ロックファイル（port 別） |
@@ -1112,6 +1176,42 @@ await client.call("qgis_clear_session_permissions")
 ---
 
 ## Troubleshooting
+
+### `label_conflict`（同時同 label）
+
+**症状**: 起動した QGIS が登録されず（メッセージバー `register failed
+(label_conflict)`）、`list_instances` に出てこない。
+
+**原因**: 既に **active** な同 label の Worker が居る状態で、別プロセスが
+同じ `QPUPPETEER_WORKER_LABEL` で登録しようとした（ADR-0005 D4、既定
+`reject`）。連続再起動で起きる場合は、旧プロセスが kill -9 等で TCP
+half-open のまま active と誤認されている可能性。
+
+**対処**:
+
+1. 数十秒待つ → Hub の heartbeat sweep が旧 entry を grace へ落とし、
+   再登録が **SUPERSEDE** で素通りする
+2. 待てない開発ループは `QPUPPETEER_WORKER_TAKEOVER=1` で起動（旧 active を
+   強制的に明け渡す）
+3. 複数台を同時に動かしたい場合は label を別にする、または
+   `QPUPPETEER_WORKER_LABEL_SUFFIX=1`（`A (2)` 等へ自動 rename）
+4. 真に同時 2 台が同 label なのは設定ミス → どちらかの label を直す
+
+### 自分が起動した QGIS が特定できない（attribution）
+
+**症状**: 複数 QGIS がある中で「今 spawn した 1 台」を取り違える / 掴めない。
+
+**原因**: 素の `qgis-bin.exe` を label 規約なしで起動した（非制御 launch）。
+client は起動時点で identity を取得できず当て推量に頼っている。
+
+**対処**:
+
+1. **公式 launch helper を使う**: `qgis-puppeteer-launch --label A --
+   qgis-bin.exe ...` → stdout の `launch_token=lt-...` を
+   `client.wait_for_instance(token)` に渡せば決定的に特定できる
+2. pytest なら `spawn_qgis()`（内部で launch_token 相関）を使う
+3. helper を使えない場合は `current_max_seq()` →（起動）→
+   `wait_for_new_instance(since_seq)`。ただし同時起動が重なると racy
 
 ### `selector_ambiguous` エラー
 

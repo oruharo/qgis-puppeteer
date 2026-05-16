@@ -78,12 +78,27 @@ class ErrorCode(str, Enum):
 
 @dataclass(frozen=True)
 class InstanceInfo:
-    """list_instances のレスポンスで返される Worker インスタンス情報。"""
+    """list_instances のレスポンスで返される Worker インスタンス情報。
+
+    ADR-0005:
+        - ``instance_id`` は pid 非依存の不透明 nonce（``w-<base32>``）。
+        - ``pid`` は人間向け補助メタデータ（identity ではない）。
+        - ``launch_token`` は公式 launch helper が発番した相関ハンドル
+          （helper 経由起動でない場合 None）。
+        - ``registered_seq`` / ``registered_at`` は規約なし attribution 用の
+          best-effort 相関キー（単調増加連番 / 登録時刻）。
+    """
 
     instance_id: str
     label: str
     pid: int
     project: str | None = None
+    launch_token: str | None = None
+    registered_seq: int = 0
+    registered_at: float | None = None
+    # ADR-0005: label が worker により明示指定されたか（auto 採番でないか）。
+    # sticky の安定キー選択に使う（auto-label は再起動で変わるため不適）。
+    label_explicit: bool = False
 
 
 @dataclass(frozen=True)
@@ -120,6 +135,12 @@ class RegisterRequest:
     project: str | None = None
     started_at: str | None = None  # ISO 8601 文字列
     previous_instance_id: str | None = None
+    # ADR-0005 D6: 公式 launch helper が発番・env 注入した相関トークン。
+    # 半制御 launch での決定的 attribution / pid 非依存 resume キーに使う。
+    launch_token: str | None = None
+    # ADR-0005 D4: active 同 label 衝突時のポリシー。
+    # "reject"（既定 / None）/ "takeover" / "suffix"。worker 側 env で決まる。
+    conflict_policy: str | None = None
 
     @property
     def type(self) -> MessageType:
@@ -138,6 +159,9 @@ class RegisterAck:
     ok: bool
     instance_id: str | None = None
     resumed: bool = False
+    # ADR-0005 D2: 同一 label の grace 中 entry を継承（SUPERSEDE）して
+    # 新規登録した場合 True（U1 連続再起動の正常系）。
+    superseded: bool = False
     error: Error | None = None
 
     @property
@@ -352,6 +376,8 @@ def _build_message(msg_type: MessageType, payload: dict[str, Any]) -> Message:
             project=payload.get("project"),
             started_at=payload.get("started_at"),
             previous_instance_id=payload.get("previous_instance_id"),
+            launch_token=payload.get("launch_token"),
+            conflict_policy=payload.get("conflict_policy"),
         )
 
     if msg_type is MessageType.REGISTER_ACK:
@@ -360,6 +386,7 @@ def _build_message(msg_type: MessageType, payload: dict[str, Any]) -> Message:
             ok=bool(payload["ok"]),
             instance_id=payload.get("instance_id"),
             resumed=bool(payload.get("resumed", False)),
+            superseded=bool(payload.get("superseded", False)),
             error=_build_error(payload.get("error")),
         )
 
@@ -394,6 +421,10 @@ def _build_message(msg_type: MessageType, payload: dict[str, Any]) -> Message:
                 label=item["label"],
                 pid=int(item["pid"]),
                 project=item.get("project"),
+                launch_token=item.get("launch_token"),
+                registered_seq=int(item.get("registered_seq", 0)),
+                registered_at=item.get("registered_at"),
+                label_explicit=bool(item.get("label_explicit", False)),
             )
             for item in raw_instances
         ]

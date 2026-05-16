@@ -23,7 +23,7 @@ from pytest_qgis_puppeteer.spawn import (
     WorkerRegisterTimeout,
     _build_command,
     _build_env,
-    _wait_for_worker_by_pid,
+    _wait_for_worker_by_token,
     spawn_qgis,
 )
 
@@ -41,6 +41,7 @@ class _FakeInstance:
     instance_id: str
     pid: int
     label: str = ""
+    launch_token: str | None = None
 
 
 class _FakeAutomationClient:
@@ -53,16 +54,36 @@ class _FakeAutomationClient:
     def __init__(self) -> None:
         self._scripted: list[list[_FakeInstance]] = []
         self.execute_python_calls: list[dict[str, Any]] = []
+        self._popens: list[Any] | None = None
 
     def feed(self, *snapshots: list[_FakeInstance]) -> None:
         self._scripted.extend(snapshots)
 
+    def bind_popens(self, popens: list[Any]) -> None:
+        """ADR-0005 D6: spawn_qgis が注入した launch_token を fed instance に
+        反映できるよう、生成された _FakePopen list を結びつける。
+
+        feed() の scripted instance は token を事前に知り得ない（spawn 内部で
+        ランダム発番されるため）。list_instances() 時に最新 Popen の env から
+        QPUPPETEER_LAUNCH_TOKEN を読み、launch_token 未設定の instance に刻む。
+        """
+        self._popens = popens
+
+    def _current_token(self) -> str | None:
+        if not self._popens:
+            return None
+        return self._popens[-1].env.get("QPUPPETEER_LAUNCH_TOKEN")
+
     def list_instances(self) -> list[_FakeInstance]:
         if not self._scripted:
             return []
-        if len(self._scripted) == 1:
-            return self._scripted[0]
-        return self._scripted.pop(0)
+        snapshot = self._scripted[0] if len(self._scripted) == 1 else self._scripted.pop(0)
+        token = self._current_token()
+        if token is not None:
+            for inst in snapshot:
+                if inst.launch_token is None:
+                    inst.launch_token = token
+        return snapshot
 
     def execute_python(self, code: str, *, instance: str | None = None) -> dict:
         self.execute_python_calls.append({"code": code, "instance": instance})
@@ -77,8 +98,9 @@ class _FakePopen:
     合わせる。
     """
 
-    def __init__(self, pid: int = 12345) -> None:
+    def __init__(self, pid: int = 12345, env: dict[str, str] | None = None) -> None:
         self.pid = pid
+        self.env = env or {}
         self.returncode: int | None = None
         self.terminated = False
         self.killed = False
@@ -218,38 +240,36 @@ class TestBuildEnv:
 
 
 # ============================================================
-# _wait_for_worker_by_pid
+# _wait_for_worker_by_token（ADR-0005 D6）
 # ============================================================
 
 
-class TestWaitForWorkerByPid:
-    """pid フィルタによる instance_id 解決。"""
+class TestWaitForWorkerByToken:
+    """launch_token による決定的 instance_id 解決（pid diff heuristic を置換）。"""
 
-    def test_returns_instance_id_when_pid_matches(self) -> None:
+    def test_returns_instance_id_when_token_matches(self) -> None:
         client = _FakeAutomationClient()
-        client.feed([_FakeInstance(instance_id="inst-1", pid=12345)])
-        result = _wait_for_worker_by_pid(
+        client.feed([_FakeInstance(instance_id="inst-1", pid=12345, launch_token="lt-me")])
+        result = _wait_for_worker_by_token(
             client,  # type: ignore[arg-type]
-            pid=12345,
-            pre_existing_pids=set(),
+            launch_token="lt-me",
             timeout_s=1.0,
             poll_interval_s=0.01,
         )
         assert result == "inst-1"
 
-    def test_ignores_pre_existing_pid(self) -> None:
-        """spawn 前から居る pid は無視（multi-instance test での race 防止）。"""
+    def test_ignores_other_tokens_even_same_pid(self) -> None:
+        """pid が再利用されても token が違えば自分の Worker ではない。"""
         client = _FakeAutomationClient()
         client.feed(
             [
-                _FakeInstance(instance_id="other", pid=99999),
-                _FakeInstance(instance_id="mine", pid=12345),
+                _FakeInstance(instance_id="other", pid=12345, launch_token="lt-old"),
+                _FakeInstance(instance_id="mine", pid=12345, launch_token="lt-new"),
             ]
         )
-        result = _wait_for_worker_by_pid(
+        result = _wait_for_worker_by_token(
             client,  # type: ignore[arg-type]
-            pid=12345,
-            pre_existing_pids={99999},
+            launch_token="lt-new",
             timeout_s=1.0,
             poll_interval_s=0.01,
         )
@@ -259,23 +279,21 @@ class TestWaitForWorkerByPid:
         client = _FakeAutomationClient()
         client.feed([])  # 何も register されない
         with pytest.raises(WorkerRegisterTimeout, match="did not register"):
-            _wait_for_worker_by_pid(
+            _wait_for_worker_by_token(
                 client,  # type: ignore[arg-type]
-                pid=12345,
-                pre_existing_pids=set(),
+                launch_token="lt-missing",
                 timeout_s=0.2,
                 poll_interval_s=0.05,
             )
 
-    def test_skips_non_matching_pid(self) -> None:
-        """spawn 後に新規 pid が見えても自分の pid と違えば対象外。"""
+    def test_skips_tokenless_instances(self) -> None:
+        """launch_token を持たない（helper 非経由）instance は対象外。"""
         client = _FakeAutomationClient()
-        client.feed([_FakeInstance(instance_id="other", pid=99999)])
+        client.feed([_FakeInstance(instance_id="other", pid=99999, launch_token=None)])
         with pytest.raises(WorkerRegisterTimeout):
-            _wait_for_worker_by_pid(
+            _wait_for_worker_by_token(
                 client,  # type: ignore[arg-type]
-                pid=12345,
-                pre_existing_pids=set(),
+                launch_token="lt-x",
                 timeout_s=0.2,
                 poll_interval_s=0.05,
             )
@@ -355,7 +373,7 @@ class TestSpawnQgisContextManager:
         created: list[_FakePopen] = []
 
         def _fake_popen(*args: Any, **kwargs: Any) -> _FakePopen:
-            proc = _FakePopen()
+            proc = _FakePopen(env=kwargs.get("env"))
             created.append(proc)
             return proc
 
@@ -434,9 +452,9 @@ class TestSpawnQgisContextManager:
     ) -> None:
         monkeypatch.delenv("QPUPPETEER_E2E_USE_RUNNING_QGIS", raising=False)
         client = _FakeAutomationClient()
-        # 1 回目: 空（spawn 前）, 2 回目: 自分の pid が見える
+        client.bind_popens(mock_popen)
+        # 1 回目: register 後（launch_token が刻まれる）, 2 回目: teardown dangling
         client.feed(
-            [],  # spawn 前の pre_existing_pids 採取
             [_FakeInstance(instance_id="inst-1", pid=12345)],  # register 後
             [],  # teardown 時の dangling check
         )
@@ -461,8 +479,8 @@ class TestSpawnQgisContextManager:
     ) -> None:
         monkeypatch.delenv("QPUPPETEER_E2E_USE_RUNNING_QGIS", raising=False)
         client = _FakeAutomationClient()
+        client.bind_popens(mock_popen)
         client.feed(
-            [],
             [_FakeInstance(instance_id="inst-1", pid=12345)],
             [],
         )
@@ -507,8 +525,8 @@ class TestSpawnQgisContextManager:
         """teardown 時に Hub 側に instance が残っていれば remote exitQgis() を呼ぶ。"""
         monkeypatch.delenv("QPUPPETEER_E2E_USE_RUNNING_QGIS", raising=False)
         client = _FakeAutomationClient()
+        client.bind_popens(mock_popen)
         client.feed(
-            [],  # pre_existing_pids
             [_FakeInstance(instance_id="inst-1", pid=12345)],  # register 検出
             [_FakeInstance(instance_id="inst-1", pid=12345)],  # teardown 時もまだ残ってる
         )

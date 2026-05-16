@@ -82,9 +82,32 @@ logger = logging.getLogger("qgis_puppet.plugin")
 # ENV_HUB_LOG_FILE / ENV_HUB_PYTHON も plugin_helpers 側（PyQt5 非依存層）。
 ENV_HUB_ORIGIN = "QPUPPETEER_HUB_ORIGIN"
 ENV_WORKER_LABEL = "QPUPPETEER_WORKER_LABEL"
+# ADR-0005 D6: 公式 launch helper が注入する相関トークン。
+ENV_LAUNCH_TOKEN = "QPUPPETEER_LAUNCH_TOKEN"
+# ADR-0005 D4: active 同 label 衝突ポリシーの env スイッチ。
+ENV_WORKER_TAKEOVER = "QPUPPETEER_WORKER_TAKEOVER"
+ENV_WORKER_LABEL_SUFFIX = "QPUPPETEER_WORKER_LABEL_SUFFIX"
 ENV_HUB_LOCK_PATH = "QPUPPETEER_HUB_LOCK_PATH"
 
 DEFAULT_LOCK_FILENAME_TEMPLATE = "qgis_puppet-hub-{port}.lock"
+
+
+def _resolve_conflict_policy() -> str | None:
+    """ADR-0005 D4: env から active 同 label 衝突ポリシーを決める。
+
+    優先度: takeover > suffix > reject(None)。両方立っていれば takeover を採る
+    （より確実に label を奪取したい開発ループ意図とみなす）。値は ``"1"`` /
+    ``"true"`` / ``"yes"`` を真とする緩い判定。
+    """
+
+    def _truthy(name: str) -> bool:
+        return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+    if _truthy(ENV_WORKER_TAKEOVER):
+        return "takeover"
+    if _truthy(ENV_WORKER_LABEL_SUFFIX):
+        return "suffix"
+    return None
 
 
 def _is_external_owner_mode() -> bool:
@@ -136,6 +159,8 @@ class QgisPuppetPlugin:
         hub_url = _resolve_hub_url()
         origin = os.environ.get(ENV_HUB_ORIGIN, "http://localhost")
         label = os.environ.get(ENV_WORKER_LABEL) or None
+        launch_token = os.environ.get(ENV_LAUNCH_TOKEN) or None
+        conflict_policy = _resolve_conflict_policy()
         external_owner = _is_external_owner_mode()
 
         # subprocess の stdout/stderr を常にファイルに残す（DEVNULL にはしない）。
@@ -182,6 +207,8 @@ class QgisPuppetPlugin:
             hub_url=hub_url,
             origin=origin,
             label=label,
+            launch_token=launch_token,
+            conflict_policy=conflict_policy,
             project=self._current_project_path(),
             hub_lock_path=lock_path,
             hub_spawn_command=hub_spawn_command,

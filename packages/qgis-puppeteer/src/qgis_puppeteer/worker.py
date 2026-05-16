@@ -94,6 +94,8 @@ class Worker(QObject):
         pid: int | None = None,
         label: str | None = None,
         project: str | None = None,
+        launch_token: str | None = None,
+        conflict_policy: str | None = None,
         auto_reconnect: bool = True,
         reconnect_delay_ms: int = DEFAULT_RECONNECT_DELAY_MS,
         hub_lock_path: Path | None = None,
@@ -120,6 +122,8 @@ class Worker(QObject):
                 pid=pid if pid is not None else os.getpid(),
                 label=label,
                 project=project,
+                launch_token=launch_token,
+                conflict_policy=conflict_policy,
             )
         )
 

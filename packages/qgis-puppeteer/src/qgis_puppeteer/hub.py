@@ -48,6 +48,7 @@ from PyQt5.QtWebSockets import (  # type: ignore[import-not-found]
 
 from qgis_puppeteer.hub_state import (
     IDLE_SHUTDOWN_DELAY_SECONDS,
+    LIVENESS_PROBE_SECONDS,
     HubState,
     validate_origin,
 )
@@ -214,6 +215,8 @@ class Hub(QObject):
             ws.textMessageReceived.connect(
                 lambda text, cid=conn_id: self._on_text_message(cid, text)
             )
+            # ADR-0005 D5: pong 受信を liveness 更新に使う。
+            ws.pong.connect(lambda _e=0, _p=b"", cid=conn_id: self._state.mark_seen(cid))
             ws.disconnected.connect(lambda cid=conn_id: self._on_disconnected(cid))
             logger.info("New connection: %s", conn_id)
 
@@ -268,26 +271,71 @@ class Hub(QObject):
     def _handle_register(self, conn_id: str, req: RegisterRequest) -> None:
         if req.role is Role.WORKER:
             outcome = self._state.register_worker(conn_id, req)
-            if outcome.ok:
-                self._kinds[conn_id] = _ConnectionKind.WORKER
-                ack = RegisterAck(
-                    id=req.id,
-                    ok=True,
-                    instance_id=outcome.instance_id,
-                    resumed=outcome.resumed,
+            if outcome.pending:
+                # ADR-0005 C1=(b): incumbent の生死を ping 確認する間 ack を
+                # 保留。pong は QWebSocket.pong → _state.mark_seen で記録され、
+                # LIVENESS_PROBE_SECONDS 後に finalize で勝敗を判定する。
+                for inc_conn in outcome.liveness_probe_conn_ids:
+                    ws = self._sockets.get(inc_conn)
+                    if ws is not None:
+                        try:
+                            ws.ping()
+                        except Exception:  # noqa: BLE001 - ping は best-effort
+                            logger.debug("incumbent ping failed", exc_info=True)
+                logger.info(
+                    "Register for label conflict deferred; probing %d incumbent(s)",
+                    len(outcome.liveness_probe_conn_ids),
                 )
-            else:
-                ack = RegisterAck(id=req.id, ok=False, error=outcome.error)
-        else:
-            # mcp_gateway / automation_client
-            self._state.register_client(conn_id)
-            self._kinds[conn_id] = _ConnectionKind.CLIENT
-            # 発信元 role を保持して、Worker への request 転送時に注入する
-            # （ADR-0001 §12.7 caller_role 伝達）。
-            self._client_roles[conn_id] = req.role
-            ack = RegisterAck(id=req.id, ok=True)
+                QTimer.singleShot(
+                    int(LIVENESS_PROBE_SECONDS * 1000),
+                    lambda cid=conn_id, rid=req.id: self._finalize_pending(cid, rid),
+                )
+                return
+            self._apply_worker_outcome(conn_id, req.id, outcome)
+            self._reassess_idle_shutdown()
+            return
 
+        # mcp_gateway / automation_client
+        self._state.register_client(conn_id)
+        self._kinds[conn_id] = _ConnectionKind.CLIENT
+        # 発信元 role を保持して、Worker への request 転送時に注入する
+        # （ADR-0001 §12.7 caller_role 伝達）。
+        self._client_roles[conn_id] = req.role
+        self._send(conn_id, RegisterAck(id=req.id, ok=True))
+        self._reassess_idle_shutdown()
+
+    def _apply_worker_outcome(self, conn_id: str, req_id: str, outcome: object) -> None:
+        """Worker 登録 outcome を ack 化して送る（即時 / finalize 共通）。"""
+        # outcome は hub_state.RegisterOutcome（循環 import 回避で object 注釈）。
+        if outcome.ok:  # type: ignore[attr-defined]
+            self._kinds[conn_id] = _ConnectionKind.WORKER
+            if outcome.evicted_instance_ids:  # type: ignore[attr-defined]
+                logger.info(
+                    "Evicted instances on label takeover/supersede: %s",
+                    list(outcome.evicted_instance_ids),  # type: ignore[attr-defined]
+                )
+            ack = RegisterAck(
+                id=req_id,
+                ok=True,
+                instance_id=outcome.instance_id,  # type: ignore[attr-defined]
+                resumed=outcome.resumed,  # type: ignore[attr-defined]
+                superseded=outcome.superseded,  # type: ignore[attr-defined]
+            )
+        else:
+            ack = RegisterAck(
+                id=req_id,
+                ok=False,
+                error=outcome.error,  # type: ignore[attr-defined]
+            )
         self._send(conn_id, ack)
+
+    def _finalize_pending(self, conn_id: str, req_id: str) -> None:
+        """C1=(b): probe 窓経過後に保留登録を確定して ack を送る。"""
+        outcome = self._state.finalize_pending_registration(conn_id)
+        if outcome is None:
+            # newcomer が probe 中に切断した等 → 何もしない。
+            return
+        self._apply_worker_outcome(conn_id, req_id, outcome)
         self._reassess_idle_shutdown()
 
     # ------------------------------------------------------------
@@ -426,6 +474,22 @@ class Hub(QObject):
     # ------------------------------------------------------------
 
     def _on_sweep(self) -> None:
+        # ADR-0005 D5: まず生存確認 ping を撒き、ハートビート途絶 active を
+        # grace へ落とす（kill -9 half-open の救済）。次に grace 期限切れを掃除。
+        for ws in self._sockets.values():
+            try:
+                ws.ping()
+            except Exception:  # noqa: BLE001 - ping は best-effort
+                logger.debug("ws.ping() failed", exc_info=True)
+        demoted = self._state.sweep_stale_active()
+        if demoted:
+            logger.info(
+                "Demoted %d stale active workers to grace (heartbeat lost): %s",
+                len(demoted),
+                demoted,
+            )
+            self._reassess_idle_shutdown()
+
         removed = self._state.sweep_expired()
         if removed:
             logger.info(

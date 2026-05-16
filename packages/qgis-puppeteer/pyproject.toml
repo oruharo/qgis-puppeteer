@@ -44,6 +44,8 @@ Issues = "https://github.com/oruharo/qgis-puppeteer/issues"
 [project.scripts]
 # Hub をコマンドラインから直接起動できるようにする
 qgis-puppeteer-hub = "qgis_puppeteer.hub:main"
+# ADR-0005 D6: launch_token を発番・注入して QGIS を起動する公式 helper
+qgis-puppeteer-launch = "qgis_puppeteer.launcher:main"
 
 [build-system]
 requires = ["hatchling"]

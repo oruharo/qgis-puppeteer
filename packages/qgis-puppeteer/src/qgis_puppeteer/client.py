@@ -106,6 +106,12 @@ class RequestError(AutomationClientError):
         return self.error.details
 
 
+class AttributionAmbiguousError(AutomationClientError):
+    """ADR-0005 H4: best-effort attribution（registered_seq）で複数候補が
+    出て「自分の起動分」を一意に決められない。silent 誤帰属を防ぐため送出。
+    """
+
+
 # ============================================================
 # AutomationClient
 # ============================================================
@@ -334,6 +340,80 @@ class AutomationClient:
             )
         return list(msg.instances)
 
+    async def current_max_seq(self) -> int:
+        """現在の最大 registered_seq を返す（ADR-0005 D6 best-effort 相関の基点）。
+
+        QGIS を起動依頼する **直前** に呼んで戻り値を控えておき、起動後に
+        ``wait_for_new_instance(since_seq=...)`` に渡すと「自分が依頼した後に
+        register された 1 件」を拾える。規約なし非制御 launch（U8）向けの
+        当て推量経路で、同時起動が重なると曖昧になり得る点に注意。
+        """
+        instances = await self.list_instances()
+        return max((i.registered_seq for i in instances), default=0)
+
+    async def wait_for_instance(
+        self,
+        selector: str,
+        *,
+        timeout_s: float = 30.0,
+        poll_interval_s: float = 0.5,
+    ) -> InstanceInfo:
+        """selector が一意に解決するまで poll する（ADR-0005 D6 / U9）。
+
+        ``launch_token`` を渡せば公式 launch helper 起動分を **決定的** に
+        待ち受けできる（推奨）。``label`` でも可。
+
+        Raises:
+            TimeoutError: ``timeout_s`` 以内に一意解決しなかった。
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        while True:
+            instances = await self.list_instances()
+            match = _match_selector(selector, instances)
+            if match is not None:
+                return match
+            if loop.time() >= deadline:
+                raise TimeoutError(f"No instance matched {selector!r} within {timeout_s}s")
+            await asyncio.sleep(poll_interval_s)
+
+    async def wait_for_new_instance(
+        self,
+        since_seq: int,
+        *,
+        timeout_s: float = 30.0,
+        poll_interval_s: float = 0.5,
+    ) -> InstanceInfo:
+        """``registered_seq > since_seq`` の新規 1 件を待つ（ADR-0005 D6 / U8）。
+
+        best-effort 経路。ADR-0005 H4: **silent に取り違えない**。窓内に複数の
+        新規 instance が現れたら「自分の起動分」を一意に決められないので
+        ``AttributionAmbiguousError`` を送出する（黙って先頭を返さない）。
+        決定的にしたい場合は公式 launch helper + ``wait_for_instance(token)``。
+
+        Raises:
+            TimeoutError: ``timeout_s`` 以内に新規 instance が現れなかった。
+            AttributionAmbiguousError: 窓内に 2 件以上の新規 instance が出現。
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        while True:
+            instances = await self.list_instances()
+            newer = [i for i in instances if i.registered_seq > since_seq]
+            if len(newer) > 1:
+                raise AttributionAmbiguousError(
+                    f"{len(newer)} instances registered after seq={since_seq}; "
+                    "cannot attribute deterministically — use the official "
+                    "launch helper + wait_for_instance(launch_token)"
+                )
+            if newer:
+                return newer[0]
+            if loop.time() >= deadline:
+                raise TimeoutError(
+                    f"No instance registered after seq={since_seq} within {timeout_s}s"
+                )
+            await asyncio.sleep(poll_interval_s)
+
     # ------------------------------------------------------------
     # 内部ヘルパ
     # ------------------------------------------------------------
@@ -424,3 +504,15 @@ class AutomationClient:
         for fut in pending.values():
             if not fut.done():
                 fut.set_exception(exc)
+
+
+def _match_selector(selector: str, instances: list[InstanceInfo]) -> InstanceInfo | None:
+    """selector → InstanceInfo（無 / 曖昧は None）。
+
+    ADR-0005 H-1: 解決順は Hub と共有する純関数 ``select_by_selector`` に
+    一本化（drift 排除）。`wait_for_instance` のクライアント側 poll で使う。
+    """
+    from qgis_puppeteer.hub_state import select_by_selector
+
+    matched = select_by_selector(selector, instances)
+    return matched[0] if len(matched) == 1 else None

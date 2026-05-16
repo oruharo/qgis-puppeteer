@@ -41,6 +41,7 @@ from qgis_puppeteer.client import (
     NotConnectedError,
     RequestError,
 )
+from qgis_puppeteer.hub_state import select_by_selector
 from qgis_puppeteer.protocol import Role
 
 try:
@@ -85,7 +86,9 @@ class GatewayContext:
     - `client` を直接注入して構築するとそれをそのまま使う（テスト用。
       close は呼び出し側が lifespan 内で管理する前提）。
     - `current_instance` は `qgis_use_instance` で設定された sticky な
-      instance_id。`instance` 引数省略時の既定値として使われる。
+      **selector**（ADR-0005 D3: instance_id を凍結せず、label 等の安定キーを
+      保持して dispatch ごとに Hub が再解決する。worker 再起動を跨いで
+      「現在 live なそのロール」へ追従する）。`instance` 引数省略時の既定値。
     """
 
     client: AutomationClient | None = None
@@ -351,8 +354,13 @@ def _register_tools(mcp: FastMCP) -> None:
     async def qgis_use_instance(ctx: Context, selector: str) -> str:
         """以後のツール呼び出しで使う instance を sticky に設定する。
 
-        selector は ADR-0001 §5 の解決順（@label > label > instance_id >
-        project basename > pid）で Hub 側が照会する。
+        selector は ADR-0005 D6 の解決順（launch_token > @label > label >
+        instance_id > project basename）で Hub 側が照会する。
+
+        ADR-0005 D3: sticky には解決後の instance_id ではなく **安定キー**
+        （launch_token > label、無ければ instance_id）を保持する。各 dispatch
+        で Hub が再解決するため、worker を再起動しても「現在 live なその
+        ロール」へ自動追従する（instance_id 凍結による再起動失効を回避）。
         """
         gateway: GatewayContext = ctx.request_context.lifespan_context
         client, err = await _get_client_or_error(gateway)
@@ -371,8 +379,14 @@ def _register_tools(mcp: FastMCP) -> None:
                     }
                 }
             )
-        gateway.current_instance = resolved.instance_id
-        return _format_result({"ok": True, "current": _instance_info_to_dict(resolved)})
+        gateway.current_instance = _stable_sticky_selector(resolved)
+        return _format_result(
+            {
+                "ok": True,
+                "current": _instance_info_to_dict(resolved),
+                "sticky_selector": gateway.current_instance,
+            }
+        )
 
     # ------------------------------------------------------------
     # Layer Tools
@@ -573,53 +587,30 @@ def _instance_info_to_dict(info: Any) -> dict[str, Any]:
 
 
 def _resolve_selector(selector: str, instances: list[Any]) -> Any | None:
-    """ADR-0001 §5 の解決順に従って selector → InstanceInfo を返す。
+    """selector → InstanceInfo（曖昧・不在は None）。
 
-    Hub 側でも最終的に解決されるが、`qgis_use_instance` では成功した場合に
-    instance_id を ContextVar に保存する必要があるため、クライアント側で
-    同じ解決ロジックを走らせる（list_instances で得た集合内での照合）。
-    曖昧・不在は None を返して caller 側でエラー JSON を組み立てる。
+    ADR-0005 H-1: 解決順は Hub と共有する純関数 ``select_by_selector`` に
+    一本化（client 側 mirror の drift を排除）。1 件一致のみ採用。
     """
-    if not selector:
-        return None
+    matched = select_by_selector(selector, instances)
+    return matched[0] if len(matched) == 1 else None
 
-    # 1. @label 完全一致
-    if selector.startswith("@"):
-        label = selector[1:]
-        matches = [i for i in instances if i.label == label]
-        return matches[0] if len(matches) == 1 else None
 
-    # 2. label 完全一致（非数字のみ）
-    if not selector.isdigit():
-        matches = [i for i in instances if i.label == selector]
-        if len(matches) == 1:
-            return matches[0]
+def _stable_sticky_selector(info: Any) -> str:
+    """ADR-0005 D3: sticky に保持する安定キーを選ぶ。
 
-    # 3. instance_id 完全一致
-    matches = [i for i in instances if i.instance_id == selector]
-    if len(matches) == 1:
-        return matches[0]
-
-    # 4. project basename 一致（拡張子有無両方）
-    import os.path as _p
-
-    matches = [
-        i
-        for i in instances
-        if i.project is not None
-        and (
-            _p.basename(i.project) == selector or _p.splitext(_p.basename(i.project))[0] == selector
-        )
-    ]
-    if len(matches) == 1:
-        return matches[0]
-
-    # 5. pid 文字列一致
-    matches = [i for i in instances if str(i.pid) == selector]
-    if len(matches) == 1:
-        return matches[0]
-
-    return None
+    優先度: ``launch_token``（決定的・再起動跨ぎで helper が再注入）>
+    **明示指定された** ``label``（人間ロール・SUPERSEDE で再起動跨ぎ追従）>
+    ``instance_id``（最後の手段。auto-label は再起動で別値になり sticky が
+    roam するため使わない＝ADR-0005 D3 の「contract が無ければ凍結退避」）。
+    """
+    token = getattr(info, "launch_token", None)
+    if token:
+        return str(token)
+    label = getattr(info, "label", None)
+    if label and getattr(info, "label_explicit", False):
+        return str(label)
+    return str(info.instance_id)
 
 
 # ============================================================

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from qgis_puppeteer.hub_state import (
     GRACE_SECONDS,
+    HEARTBEAT_TIMEOUT_SECONDS,
     IDLE_SHUTDOWN_DELAY_SECONDS,
     HubState,
     RegisterOutcome,
@@ -51,6 +52,7 @@ def _worker_req(
     label: str | None = "A",
     project: str | None = "D:/work/a.qgz",
     previous_instance_id: str | None = None,
+    launch_token: str | None = None,
 ) -> RegisterRequest:
     return RegisterRequest(
         id=id,
@@ -59,7 +61,31 @@ def _worker_req(
         label=label,
         project=project,
         previous_instance_id=previous_instance_id,
+        launch_token=launch_token,
     )
+
+
+def _register_resolving(
+    state: HubState,
+    clock: FakeClock,
+    conn_id: str,
+    req: RegisterRequest,
+    *,
+    incumbent_responds: bool,
+):
+    """ADR-0005 C1=(b): register → (pending なら) probe をシミュレートして finalize。
+
+    ``incumbent_responds=True`` は pong 受信を模擬（probe 中に各 incumbent の
+    last_seen_at を前進させる）。即時 outcome（pending でない）はそのまま返す。
+    """
+    outcome = state.register_worker(conn_id, req)
+    if not outcome.pending:
+        return outcome
+    clock.advance(0.5)
+    if incumbent_responds:
+        for inc in outcome.liveness_probe_conn_ids:
+            state.mark_seen(inc)
+    return state.finalize_pending_registration(conn_id)
 
 
 # ============================================================
@@ -76,11 +102,15 @@ class TestRegisterWorkerNew:
         assert outcome.resumed is False
         assert outcome.error is None
 
-    def test_instance_id_contains_label_and_pid(self) -> None:
+    def test_instance_id_is_opaque_nonce(self) -> None:
+        """ADR-0005 D1: instance_id は pid/label 非依存の不透明 nonce。"""
         state = HubState(clock=FakeClock())
-        outcome = state.register_worker("conn-1", _worker_req(label="A", pid=1234))
-        assert "a" in outcome.instance_id.lower()
-        assert "1234" in outcome.instance_id
+        r1 = state.register_worker("conn-1", _worker_req(label="A", pid=1234))
+        r2 = state.register_worker("conn-2", _worker_req(label="B", pid=1234))
+        assert r1.instance_id.startswith("w-")
+        # pid/label が同じでも instance_id は毎回ユニーク
+        assert r1.instance_id != r2.instance_id
+        assert "1234" not in r1.instance_id
 
     def test_label_auto_generated_when_omitted(self) -> None:
         state = HubState(clock=FakeClock())
@@ -100,14 +130,21 @@ class TestRegisterWorkerNew:
         assert r1.ok and r2.ok
         assert r1.instance_id != r2.instance_id
 
-    def test_duplicate_label_conflict(self) -> None:
-        state = HubState(clock=FakeClock())
+    def test_duplicate_label_conflict_when_incumbent_alive(self) -> None:
+        # ADR-0005 C1=(b): incumbent が ping に応答（生存）→ 真の衝突で reject。
+        clock = FakeClock()
+        state = HubState(clock=clock)
         state.register_worker("conn-1", _worker_req(label="A", pid=1234))
-        r2 = state.register_worker("conn-2", _worker_req(label="A", pid=5678))
+        r2 = _register_resolving(
+            state,
+            clock,
+            "conn-2",
+            _worker_req(label="A", pid=5678),
+            incumbent_responds=True,
+        )
         assert r2.ok is False
         assert r2.error is not None
         assert r2.error.code == ErrorCode.LABEL_CONFLICT
-        # suggested_label を提供する
         assert "suggested_label" in r2.error.details
         assert r2.error.details["suggested_label"] != "A"
 
@@ -118,7 +155,8 @@ class TestRegisterWorkerNew:
 
 
 class TestRegisterWorkerResume:
-    def test_resume_with_matching_pid_and_label(self) -> None:
+    def test_resume_with_previous_id_and_label(self) -> None:
+        """ADR-0005 D2: previous_instance_id + label 一致で resume（pid 不問）。"""
         clock = FakeClock()
         state = HubState(clock=clock)
         r1 = state.register_worker("conn-1", _worker_req(label="A", pid=1234))
@@ -127,36 +165,54 @@ class TestRegisterWorkerResume:
         # 切断（grace 保持）
         state.disconnect_worker("conn-1")
 
-        # 再接続：previous_instance_id + pid + label 一致
+        # 再接続：previous_instance_id + label 一致（pid が変わっても OK）
         r2 = state.register_worker(
             "conn-2",
-            _worker_req(label="A", pid=1234, previous_instance_id=original_id),
+            _worker_req(label="A", pid=9999, previous_instance_id=original_id),
         )
         assert r2.ok is True
         assert r2.resumed is True
         assert r2.instance_id == original_id
 
-    def test_resume_fails_when_previous_id_mismatch_gives_new_id(self) -> None:
+    def test_resume_by_launch_token_ignores_pid(self) -> None:
+        """ADR-0005 D6: launch_token 一致で resume（previous_instance_id 不要）。"""
         clock = FakeClock()
         state = HubState(clock=clock)
-        state.register_worker("conn-1", _worker_req(label="A", pid=1234))
+        r1 = state.register_worker(
+            "conn-1", _worker_req(label="A", pid=1234, launch_token="lt-abc")
+        )
+        original_id = r1.instance_id
         state.disconnect_worker("conn-1")
 
-        # previous_instance_id が嘘 → 新規発行扱い
+        # token だけで resume（pid 再利用・previous_instance_id なし）
+        r2 = state.register_worker(
+            "conn-2", _worker_req(label="A", pid=4321, launch_token="lt-abc")
+        )
+        assert r2.ok is True
+        assert r2.resumed is True
+        assert r2.instance_id == original_id
+
+    def test_previous_id_mismatch_supersedes_grace(self) -> None:
+        """ADR-0005 D2 (U1): bogus previous_id + grace のみ → SUPERSEDE（衝突しない）。"""
+        clock = FakeClock()
+        state = HubState(clock=clock)
+        r1 = state.register_worker("conn-1", _worker_req(label="A", pid=1234))
+        state.disconnect_worker("conn-1")
+
+        # previous_instance_id が嘘でも、active が居なければ grace を継承
         r2 = state.register_worker(
             "conn-2",
-            _worker_req(label="A", pid=1234, previous_instance_id="bogus-id"),
+            _worker_req(label="A", pid=5678, previous_instance_id="bogus-id"),
         )
-        # 新規登録だが label は grace 中に予約されているため衝突
-        assert r2.ok is False
-        assert r2.error.code == ErrorCode.LABEL_CONFLICT
+        assert r2.ok is True
+        assert r2.resumed is False
+        assert r2.superseded is True
+        assert r2.instance_id != r1.instance_id
+        # 旧 grace entry は evict 済み
+        assert state.has_grace_held_workers() is False
 
-    def test_resume_after_grace_expires_is_new_registration(self) -> None:
-        """grace 満了後は `resumed=False` で新規登録扱い。
-
-        instance_id は label+pid 決定的なので同値になるが、`resumed` フラグが
-        False になることで Hub 側では新規登録フローを通ったことがわかる。
-        """
+    def test_resume_after_grace_expires_is_fresh_registration(self) -> None:
+        """grace 満了後は resume も supersede もせず純粋な新規登録。"""
         clock = FakeClock()
         state = HubState(clock=clock)
         r1 = state.register_worker("conn-1", _worker_req(label="A", pid=1234))
@@ -166,16 +222,14 @@ class TestRegisterWorkerResume:
         clock.advance(GRACE_SECONDS + 1.0)
         state.sweep_expired()
 
-        # grace 満了後は新規扱い（label も解放済み）
         r2 = state.register_worker(
             "conn-2",
             _worker_req(label="A", pid=1234, previous_instance_id=original_id),
         )
         assert r2.ok is True
-        assert r2.resumed is False  # resume 経路ではなく新規登録
-        # pid が異なれば instance_id も異なる：pid 違いで確認
-        r3_different_pid = state.register_worker("conn-3", _worker_req(label="B", pid=9999))
-        assert r3_different_pid.instance_id != r2.instance_id
+        assert r2.resumed is False
+        assert r2.superseded is False  # grace 残骸も無いので素の新規
+        assert r2.instance_id != original_id  # nonce は常にユニーク
 
 
 # ============================================================
@@ -233,13 +287,20 @@ class TestIdleShutdownCondition:
         state.register_worker("conn-1", _worker_req(label="A", pid=1234))
         assert state.should_idle_shutdown() is False
 
-    def test_grace_worker_does_not_prevent_idle_shutdown(self) -> None:
-        """grace 中 Worker は active 扱いしない（ADR-0001 §4）。"""
-        state = HubState(clock=FakeClock())
+    def test_grace_worker_blocks_idle_shutdown(self) -> None:
+        """ADR-0005 H3: grace entry がある間は idle-shutdown を抑止する
+        （ADR-0001 §4 の旧ルールを上書き。restart valley で Hub 自殺を防ぐ）。"""
+        clock = FakeClock()
+        state = HubState(clock=clock)
         state.register_worker("conn-1", _worker_req(label="A", pid=1234))
         state.disconnect_worker("conn-1")
-        # grace 中でも active=0 なので idle 自動終了条件成立
+        # active=0 だが grace entry があるので idle-shutdown しない
         assert state.active_worker_count() == 0
+        assert state.has_grace_held_workers() is True
+        assert state.should_idle_shutdown() is False
+        # grace 満了で entry が消えれば通常どおり idle-shutdown 可
+        clock.advance(GRACE_SECONDS + 1.0)
+        state.sweep_expired()
         assert state.should_idle_shutdown() is True
 
     def test_client_prevents_idle_shutdown(self) -> None:
@@ -270,17 +331,20 @@ class TestResolveInstance:
         )
         return state
 
+    def _id_of(self, state: HubState, label: str) -> str:
+        return next(i.instance_id for i in state.list_instances() if i.label == label)
+
     def test_at_prefix_matches_label(self) -> None:
         state = self._populate()
         result = state.resolve_instance("@A")
         assert result.ok
-        assert "1234" in result.instance_id
+        assert result.instance_id == self._id_of(state, "A")
 
     def test_plain_label_matches(self) -> None:
         state = self._populate()
         result = state.resolve_instance("B")
         assert result.ok
-        assert "5678" in result.instance_id
+        assert result.instance_id == self._id_of(state, "B")
 
     def test_instance_id_matches(self) -> None:
         state = self._populate()
@@ -294,19 +358,28 @@ class TestResolveInstance:
         state = self._populate()
         result = state.resolve_instance("alpha")
         assert result.ok
-        assert "1234" in result.instance_id
+        assert result.instance_id == self._id_of(state, "A")
 
     def test_project_basename_matches_with_extension(self) -> None:
         state = self._populate()
         result = state.resolve_instance("beta.qgz")
         assert result.ok
-        assert "5678" in result.instance_id
+        assert result.instance_id == self._id_of(state, "B")
 
-    def test_pid_string_matches(self) -> None:
+    def test_launch_token_has_top_precedence(self) -> None:
+        """ADR-0005 D6: launch_token は最優先 tier。"""
+        state = HubState(clock=FakeClock())
+        state.register_worker("conn-1", _worker_req(label="A", pid=1234, launch_token="lt-zzz"))
+        result = state.resolve_instance("lt-zzz")
+        assert result.ok
+        assert result.instance_id == self._id_of(state, "A")
+
+    def test_pid_string_no_longer_resolves(self) -> None:
+        """ADR-0005 D1: pid 一致 tier は廃止。pid 文字列は not_found。"""
         state = self._populate()
         result = state.resolve_instance("1234")
-        assert result.ok
-        assert "1234" in result.instance_id
+        assert result.ok is False
+        assert result.error.code == ErrorCode.INSTANCE_NOT_FOUND
 
     def test_none_selector_single_worker_auto_selects(self) -> None:
         state = HubState(clock=FakeClock())
@@ -356,6 +429,252 @@ class TestListInstances:
     def test_empty_when_no_workers(self) -> None:
         state = HubState(clock=FakeClock())
         assert state.list_instances() == []
+
+    def test_exposes_launch_token_and_seq(self) -> None:
+        """ADR-0005 D6: InstanceInfo に launch_token / registered_seq を含む。"""
+        state = HubState(clock=FakeClock())
+        state.register_worker("conn-1", _worker_req(label="A", pid=1234, launch_token="lt-1"))
+        state.register_worker("conn-2", _worker_req(label="B", pid=5678))
+        listed = {i.label: i for i in state.list_instances()}
+        assert listed["A"].launch_token == "lt-1"
+        assert listed["B"].launch_token is None
+        # 連番は登録順に単調増加
+        assert listed["B"].registered_seq > listed["A"].registered_seq
+        assert listed["A"].registered_at is not None
+
+
+# ============================================================
+# ADR-0005 D2: 同一 label 連続再起動（SUPERSEDE / U1）
+# ============================================================
+
+
+class TestSamelabelRestartSupersede:
+    def test_serial_restart_within_grace_supersedes(self) -> None:
+        """U1: kill→即同 label 起動。grace 中でも衝突せず継承（superseded=True）。"""
+        clock = FakeClock()
+        state = HubState(clock=clock)
+        r1 = state.register_worker("conn-1", _worker_req(label="A", pid=1111))
+        state.disconnect_worker("conn-1")  # kill 相当（grace 60s 中）
+
+        clock.advance(1.0)  # grace 窓のど真ん中で再起動
+        r2 = state.register_worker("conn-2", _worker_req(label="A", pid=2222))
+
+        assert r2.ok is True
+        assert r2.superseded is True
+        assert r2.resumed is False
+        assert r2.instance_id != r1.instance_id
+        # A は 1 台だけ active で、label で素直に引ける
+        assert state.active_worker_count() == 1
+        assert state.resolve_instance("A").instance_id == r2.instance_id
+
+    def test_live_same_label_still_conflicts(self) -> None:
+        """U3: incumbent が ping 応答（生存）なら fail-safe で reject。"""
+        clock = FakeClock()
+        state = HubState(clock=clock)
+        state.register_worker("conn-1", _worker_req(label="A", pid=1111))
+        r2 = _register_resolving(
+            state,
+            clock,
+            "conn-2",
+            _worker_req(label="A", pid=2222),
+            incumbent_responds=True,
+        )
+        assert r2.ok is False
+        assert r2.error.code == ErrorCode.LABEL_CONFLICT
+        assert r2.error.details["suggested_label"] != "A"
+
+    def test_dead_active_same_label_supersedes_via_probe(self) -> None:
+        """ADR-0005 C1=(b) / U7: kill -9 で旧 entry が active のまま残っても、
+        ping 無応答なら probe 後に SUPERSEDE で素直に継承（env 不要）。"""
+        clock = FakeClock()
+        state = HubState(clock=clock)
+        r1 = state.register_worker("conn-1", _worker_req(label="A", pid=1111))
+        # disconnect せず（half-open 模擬）。incumbent は pong を返さない。
+        r2 = _register_resolving(
+            state,
+            clock,
+            "conn-2",
+            _worker_req(label="A", pid=2222),
+            incumbent_responds=False,
+        )
+        assert r2.ok is True
+        assert r2.superseded is True
+        assert r2.instance_id != r1.instance_id
+        assert r1.instance_id in r2.evicted_instance_ids
+        assert state.active_worker_count() == 1
+        assert state.resolve_instance("A").instance_id == r2.instance_id
+
+    def test_invalid_launch_token_rejected(self) -> None:
+        # ADR-0005 M: 不正 prefix / 過大長は register 時に弾く。
+        state = HubState(clock=FakeClock())
+        bad_prefix = RegisterRequest(
+            id="x", role=Role.WORKER, pid=1, label="A", launch_token="xx-abc"
+        )
+        r = state.register_worker("c1", bad_prefix)
+        assert r.ok is False
+        assert r.error.code == ErrorCode.LABEL_CONFLICT
+        assert r.error.details["reason"] == "bad_prefix"
+
+        too_long = RegisterRequest(
+            id="y",
+            role=Role.WORKER,
+            pid=1,
+            label="B",
+            launch_token="lt-" + "a" * 100,
+        )
+        r2 = state.register_worker("c2", too_long)
+        assert r2.ok is False
+        assert r2.error.details["reason"] == "too_long"
+
+    def test_pending_cancelled_if_newcomer_disconnects(self) -> None:
+        clock = FakeClock()
+        state = HubState(clock=clock)
+        state.register_worker("conn-1", _worker_req(label="A", pid=1))
+        out = state.register_worker("conn-2", _worker_req(label="A", pid=2))
+        assert out.pending is True
+        state.disconnect_worker("conn-2")  # newcomer が probe 中に切断
+        assert state.finalize_pending_registration("conn-2") is None
+
+    def test_supersede_repeats_across_many_restarts(self) -> None:
+        """連続再起動を何度繰り返しても毎回 SUPERSEDE で素通り。"""
+        clock = FakeClock()
+        state = HubState(clock=clock)
+        prev_id = state.register_worker("c0", _worker_req(label="A")).instance_id
+        for n in range(1, 6):
+            state.disconnect_worker(f"c{n - 1}")
+            clock.advance(0.5)
+            r = state.register_worker(f"c{n}", _worker_req(label="A"))
+            assert r.ok and r.superseded and r.instance_id != prev_id
+            prev_id = r.instance_id
+        assert state.active_worker_count() == 1
+
+
+# ============================================================
+# ADR-0005 D4: active 同 label 衝突ポリシー（reject/takeover/suffix）
+# ============================================================
+
+
+class TestConflictPolicy:
+    def _req(self, **kw: object) -> RegisterRequest:
+        return _worker_req(**kw)  # type: ignore[arg-type]
+
+    def test_default_probes_then_rejects_if_alive(self) -> None:
+        # 既定（policy 無指定）= C1=(b) probe。incumbent 生存 → reject。
+        clock = FakeClock()
+        state = HubState(clock=clock)
+        state.register_worker("c1", _worker_req(label="A", pid=1))
+        r = _register_resolving(
+            state,
+            clock,
+            "c2",
+            _worker_req(label="A", pid=2),
+            incumbent_responds=True,
+        )
+        assert r.ok is False
+        assert r.error.code == ErrorCode.LABEL_CONFLICT
+        assert r.error.details["policy"] == "reject"
+
+    def test_takeover_evicts_active_and_registers(self) -> None:
+        state = HubState(clock=FakeClock())
+        r1 = state.register_worker("c1", _worker_req(label="A", pid=1))
+        r2 = state.register_worker(
+            "c2",
+            RegisterRequest(
+                id="x",
+                role=Role.WORKER,
+                pid=2,
+                label="A",
+                conflict_policy="takeover",
+            ),
+        )
+        assert r2.ok is True
+        assert r2.instance_id != r1.instance_id
+        assert r2.evicted_instance_ids == (r1.instance_id,)
+        # 旧 active は消え、新 worker だけが label A を持つ
+        assert state.active_worker_count() == 1
+        assert state.resolve_instance("A").instance_id == r2.instance_id
+
+    def test_suffix_auto_relabels(self) -> None:
+        state = HubState(clock=FakeClock())
+        state.register_worker("c1", _worker_req(label="A", pid=1))
+        r2 = state.register_worker(
+            "c2",
+            RegisterRequest(
+                id="x",
+                role=Role.WORKER,
+                pid=2,
+                label="A",
+                conflict_policy="suffix",
+            ),
+        )
+        assert r2.ok is True
+        assert r2.assigned_label != "A"
+        assert r2.assigned_label.startswith("A ")
+        # 両方 active で別 label として引ける
+        assert state.active_worker_count() == 2
+        assert state.resolve_instance("A").ok
+        assert state.resolve_instance(r2.assigned_label).ok
+
+    def test_takeover_with_no_active_is_plain_fresh(self) -> None:
+        """衝突が無ければ takeover 指定でも普通の新規登録（evicted 空）。"""
+        state = HubState(clock=FakeClock())
+        r = state.register_worker(
+            "c1",
+            RegisterRequest(
+                id="x", role=Role.WORKER, pid=1, label="solo", conflict_policy="takeover"
+            ),
+        )
+        assert r.ok is True
+        assert r.evicted_instance_ids == ()
+
+
+# ============================================================
+# ADR-0005 D5: ハートビート liveness sweep
+# ============================================================
+
+
+class TestLivenessSweep:
+    def test_stale_active_demoted_to_grace(self) -> None:
+        clock = FakeClock()
+        state = HubState(clock=clock)
+        state.register_worker("c1", _worker_req(label="A", pid=1))
+        assert state.active_worker_count() == 1
+
+        clock.advance(HEARTBEAT_TIMEOUT_SECONDS + 1.0)
+        demoted = state.sweep_stale_active()
+        assert len(demoted) == 1
+        # active から落ち、grace 保持（sweep_expired まで entry は残る）
+        assert state.active_worker_count() == 0
+        assert state.has_grace_held_workers() is True
+
+    def test_mark_seen_keeps_active(self) -> None:
+        clock = FakeClock()
+        state = HubState(clock=clock)
+        state.register_worker("c1", _worker_req(label="A", pid=1))
+
+        # timeout 直前に pong → last_seen 更新で延命
+        clock.advance(HEARTBEAT_TIMEOUT_SECONDS - 1.0)
+        state.mark_seen("c1")
+        clock.advance(2.0)  # 直近 mark_seen からは 2s しか経ってない
+        assert state.sweep_stale_active() == []
+        assert state.active_worker_count() == 1
+
+    def test_demoted_then_same_label_supersedes(self) -> None:
+        """kill -9 half-open → sweep で grace → 同 label 再起動が SUPERSEDE。"""
+        clock = FakeClock()
+        state = HubState(clock=clock)
+        state.register_worker("c1", _worker_req(label="A", pid=1))
+        clock.advance(HEARTBEAT_TIMEOUT_SECONDS + 1.0)
+        state.sweep_stale_active()  # 旧 A を grace へ
+
+        # reject 既定でも衝突せず継承できる
+        r2 = state.register_worker("c2", _worker_req(label="A", pid=2))
+        assert r2.ok is True
+        assert r2.superseded is True
+
+    def test_mark_seen_unknown_conn_is_noop(self) -> None:
+        state = HubState(clock=FakeClock())
+        state.mark_seen("nope")  # 例外を投げない
 
 
 # ============================================================
@@ -437,9 +756,13 @@ class TestIdGeneration:
         assert label
         assert "1234" in label
 
-    def test_instance_id_format(self) -> None:
-        assert generate_instance_id("A", 1234) == "worker-a-1234"
-        assert generate_instance_id("Alpha", 5678) == "worker-alpha-5678"
+    def test_instance_id_is_opaque_and_unique(self) -> None:
+        """ADR-0005 D1: 引数なし・nonce 形式・毎回ユニーク。"""
+        a = generate_instance_id()
+        b = generate_instance_id()
+        assert a.startswith("w-")
+        assert a != b
+        assert len(a) > 4
 
 
 # ============================================================

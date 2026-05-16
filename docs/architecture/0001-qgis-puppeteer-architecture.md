@@ -1,9 +1,10 @@
 # ADR-0001: QGIS Puppeteer アーキテクチャ（複数 QGIS 同時操作基盤）
 
-- **Status**: Accepted
+- **Status**: Accepted（label / instance 命名・selector 解決・再接続引き継ぎの一部は **ADR-0005 が supersede 済み（実装済み）**）
 - **Date**: 2026-04-23
 - **Deciders**: qgis-puppeteer maintainers
 - **Related**: `plugins/qgis_puppet/` と `packages/qgis-puppeteer/src/qgis_puppeteer/gateways/mcp.py` が本 ADR のランタイム実装
+- **Superseded (partial)**: 「instance 命名」「selector 解決順（特に `pid`）」「Worker 再接続時の instance_id 引き継ぎ」「label 一意制約」は [ADR-0005](0005-label-lifecycle-and-stable-identity.md) が見直す。本 ADR を読む際は ADR-0005 を併読のこと。
 
 ## Context
 
@@ -381,6 +382,11 @@ E2E テスト（ADR-0002）で Client が先に繋いで Worker を待つケー�
 
 #### Worker 再接続時の instance_id 引き継ぎ
 
+> **ADR-0005 注（実装済み）**: 本節の `pid` + `label` + `previous_instance_id`
+> 三点一致や grace 中 entry を「予約」とする扱いは ADR-0005 で置換済み（pid を
+> 一致条件から除外、`launch_token` 単独 resume を追加、grace は陳腐化候補化し
+> SUPERSEDE 経路を新設）。同一 label 連続再起動の設計は ADR-0005 を参照。
+
 Hub クラッシュ → 再 spawn → Worker 再接続のシナリオで、**MCP Gateway 側の sticky が同じ `instance_id` を参照し続けられる**ように引き継ぎを用意する。
 
 仕様：
@@ -512,6 +518,10 @@ ContextVar は asyncio の Task 単位で隔離されるため、並行ツール
 将来、MCP サーバーが単一プロセスで複数 Claude セッションを扱うようになった場合は、「Claude セッション ID をキーにした dict」に切り替える拡張余地がある（プロトコル変更不要）。
 
 #### selector 解決順（Hub 側実装）
+
+> **ADR-0005 注（実装済み）**: step 5 の `pid` 一致は ADR-0005 で**廃止済み**
+> （pid を identity から除外）。instance_id は `worker-{label}-{pid}` →
+> `w-<nonce>` に変更済み。解決順の最上位に `launch_token` tier を追加。
 
 1. `@`+`label` 完全一致（例: `@A`）
 2. `label` 完全一致（非数字の label のみ。数字のみの label は `pid` と衝突するため無効）
