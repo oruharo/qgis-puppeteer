@@ -21,9 +21,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pytest_qgis_puppeteer.automation_client import (
+    ConfirmationRequiredError,
     E2EAutomationClient,
     ModalBlockedError,
+    WorkerCodeError,
     _find_in_snapshot,
+    _raise_for_execute_result,
 )
 
 # ============================================================
@@ -1048,3 +1051,87 @@ class TestPerActionScreenshotCapture:
         e2e.list_layers()
         # 親ディレクトリは作られる（screenshot 自体はファイル作成は Worker 責務）
         assert pending.exists()
+
+
+# ============================================================
+# execute_python の fail-fast（OSS 提案 / WorkerCodeError）
+# ============================================================
+
+
+class TestExecutePythonRaises:
+    """``execute_python`` が Worker 側コード例外を握りつぶさず raise すること。"""
+
+    _ERR_RESULT = {
+        "success": False,
+        "error": 'relation "foo" does not exist',
+        "traceback": "Traceback ...\npsycopg2.errors.UndefinedTable: ...",
+        "stdout": "before\n",
+        "stderr": "",
+        "permission_level": "whitelist",
+        "risk_level": "low",
+    }
+
+    def test_raises_worker_code_error_on_failure(self) -> None:
+        e2e, _inner = _make_client(call_results=[dict(self._ERR_RESULT)])
+        with pytest.raises(WorkerCodeError) as ei:
+            e2e.execute_python("open_dialog()")
+        # 真因（DB エラー）とトレースバックが例外に載る
+        assert "does not exist" in str(ei.value)
+        assert ei.value.worker_traceback is not None
+        assert "UndefinedTable" in ei.value.worker_traceback
+        assert ei.value.stdout == "before\n"
+
+    def test_success_returns_dict_without_raising(self) -> None:
+        ok = {"success": True, "result": "0", "stdout": "", "stderr": ""}
+        e2e, _inner = _make_client(call_results=[ok])
+        assert e2e.execute_python("_result = 0") == ok
+
+    def test_requires_confirmation_raises_confirmation_error(self) -> None:
+        confirm = {
+            "success": False,
+            "requires_confirmation": True,
+            "risk_level": "high",
+        }
+        e2e, _inner = _make_client(call_results=[confirm])
+        with pytest.raises(ConfirmationRequiredError) as ei:
+            e2e.execute_python("import os; os.system('rm -rf /')")
+        assert ei.value.risk_level == "high"
+
+    def test_raise_on_error_false_returns_raw_dict(self) -> None:
+        e2e, _inner = _make_client(call_results=[dict(self._ERR_RESULT)])
+        res = e2e.execute_python("open_dialog()", raise_on_error=False)
+        assert res["success"] is False
+        assert res["error"] == 'relation "foo" does not exist'
+
+    def test_default_mock_result_does_not_raise(self) -> None:
+        # 既存テスト互換：success キーが無い dict（{"ok": True}）は素通し。
+        e2e, _inner = _make_client()  # 既定 return は {"ok": True}
+        assert e2e.execute_python("x = 1") == {"ok": True}
+
+
+class TestRaiseForExecuteResultHelper:
+    """``_raise_for_execute_result`` の純粋ロジック（dict 判定）。"""
+
+    def test_non_dict_is_noop(self) -> None:
+        _raise_for_execute_result(None)
+        _raise_for_execute_result("ok")
+        _raise_for_execute_result(42)
+
+    def test_success_true_is_noop(self) -> None:
+        _raise_for_execute_result({"success": True})
+
+    def test_missing_success_key_is_noop(self) -> None:
+        # success キー欠落は True 扱い（後方互換）。
+        _raise_for_execute_result({"ok": True})
+
+    def test_confirmation_precedence_over_worker_error(self) -> None:
+        # requires_confirmation が最優先（traceback が混在しても confirm を上げる）。
+        with pytest.raises(ConfirmationRequiredError):
+            _raise_for_execute_result(
+                {"success": False, "requires_confirmation": True, "traceback": "x"}
+            )
+
+    def test_success_false_without_traceback_still_raises(self) -> None:
+        # traceback 無しの success=False も silent にせず WorkerCodeError。
+        with pytest.raises(WorkerCodeError):
+            _raise_for_execute_result({"success": False, "message": "cancelled"})

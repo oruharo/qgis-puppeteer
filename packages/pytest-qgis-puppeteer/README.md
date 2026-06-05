@@ -159,12 +159,20 @@ def test_clean_canvas_clears_layers(hub_port, automation_client):
         qgis_bin=QGIS_BIN,
         args=["--clean-canvas"],
     ) as worker:
-        n = automation_client.execute_python(
-            "len(QgsProject.instance().mapLayers())",
+        result = automation_client.execute_python(
+            "_result = len(QgsProject.instance().mapLayers())",
             instance=worker.instance_id,
         )
-        assert n == 0
+        # execute_python returns the handler dict. `result["result"]` is the
+        # str() of whatever the code assigns to `_result` (None if unset).
+        assert result["result"] == "0"
 ```
+
+> `execute_python` is **fail-fast**: if the worker-side code raises, it now
+> raises `WorkerCodeError` (with the worker traceback) instead of returning a
+> `success=False` dict silently. Pass `raise_on_error=False` to opt out and
+> inspect the raw dict yourself. A confirm gate (worker not in trusted mode)
+> raises `ConfirmationRequiredError`.
 
 Each `spawn_qgis(...)` block reuses the session's Hub but spawns a fresh
 Worker. Multiple `spawn_qgis()` calls (or coexistence with the

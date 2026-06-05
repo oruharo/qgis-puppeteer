@@ -27,7 +27,12 @@ import time
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
-from qgis_puppeteer.client import AutomationClient, InstanceInfo
+from qgis_puppeteer.client import (
+    AutomationClient,
+    ConfirmationRequiredError,
+    InstanceInfo,
+    WorkerCodeError,
+)
 from qgis_puppeteer.protocol import Role
 from qgis_puppeteer.selector_match import (
     record_matches_selector,
@@ -57,6 +62,27 @@ class ModalBlockedError(RuntimeError):
     def __init__(self, message: str, *, modal: dict[str, Any]) -> None:
         super().__init__(message)
         self.modal = modal
+
+
+def _raise_for_execute_result(result: Any) -> None:
+    """``execute_python`` 系の結果 dict を検査し、失敗なら例外へ変換する。
+
+    - ``requires_confirmation`` → :class:`ConfirmationRequiredError`
+    - その他の ``success=False`` → :class:`WorkerCodeError`
+      （``traceback`` があればコード例外。無くても fail-fast のため loud に倒す）
+
+    ``success`` が True、または dict でない戻り値はそのまま通す（no-op）。
+    """
+    if not isinstance(result, dict) or result.get("success", True):
+        return
+    if result.get("requires_confirmation"):
+        raise ConfirmationRequiredError(result.get("risk_level"))
+    raise WorkerCodeError(
+        result.get("error") or result.get("message"),
+        result.get("traceback"),
+        stdout=result.get("stdout"),
+        stderr=result.get("stderr"),
+    )
 
 
 class E2EAutomationClient:
@@ -350,9 +376,41 @@ class E2EAutomationClient:
     # 便利メソッド（Worker コマンド薄ラッパ）
     # ------------------------------------------------------------
 
-    def execute_python(self, code: str, *, instance: str | None = None) -> dict[str, Any]:
-        """`qgis_execute_python` を呼ぶ。ホワイトリスト許可コードのみ実行可。"""
-        return self.call("qgis_execute_python", {"code": code}, instance=instance)
+    def execute_python(
+        self,
+        code: str,
+        *,
+        instance: str | None = None,
+        raise_on_error: bool = True,
+    ) -> dict[str, Any]:
+        """`qgis_execute_python` を呼ぶ。ホワイトリスト許可コードのみ実行可。
+
+        Worker 側のコード内で例外が起きた場合（handler が ``success=False`` +
+        ``traceback`` を返した場合）、既定で :class:`WorkerCodeError` を raise する
+        （Playwright ``page.evaluate`` と同じ fail-fast）。これにより
+        ``execute_python`` 経由で開いたダイアログの ``__init__`` 内例外などが
+        silent にならず、真因が pytest の失敗メッセージへ直接出る。confirm ゲート
+        （信頼モード未設定）に当たった場合は :class:`ConfirmationRequiredError`。
+
+        成功時は handler の結果 dict をそのまま返す
+        （``{"success": True, "stdout", "stderr", "result", ...}``）。``result`` は
+        コード内で ``_result = ...`` に代入した値の **文字列表現**（未代入なら
+        ``None``）。値そのものを型付きで受け取る API ではない点に注意。
+
+        Args:
+            code: 実行する Python コード。値を返したいなら ``_result`` に代入する。
+            instance: 対象 instance selector（未指定は sticky / Hub default）。
+            raise_on_error: ``False`` にすると失敗時も raise せず生 dict を返す
+                （``success`` を自前で検査したい場合の opt-out。後方互換用）。
+
+        Raises:
+            WorkerCodeError: コード実行が例外で失敗（``raise_on_error=True`` 時）。
+            ConfirmationRequiredError: confirm が必要（同上）。
+        """
+        result = self.call("qgis_execute_python", {"code": code}, instance=instance)
+        if raise_on_error:
+            _raise_for_execute_result(result)
+        return result
 
     def snapshot_ui(
         self,

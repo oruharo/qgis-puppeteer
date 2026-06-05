@@ -112,6 +112,53 @@ class AttributionAmbiguousError(AutomationClientError):
     """
 
 
+class WorkerCodeError(AutomationClientError):
+    """``execute_python`` 系で Worker 側のコード実行が例外で失敗した。
+
+    Worker handler は ``exec(code)`` 内の例外を握って
+    ``{"success": False, "error": ..., "traceback": ...}`` を返す（応答自体は
+    プロトコル上 ``ok=True``）。pytest ラッパはこの ``success=False`` を検出して
+    本例外へ変換し、Playwright ``page.evaluate`` と同様に fail-fast させる。
+
+    ``worker_traceback`` に Worker 側の完全なトレースバックが入るので、真因
+    （DB エラー等）が pytest の失敗メッセージへ直接現れる。
+    """
+
+    def __init__(
+        self,
+        error: str | None,
+        traceback: str | None = None,
+        *,
+        stdout: str | None = None,
+        stderr: str | None = None,
+    ) -> None:
+        self.worker_error = error
+        self.worker_traceback = traceback
+        self.stdout = stdout
+        self.stderr = stderr
+        msg = error or "worker code execution failed"
+        if traceback:
+            msg = f"{msg}\n--- worker traceback ---\n{traceback.rstrip()}"
+        super().__init__(msg)
+
+
+class ConfirmationRequiredError(AutomationClientError):
+    """``execute_python`` が permission confirm ゲートで止まった。
+
+    信頼モード未設定（``QPUPPETEER_TRUSTED_MODE`` 未設定）の Worker で
+    whitelist 外コードを実行しようとすると confirm 待ちになり、E2E では silent に
+    詰まる。これを明示例外にして原因を即わかるようにする。
+    """
+
+    def __init__(self, risk_level: str | None = None) -> None:
+        self.risk_level = risk_level
+        super().__init__(
+            "execute_python requires confirmation: the worker is not in trusted "
+            "mode. Set QPUPPETEER_TRUSTED_MODE=1 on the worker (or whitelist the "
+            f"code). risk_level={risk_level}"
+        )
+
+
 # ============================================================
 # AutomationClient
 # ============================================================

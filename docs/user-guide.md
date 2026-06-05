@@ -1346,6 +1346,30 @@ except WidgetNotActionableError as e:
 2. dev モード（既存 QGIS 相乗り）で execute_python 多用テストを走らせない
 3. または対象 QGIS を起動するときに `QPUPPETEER_TRUSTED_MODE=1` を立てておく
 
+> pytest ラッパ `execute_python` は confirm ゲートを `ConfirmationRequiredError`
+> として raise するので、固まらず即原因が分かる（dev モードで信頼モード未設定の
+> サイン）。
+
+### `execute_python` のコード内例外が見えない（後段が謎の timeout）
+
+**症状**: `execute_python` で開いたダイアログ等の後段で `wait_for_*` /
+Locator が timeout するが、失敗理由が「ウィジェットが見つからない」だけで
+真因が見えない。
+
+**原因**: Worker 側のコード（例: ダイアログ `__init__` 内の DB アクセス）で
+例外が起きているのに、`execute_python` の戻り dict（`success=False` /
+`traceback`）を検査していない。
+
+**対処**:
+
+1. pytest ラッパ `execute_python` は既定で **`WorkerCodeError` を raise** する
+   （`raise_on_error=True`）。Worker 側トレースバックが例外メッセージに載るので、
+   真因（DB のテーブル不在など）が一発で分かる。
+2. 生 dict を自分で検査したい場合のみ `raise_on_error=False` にして
+   `result["success"]` / `result["traceback"]` を見る。
+3. 後段が timeout する E2E では、まず操作の起点となった `execute_python` が
+   raise していないか（= success だったか）を疑う。
+
 ### `register_handler` が `reserved_namespace` で失敗
 
 **症状**: ホストアプリ側で `worker.register_handler("qgis_foo", ...)` がエラー

@@ -6,12 +6,16 @@ Public API:
     - ``WidgetNotActionableError`` / ``SelectorAmbiguousError`` — Locator が
       上げる例外
     - ``E2EAutomationClient`` — 同期版 AutomationClient ラッパ
+    - ``WorkerCodeError`` / ``ConfirmationRequiredError`` — ``execute_python``
+      が Worker 側コード例外 / confirm ゲートで上げる例外
 
 pytest plugin は ``entry_points`` 経由で auto-load されるため、テストコードから
 ``import pytest_qgis_puppeteer.plugin`` する必要はない。fixture は自動で利用可能。
 """
 
 from __future__ import annotations
+
+from qgis_puppeteer.client import ConfirmationRequiredError, WorkerCodeError
 
 from pytest_qgis_puppeteer._expect import expect
 from pytest_qgis_puppeteer.automation_client import E2EAutomationClient
@@ -28,11 +32,13 @@ from pytest_qgis_puppeteer.spawn import (
 )
 
 __all__ = [
+    "ConfirmationRequiredError",
     "E2EAutomationClient",
     "Locator",
     "SelectorAmbiguousError",
     "SpawnedWorker",
     "WidgetNotActionableError",
+    "WorkerCodeError",
     "WorkerRegisterTimeout",
     "expect",
     "spawn_qgis",

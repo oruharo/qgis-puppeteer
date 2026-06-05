@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`E2EAutomationClient.execute_python` is now fail-fast.** When the
+  worker-side code raises, the pytest wrapper raises `WorkerCodeError`
+  (carrying the worker traceback / stdout / stderr) instead of silently
+  returning a `success=False` dict that tests had to inspect manually. A
+  confirm gate (worker not in trusted mode) raises
+  `ConfirmationRequiredError`. Pass `raise_on_error=False` to restore the
+  previous dict-returning behavior. The new exceptions subclass
+  `AutomationClientError` and are exported from both `qgis_puppeteer.client`
+  and `pytest_qgis_puppeteer`. This aligns the wrapper with the `call()`
+  "exceptions propagate to pytest" contract and Playwright's `page.evaluate`.
+
+### Fixed
+
+- Corrected the `execute_python` examples in the pytest-qgis-puppeteer README
+  and the `spawn_qgis` docstring: the method returns the handler **dict**
+  (with a stringified `result` populated from `_result`), not the evaluated
+  value — the previous `assert ... == 0` snippets could never pass.
+
 ## [0.1.0] — 2026-05-02
 
 Initial public release. The package is a Hub/Worker bridge between Claude
