@@ -6,8 +6,8 @@
 
     with spawn_qgis(qgis_bin=QGIS_BIN, args=["--clean-canvas"], hub_port=hub_port):
         client.wait_for_worker(timeout_s=60)
-        # execute_python は dict を返し、コード例外時は WorkerCodeError を raise。
-        assert client.execute_python("_result = len(...)")["result"] == "0"
+        # execute_python は _result の値を返す。コード例外時は WorkerCodeError。
+        assert client.execute_python("_result = len(...)") == 0
 
 session-scoped な ``hub_process`` / ``automation_client`` fixture は plugin 側を
 そのまま使い、helper は **Worker のみ** spawn する。Hub は session を通じて 1 つ。
@@ -382,7 +382,8 @@ def _shutdown_worker_best_effort(
     for info in instances:
         if info.instance_id != instance_id and info.pid != proc.pid:
             continue
-        # まだ Hub 側に残っている → remote graceful shutdown を試す
+        # まだ Hub 側に残っている → remote graceful shutdown を試す（best-effort）。
+        # execute_python は fail-fast だが、下の except でまとめて握る。
         try:
             automation_client.execute_python(
                 "from qgis.core import QgsApplication; QgsApplication.exitQgis()",

@@ -16,6 +16,7 @@ from typing import Any
 from qgis.gui import QgisInterface
 
 from .code_analyzer import CodeAnalyzer
+from .code_result import run_code
 from .permission_manager import PermissionManager
 
 logger = logging.getLogger("qgis_puppeteer.python_executor")
@@ -50,7 +51,14 @@ def execute_python(code: str, iface: QgisInterface | None = None) -> dict:
         - risk_level: Risk level of the code
         - stdout: Standard output
         - stderr: Standard error
-        - result: Return value (if any)
+        - result_set: Whether the code assigned ``_result`` (False = side-effect
+          only call, no value captured).
+        - result: The captured value when JSON-serializable; otherwise None.
+          A value is captured only via an explicit ``_result = ...`` assignment.
+        - result_serializable: True if ``result`` holds the real value; False if
+          the value could not be JSON-serialized (see ``result_repr``).
+        - result_repr / result_type: repr and type name of the value, only when
+          not serializable (diagnostics; ``result`` stays None in that case).
         - error: Error message (if failed)
         - permission_level: Permission level used
     """
@@ -155,20 +163,19 @@ def _execute_code_internal(
 
     try:
         with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
-            # Execute code
-            exec(code, context)
+            # exec 単一モードで実行し、明示 `_result` の捕捉状態と JSON 安全な
+            # result フィールド群を得る（構文依存の魔法は持たない）。詳細は code_result。
+            result_fields = run_code(code, context)
 
-        # Extract result if available
-        result = context.get("_result", None)
-
-        return {
+        out = {
             "success": True,
             "stdout": stdout_buffer.getvalue(),
             "stderr": stderr_buffer.getvalue(),
-            "result": str(result) if result is not None else None,
             "permission_level": permission_level,
             "risk_level": analysis["risk_level"],
         }
+        out.update(result_fields)
+        return out
 
     except Exception as e:
         return {

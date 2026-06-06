@@ -24,6 +24,7 @@ from pytest_qgis_puppeteer.automation_client import (
     ConfirmationRequiredError,
     E2EAutomationClient,
     ModalBlockedError,
+    NonSerializableResultError,
     WorkerCodeError,
     _find_in_snapshot,
     _raise_for_execute_result,
@@ -1054,12 +1055,12 @@ class TestPerActionScreenshotCapture:
 
 
 # ============================================================
-# execute_python の fail-fast（OSS 提案 / WorkerCodeError）
+# execute_python — 値モード（fail-fast、明示 _result）
 # ============================================================
 
 
-class TestExecutePythonRaises:
-    """``execute_python`` が Worker 側コード例外を握りつぶさず raise すること。"""
+class TestExecutePythonValueMode:
+    """``execute_python`` は値を返し、失敗は必ず例外にする（silent-wrong 排除）。"""
 
     _ERR_RESULT = {
         "success": False,
@@ -1071,42 +1072,97 @@ class TestExecutePythonRaises:
         "risk_level": "low",
     }
 
-    def test_raises_worker_code_error_on_failure(self) -> None:
+    def test_returns_captured_value_typed(self) -> None:
+        ok = {"success": True, "result_set": True, "result": 0, "result_serializable": True}
+        e2e, _inner = _make_client(call_results=[ok])
+        assert e2e.execute_python("_result = len(layers)") == 0
+
+    def test_returns_container_value(self) -> None:
+        ok = {"success": True, "result_set": True, "result": [1, 2, 3], "result_serializable": True}
+        e2e, _inner = _make_client(call_results=[ok])
+        assert e2e.execute_python("_result = [1, 2, 3]") == [1, 2, 3]
+
+    def test_no_result_set_returns_none(self) -> None:
+        # 副作用専用呼び出し（_result 未代入）は None。
+        ok = {"success": True, "result_set": False, "result": None, "result_serializable": True}
+        e2e, _inner = _make_client(call_results=[ok])
+        assert e2e.execute_python("QgsProject.instance().clear()") is None
+
+    def test_code_exception_raises_worker_code_error(self) -> None:
         e2e, _inner = _make_client(call_results=[dict(self._ERR_RESULT)])
         with pytest.raises(WorkerCodeError) as ei:
             e2e.execute_python("open_dialog()")
-        # 真因（DB エラー）とトレースバックが例外に載る
         assert "does not exist" in str(ei.value)
         assert ei.value.worker_traceback is not None
         assert "UndefinedTable" in ei.value.worker_traceback
         assert ei.value.stdout == "before\n"
 
-    def test_success_returns_dict_without_raising(self) -> None:
-        ok = {"success": True, "result": "0", "stdout": "", "stderr": ""}
-        e2e, _inner = _make_client(call_results=[ok])
-        assert e2e.execute_python("_result = 0") == ok
-
-    def test_requires_confirmation_raises_confirmation_error(self) -> None:
-        confirm = {
-            "success": False,
-            "requires_confirmation": True,
-            "risk_level": "high",
+    def test_non_serializable_raises(self) -> None:
+        # 直列化不可な _result は repr に化けさせず loud に raise。
+        res = {
+            "success": True,
+            "result_set": True,
+            "result": None,
+            "result_serializable": False,
+            "result_type": "QgsVectorLayer",
+            "result_repr": "<QgsVectorLayer: 'roads'>",
         }
+        e2e, _inner = _make_client(call_results=[res])
+        with pytest.raises(NonSerializableResultError) as ei:
+            e2e.execute_python("_result = layer")
+        assert ei.value.result_type == "QgsVectorLayer"
+        assert "roads" in (ei.value.result_repr or "")
+
+    def test_requires_confirmation_raises(self) -> None:
+        confirm = {"success": False, "requires_confirmation": True, "risk_level": "high"}
         e2e, _inner = _make_client(call_results=[confirm])
         with pytest.raises(ConfirmationRequiredError) as ei:
-            e2e.execute_python("import os; os.system('rm -rf /')")
+            e2e.execute_python("import os")
         assert ei.value.risk_level == "high"
 
-    def test_raise_on_error_false_returns_raw_dict(self) -> None:
-        e2e, _inner = _make_client(call_results=[dict(self._ERR_RESULT)])
-        res = e2e.execute_python("open_dialog()", raise_on_error=False)
-        assert res["success"] is False
-        assert res["error"] == 'relation "foo" does not exist'
 
-    def test_default_mock_result_does_not_raise(self) -> None:
-        # 既存テスト互換：success キーが無い dict（{"ok": True}）は素通し。
-        e2e, _inner = _make_client()  # 既定 return は {"ok": True}
-        assert e2e.execute_python("x = 1") == {"ok": True}
+class TestExecutePythonDetailed:
+    """``execute_python_detailed`` は ExecResult を返し、コード失敗で raise しない。"""
+
+    def test_success_exposes_value_and_streams(self) -> None:
+        ok = {
+            "success": True,
+            "result_set": True,
+            "result": 5,
+            "result_serializable": True,
+            "stdout": "hi\n",
+            "stderr": "",
+        }
+        e2e, _inner = _make_client(call_results=[ok])
+        r = e2e.execute_python_detailed("_result = 5")
+        assert r.success is True
+        assert r.value == 5
+        assert r.result_set is True
+        assert r.stdout == "hi\n"
+
+    def test_code_failure_does_not_raise(self) -> None:
+        err = {"success": False, "error": "boom", "traceback": "tb", "stdout": "", "stderr": ""}
+        e2e, _inner = _make_client(call_results=[err])
+        r = e2e.execute_python_detailed("1/0")  # 例外を投げない
+        assert r.success is False
+        assert r.error == "boom"
+        assert r.traceback == "tb"
+
+    def test_non_serializable_inspectable_without_raise(self) -> None:
+        res = {
+            "success": True,
+            "result_set": True,
+            "result": None,
+            "result_serializable": False,
+            "result_type": "QgsGeometry",
+            "result_repr": "<geom>",
+        }
+        e2e, _inner = _make_client(call_results=[res])
+        r = e2e.execute_python_detailed("_result = geom")
+        assert r.result_serializable is False
+        assert r.result_type == "QgsGeometry"
+        assert r.result_repr == "<geom>"
+        assert r.value is None
 
 
 class TestRaiseForExecuteResultHelper:
@@ -1121,17 +1177,14 @@ class TestRaiseForExecuteResultHelper:
         _raise_for_execute_result({"success": True})
 
     def test_missing_success_key_is_noop(self) -> None:
-        # success キー欠落は True 扱い（後方互換）。
         _raise_for_execute_result({"ok": True})
 
     def test_confirmation_precedence_over_worker_error(self) -> None:
-        # requires_confirmation が最優先（traceback が混在しても confirm を上げる）。
         with pytest.raises(ConfirmationRequiredError):
             _raise_for_execute_result(
                 {"success": False, "requires_confirmation": True, "traceback": "x"}
             )
 
-    def test_success_false_without_traceback_still_raises(self) -> None:
-        # traceback 無しの success=False も silent にせず WorkerCodeError。
+    def test_success_false_raises_worker_code_error(self) -> None:
         with pytest.raises(WorkerCodeError):
-            _raise_for_execute_result({"success": False, "message": "cancelled"})
+            _raise_for_execute_result({"success": False, "error": "boom"})

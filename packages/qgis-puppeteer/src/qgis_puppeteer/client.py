@@ -159,6 +159,27 @@ class ConfirmationRequiredError(AutomationClientError):
         )
 
 
+class NonSerializableResultError(AutomationClientError):
+    """``execute_python`` の ``_result`` が JSON 直列化できなかった。
+
+    QGIS の layer / geometry など live オブジェクトを ``_result`` に入れると
+    wire を越えられない。silent に repr 文字列へ化けると「本物の値」と誤認して
+    テストが静かに誤るため、値モードの ``execute_python`` は本例外で loud に倒す。
+    値が欲しい場合は Worker 側で素データへ変換すること
+    （例: ``_result = layer.name()`` / ``layer.featureCount()``）。
+    """
+
+    def __init__(self, result_type: str | None = None, result_repr: str | None = None) -> None:
+        self.result_type = result_type
+        self.result_repr = result_repr
+        super().__init__(
+            f"execute_python result is not JSON-serializable (type={result_type}). "
+            "Convert it to plain data in the worker before returning "
+            "(e.g. layer.name(), layer.featureCount()). "
+            f"repr: {result_repr or '?'}"
+        )
+
+
 # ============================================================
 # AutomationClient
 # ============================================================

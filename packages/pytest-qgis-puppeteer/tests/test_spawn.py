@@ -85,9 +85,9 @@ class _FakeAutomationClient:
                     inst.launch_token = token
         return snapshot
 
-    def execute_python(self, code: str, *, instance: str | None = None) -> dict:
+    def execute_python(self, code: str, *, instance: str | None = None) -> Any:
         self.execute_python_calls.append({"code": code, "instance": instance})
-        return {}
+        return None
 
 
 class _FakePopen:

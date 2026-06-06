@@ -6,25 +6,37 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed
+### Changed (breaking)
 
-- **`E2EAutomationClient.execute_python` is now fail-fast.** When the
-  worker-side code raises, the pytest wrapper raises `WorkerCodeError`
-  (carrying the worker traceback / stdout / stderr) instead of silently
-  returning a `success=False` dict that tests had to inspect manually. A
-  confirm gate (worker not in trusted mode) raises
-  `ConfirmationRequiredError`. Pass `raise_on_error=False` to restore the
-  previous dict-returning behavior. The new exceptions subclass
-  `AutomationClientError` and are exported from both `qgis_puppeteer.client`
-  and `pytest_qgis_puppeteer`. This aligns the wrapper with the `call()`
-  "exceptions propagate to pytest" contract and Playwright's `page.evaluate`.
-
-### Fixed
-
-- Corrected the `execute_python` examples in the pytest-qgis-puppeteer README
-  and the `spawn_qgis` docstring: the method returns the handler **dict**
-  (with a stringified `result` populated from `_result`), not the evaluated
-  value — the previous `assert ... == 0` snippets could never pass.
+- **`E2EAutomationClient.execute_python` now returns the captured value, not a
+  status dict.** The value is whatever the worker-side code assigns to
+  `_result` (an explicit convention — there is intentionally **no** implicit
+  "single expression / last expression" evaluation, so behavior never depends on
+  code-string syntax such as a trailing `;`). No `_result` assigned → returns
+  `None` (side-effect call). JSON-serializable values keep their type.
+- **`execute_python` is strictly fail-fast** (a test must never proceed on a
+  wrong value):
+  - worker-side code exception → `WorkerCodeError` (carries the worker
+    traceback / stdout / stderr);
+  - non-serializable `_result` (e.g. a live `QgsVectorLayer`) →
+    `NonSerializableResultError` (convert to plain data in the worker first);
+  - confirm gate (worker not in trusted mode) → `ConfirmationRequiredError`.
+  All subclass `AutomationClientError` and are exported from
+  `qgis_puppeteer.client` and `pytest_qgis_puppeteer`. The previous
+  `raise_on_error=` flag is **removed**.
+- **New `execute_python_detailed(code) -> ExecResult`** for inspection: returns
+  a typed `ExecResult` (`success` / `result_set` / `value` / `stdout` / `stderr`
+  / `error` / `traceback` / `result_serializable` / `result_type` / …) and does
+  **not** raise on worker code failure. Use it when you need stdout/stderr or
+  want to branch on success yourself. Two methods, two stable return types — no
+  polymorphic flag.
+- **Core `qgis_execute_python` no longer stringifies the result.** The handler
+  runs the code (`exec`, single mode) and returns the value `_result` holds:
+  JSON-serializable values keep their type; non-serializable ones are kept out of
+  `result` and reported via `result_serializable=False` + `result_repr` +
+  `result_type` (NaN/Inf count as non-serializable). New `result_set` field marks
+  whether the code captured a value. The MCP gateway response shape is unchanged
+  (still JSON-formatted for Claude).
 
 ## [0.1.0] — 2026-05-02
 

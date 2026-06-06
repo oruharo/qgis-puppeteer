@@ -159,20 +159,23 @@ def test_clean_canvas_clears_layers(hub_port, automation_client):
         qgis_bin=QGIS_BIN,
         args=["--clean-canvas"],
     ) as worker:
-        result = automation_client.execute_python(
+        n = automation_client.execute_python(
             "_result = len(QgsProject.instance().mapLayers())",
             instance=worker.instance_id,
         )
-        # execute_python returns the handler dict. `result["result"]` is the
-        # str() of whatever the code assigns to `_result` (None if unset).
-        assert result["result"] == "0"
+        assert n == 0
 ```
 
-> `execute_python` is **fail-fast**: if the worker-side code raises, it now
-> raises `WorkerCodeError` (with the worker traceback) instead of returning a
-> `success=False` dict silently. Pass `raise_on_error=False` to opt out and
-> inspect the raw dict yourself. A confirm gate (worker not in trusted mode)
-> raises `ConfirmationRequiredError`.
+> `execute_python` returns the value the code assigns to **`_result`** (an
+> explicit convention — no implicit "last expression" magic, so behavior never
+> depends on code-string syntax). No `_result` → returns `None` (side-effect
+> call). JSON-serializable values keep their type. It is **fail-fast** so a test
+> never proceeds on a wrong value: a worker-side exception raises
+> `WorkerCodeError` (with the worker traceback); a non-serializable `_result`
+> (e.g. a live `QgsVectorLayer` — convert to plain data in the worker first)
+> raises `NonSerializableResultError`; a confirm gate (worker not in trusted
+> mode) raises `ConfirmationRequiredError`. Need stdout/stderr or to branch on
+> success without raising? Use `execute_python_detailed(code) -> ExecResult`.
 
 Each `spawn_qgis(...)` block reuses the session's Hub but spawns a fresh
 Worker. Multiple `spawn_qgis()` calls (or coexistence with the

@@ -1357,18 +1357,25 @@ Locator が timeout するが、失敗理由が「ウィジェットが見つか
 真因が見えない。
 
 **原因**: Worker 側のコード（例: ダイアログ `__init__` 内の DB アクセス）で
-例外が起きているのに、`execute_python` の戻り dict（`success=False` /
-`traceback`）を検査していない。
+例外が起きている。古い版では `execute_python` がこれを `success=False` の dict に
+詰めて「正常応答」として返していたため silent になっていた。
 
 **対処**:
 
-1. pytest ラッパ `execute_python` は既定で **`WorkerCodeError` を raise** する
-   （`raise_on_error=True`）。Worker 側トレースバックが例外メッセージに載るので、
-   真因（DB のテーブル不在など）が一発で分かる。
-2. 生 dict を自分で検査したい場合のみ `raise_on_error=False` にして
-   `result["success"]` / `result["traceback"]` を見る。
+1. pytest ラッパ `execute_python` は **`WorkerCodeError` を raise** する。Worker 側
+   トレースバックが例外メッセージに載るので、真因（DB のテーブル不在など）が
+   一発で分かる。
+2. stdout 等や成否を自前で検査したい場合は `execute_python_detailed(code)` を使い、
+   返ってくる `ExecResult`（`.success` / `.traceback` / `.stdout` 等）を見る
+   （こちらはコード失敗で raise しない）。
 3. 後段が timeout する E2E では、まず操作の起点となった `execute_python` が
-   raise していないか（= success だったか）を疑う。
+   raise していないかを疑う。
+
+> 補足: `execute_python` は Worker 側コードが **`_result` に代入した値** を返す
+> （明示規約。式の自動評価のような構文依存の魔法は持たない）。`_result` 未代入なら
+> `None`。`_result` が JSON 直列化不可（QGIS layer 等）なら
+> `NonSerializableResultError` を raise するので、QGIS 側で `.name()` /
+> `.featureCount()` 等の素データに変換してから返すこと。
 
 ### `register_handler` が `reserved_namespace` で失敗
 

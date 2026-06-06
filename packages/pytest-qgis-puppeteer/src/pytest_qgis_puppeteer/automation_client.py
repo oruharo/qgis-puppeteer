@@ -25,12 +25,14 @@ import asyncio
 import logging
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from qgis_puppeteer.client import (
     AutomationClient,
     ConfirmationRequiredError,
     InstanceInfo,
+    NonSerializableResultError,
     WorkerCodeError,
 )
 from qgis_puppeteer.protocol import Role
@@ -64,14 +66,60 @@ class ModalBlockedError(RuntimeError):
         self.modal = modal
 
 
+@dataclass(frozen=True)
+class ExecResult:
+    """``execute_python_detailed`` の戻り値（handler 応答の typed ビュー）。
+
+    値モード ``execute_python`` と違い **コード失敗でも raise しない**。成否や
+    stdout / 非直列化状態を自分で検査したいとき用。``raw`` に元 dict を保持する。
+    """
+
+    success: bool
+    result_set: bool
+    value: Any
+    result_serializable: bool
+    stdout: str
+    stderr: str
+    error: str | None = None
+    traceback: str | None = None
+    result_type: str | None = None
+    result_repr: str | None = None
+    requires_confirmation: bool = False
+    permission_level: str | None = None
+    risk_level: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_payload(cls, payload: Any) -> ExecResult:
+        """handler の結果 dict（または非 dict）から ExecResult を構築する。"""
+        d = payload if isinstance(payload, dict) else {}
+        return cls(
+            success=bool(d.get("success", False)),
+            result_set=bool(d.get("result_set", False)),
+            value=d.get("result"),
+            result_serializable=bool(d.get("result_serializable", True)),
+            stdout=str(d.get("stdout", "")),
+            stderr=str(d.get("stderr", "")),
+            error=d.get("error"),
+            traceback=d.get("traceback"),
+            result_type=d.get("result_type"),
+            result_repr=d.get("result_repr"),
+            requires_confirmation=bool(d.get("requires_confirmation", False)),
+            permission_level=d.get("permission_level"),
+            risk_level=d.get("risk_level"),
+            raw=dict(d),
+        )
+
+
 def _raise_for_execute_result(result: Any) -> None:
-    """``execute_python`` 系の結果 dict を検査し、失敗なら例外へ変換する。
+    """``execute_python`` 結果 dict を検査し、コード失敗なら例外へ変換する。
 
     - ``requires_confirmation`` → :class:`ConfirmationRequiredError`
     - その他の ``success=False`` → :class:`WorkerCodeError`
-      （``traceback`` があればコード例外。無くても fail-fast のため loud に倒す）
 
-    ``success`` が True、または dict でない戻り値はそのまま通す（no-op）。
+    非直列化（``result_serializable=False``）の判定は値モード側で別途行う
+    （detailed モードでは raise しないため、ここには含めない）。
+    ``success`` が True、または dict でない戻り値は no-op。
     """
     if not isinstance(result, dict) or result.get("success", True):
         return
@@ -376,41 +424,59 @@ class E2EAutomationClient:
     # 便利メソッド（Worker コマンド薄ラッパ）
     # ------------------------------------------------------------
 
-    def execute_python(
-        self,
-        code: str,
-        *,
-        instance: str | None = None,
-        raise_on_error: bool = True,
-    ) -> dict[str, Any]:
-        """`qgis_execute_python` を呼ぶ。ホワイトリスト許可コードのみ実行可。
+    def execute_python(self, code: str, *, instance: str | None = None) -> Any:
+        """`qgis_execute_python` を呼び、コードが捕捉した **値** を返す。
 
-        Worker 側のコード内で例外が起きた場合（handler が ``success=False`` +
-        ``traceback`` を返した場合）、既定で :class:`WorkerCodeError` を raise する
-        （Playwright ``page.evaluate`` と同じ fail-fast）。これにより
-        ``execute_python`` 経由で開いたダイアログの ``__init__`` 内例外などが
-        silent にならず、真因が pytest の失敗メッセージへ直接出る。confirm ゲート
-        （信頼モード未設定）に当たった場合は :class:`ConfirmationRequiredError`。
+        値を返したいときは Worker 側コードで **``_result`` に代入** する（明示
+        規約。式の自動評価のような構文依存の魔法は持たない）::
 
-        成功時は handler の結果 dict をそのまま返す
-        （``{"success": True, "stdout", "stderr", "result", ...}``）。``result`` は
-        コード内で ``_result = ...`` に代入した値の **文字列表現**（未代入なら
-        ``None``）。値そのものを型付きで受け取る API ではない点に注意。
+            n = qgis.execute_python("_result = len(QgsProject.instance().mapLayers())")
+            assert n == 0
+
+        ``_result`` を代入しなければ ``None``（＝副作用専用呼び出し）。値は JSON
+        直列化可能なら型を保って返る（int / str / list / dict / bool / None）。
+
+        **fail-fast**（テストが silent に誤らないよう、失敗は必ず例外にする）:
+
+        - コード内で例外 → :class:`WorkerCodeError`（真因の traceback が載る）
+        - ``_result`` が JSON 直列化不可（QGIS layer 等）→
+          :class:`NonSerializableResultError`（Worker 側で素データへ変換せよ）
+        - confirm ゲート（信頼モード未設定）→ :class:`ConfirmationRequiredError`
+
+        stdout / stderr や成否そのものを検査したい場合は
+        :meth:`execute_python_detailed` を使う（そちらはコード失敗で raise しない）。
 
         Args:
-            code: 実行する Python コード。値を返したいなら ``_result`` に代入する。
+            code: 実行する Python コード。値は ``_result`` に代入する。
             instance: 対象 instance selector（未指定は sticky / Hub default）。
-            raise_on_error: ``False`` にすると失敗時も raise せず生 dict を返す
-                （``success`` を自前で検査したい場合の opt-out。後方互換用）。
+
+        Returns:
+            ``_result`` の値（JSON 直列化可能な型）。未代入なら ``None``。
 
         Raises:
-            WorkerCodeError: コード実行が例外で失敗（``raise_on_error=True`` 時）。
-            ConfirmationRequiredError: confirm が必要（同上）。
+            WorkerCodeError: コード実行が例外で失敗。
+            NonSerializableResultError: ``_result`` が JSON 直列化不可。
+            ConfirmationRequiredError: confirm が必要（信頼モード未設定）。
         """
         result = self.call("qgis_execute_python", {"code": code}, instance=instance)
-        if raise_on_error:
-            _raise_for_execute_result(result)
-        return result
+        _raise_for_execute_result(result)
+        if isinstance(result, dict) and result.get("result_serializable") is False:
+            raise NonSerializableResultError(result.get("result_type"), result.get("result_repr"))
+        return result.get("result") if isinstance(result, dict) else result
+
+    def execute_python_detailed(self, code: str, *, instance: str | None = None) -> ExecResult:
+        """`qgis_execute_python` を呼び、:class:`ExecResult` を返す（inspection 用）。
+
+        :meth:`execute_python` と違い **コード失敗でも raise しない**。``.success`` /
+        ``.value`` / ``.result_set`` / ``.stdout`` / ``.stderr`` / ``.traceback`` /
+        ``.result_serializable`` / ``.requires_confirmation`` を自分で検査する。
+
+        stdout が欲しい、成否を分岐したい、非直列化を許容して repr を見たい、等の
+        ケース向け。接続断などプロトコル層の例外（``RequestError`` 等）はそのまま
+        伝播する（コードの実行結果とは別レイヤのため）。
+        """
+        result = self.call("qgis_execute_python", {"code": code}, instance=instance)
+        return ExecResult.from_payload(result)
 
     def snapshot_ui(
         self,
