@@ -38,7 +38,26 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whether the code captured a value. The MCP gateway response shape is unchanged
   (still JSON-formatted for Claude).
 
-## [0.1.0] — 2026-05-02
+### Fixed
+
+- **`wait_for_widget` / `Locator.snapshot()` no longer time out on a modeless
+  dialog parented to the main window.** A top-level `QDialog` shown with
+  `parent=mainWindow` appeared in **both** `snapshot_ui`'s `visible_dialogs`
+  (it is a top-level widget) **and** the `main_window` subtree (it is a QObject
+  child of the main window). The selector resolver then saw the *same* widget
+  twice and strict mode reported `selector_ambiguous`, so the widget was treated
+  as "not found" and the wait timed out. `snapshot_ui` now emits a **disjoint
+  forest**: any widget reported as its own root (`active_modal` / each
+  `visible_dialogs` entry / `main_window`) is excluded from every other root's
+  subtree, so each widget appears exactly once (this also covers dialog-parented-
+  to-dialog nesting). The snapshot payload is correspondingly smaller. A
+  regression introduced when the strict-mode selector resolver was unified across
+  the live tree and the snapshot path (ADR-0002 §8.1).
+- **Live-tree resolution (`click` / `fill` / `check_actionability`) with
+  `scope="any"` no longer falsely reports `selector_ambiguous`** for a parented
+  top-level dialog. `_collect_candidates` walked overlapping roots (the main
+  window and the dialog that is also its descendant) and collected the same
+  widget twice; candidates are now de-duplicated by object identity.
 
 Initial public release. The package is a Hub/Worker bridge between Claude
 Desktop / pytest and a running QGIS, plus a pytest plugin that drives QGIS

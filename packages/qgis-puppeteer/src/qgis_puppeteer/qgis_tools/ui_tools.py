@@ -72,6 +72,18 @@ def snapshot_ui(
             - visible_dialogs: Other visible top-level QDialog instances.
             - active_window: The currently focused top-level widget class/title.
             - main_window: QGIS main window tree (only if include_main_window).
+
+    The returned roots form a **disjoint forest**: a widget reported as its own
+    root (``active_modal`` / a ``visible_dialogs`` entry / ``main_window``) is
+    excluded from every other root's subtree. A modeless ``QDialog`` shown with
+    ``parent=mainWindow`` is a top-level window *and* a ``QObject`` child of the
+    main window, so without this it would appear in both ``visible_dialogs`` and
+    the ``main_window`` subtree — the duplicate then trips the selector resolver's
+    strict mode (``selector_ambiguous``) and ``wait_for_widget`` times out
+    (ADR-0002 §8.1). Consequence: such a dialog is reported under
+    ``visible_dialogs`` only, *not* under ``main_window`` (the live-tree
+    ``_find_widget`` with ``root_object_name="QgisApp"`` still reaches it via
+    ``findChildren``, which crosses window boundaries — see that selector's note).
     """
     app = QApplication.instance()
     result: dict[str, Any] = {
@@ -84,10 +96,47 @@ def snapshot_ui(
         return result
 
     active_modal = app.activeModalWidget()
+
+    # snapshot を「互いに素な root の森」にするため、個別 root として報告する
+    # live widget を先に確定する。各 root の subtree からは「他の root」を除外し、
+    # 同一 widget が 2 か所に出る二重カウントを防ぐ。
+    #
+    # 典型例: parent=mainWindow で show() した modeless dialog は
+    #   - visible_dialogs（top-level QDialog なので topLevelWidgets に出る）
+    #   - main_window subtree（QObject 親子で main の children に出る）
+    # の両方に現れる。selector resolver の strict mode は「同じ widget の二重
+    # カウント」を ambiguous と誤判定するため、wait_for_widget / Locator.snapshot()
+    # が「見つからない」と判断して timeout する（ADR-0002 §8.1 の回帰）。
+    # dialog-on-dialog（dialog を別 dialog に parent 付け）でも同じ重複が起きる
+    # ので、active_modal / visible_dialogs / main_window すべてを互いに除外する。
+    dialog_widgets = [
+        top
+        for top in app.topLevelWidgets()
+        if top is not active_modal
+        and isinstance(top, QDialog)
+        and (include_invisible or top.isVisible())
+    ]
+    main_widget: QWidget | None = None
+    if include_main_window:
+        for top in app.topLevelWidgets():
+            if top.objectName() == "QgisApp":
+                main_widget = top
+                break
+
+    exclude_ids: set[int] = {id(w) for w in dialog_widgets}
+    if active_modal is not None:
+        exclude_ids.add(id(active_modal))
+    if main_widget is not None:
+        exclude_ids.add(id(main_widget))
+
     if active_modal is not None:
         buddy_map = _build_buddy_label_map([active_modal])
         result["active_modal"] = _describe_widget(
-            active_modal, max_depth, include_invisible, buddy_map=buddy_map
+            active_modal,
+            max_depth,
+            include_invisible,
+            buddy_map=buddy_map,
+            exclude_ids=exclude_ids,
         )
 
     active_window = app.activeWindow()
@@ -98,29 +147,27 @@ def snapshot_ui(
             "title": active_window.windowTitle(),
         }
 
-    for top in app.topLevelWidgets():
-        if top is active_modal:
-            continue
-        if not isinstance(top, QDialog):
-            continue
-        if not include_invisible and not top.isVisible():
-            continue
+    for top in dialog_widgets:
         buddy_map = _build_buddy_label_map([top])
         result["visible_dialogs"].append(
-            _describe_widget(top, max_depth, include_invisible, buddy_map=buddy_map)
+            _describe_widget(
+                top,
+                max_depth,
+                include_invisible,
+                buddy_map=buddy_map,
+                exclude_ids=exclude_ids,
+            )
         )
 
-    if include_main_window:
-        main = None
-        for top in app.topLevelWidgets():
-            if top.objectName() == "QgisApp":
-                main = top
-                break
-        if main is not None:
-            buddy_map = _build_buddy_label_map([main])
-            result["main_window"] = _describe_widget(
-                main, max_depth, include_invisible, buddy_map=buddy_map
-            )
+    if main_widget is not None:
+        buddy_map = _build_buddy_label_map([main_widget])
+        result["main_window"] = _describe_widget(
+            main_widget,
+            max_depth,
+            include_invisible,
+            buddy_map=buddy_map,
+            exclude_ids=exclude_ids,
+        )
 
     return result
 
@@ -560,6 +607,12 @@ def _find_widget(selector: dict) -> tuple[QWidget | None, dict]:
                "any" — search all top-level widgets.
         root_object_name: If set, constrain search under the top-level
                widget whose objectName equals this value (e.g. "QgisApp").
+               Note: this walks ``findChildren`` from that root, which follows
+               the ``QObject`` parent-child tree across window boundaries, so a
+               modeless dialog parented to the root is reachable here. The
+               ``snapshot_ui`` path differs — it reports such a dialog as its own
+               root rather than nested under ``main_window`` (see ``snapshot_ui``
+               "disjoint forest" note).
         _scope_chain: 内部用。`Locator.locator(child)` でネスト時に
                外側 → 内側の selector list を渡す。各要素を順に解決して
                最深 widget を root に leaf selector を適用する
@@ -747,7 +800,22 @@ def _collect_candidates(roots: list[QWidget], selector: dict) -> list[QWidget]:
                 if class_name is not None and class_name != "QAction":
                     continue
                 candidates.append(action)
-    return candidates
+
+    # 同一 widget が複数 root 経由で重複収集される場合に id() で排除する。
+    # 例: scope="any" は全可視 top-level widget を root にするため、parent 付け
+    # された top-level dialog が「main window の子孫」としても「独立 root」とし
+    # ても walk され、同じ widget が 2 回入る。strict mode がこれを ambiguous と
+    # 誤判定して click/fill が selector_ambiguous で失敗するのを防ぐ
+    # （snapshot 側 snapshot_ui の root 分離と対になる live tree 側の対策）。
+    seen: set[int] = set()
+    unique: list[QWidget] = []
+    for cand in candidates:
+        cid = id(cand)
+        if cid in seen:
+            continue
+        seen.add(cid)
+        unique.append(cand)
+    return unique
 
 
 def _finalize_match(
@@ -854,6 +922,7 @@ def _describe_widget(
     include_invisible: bool,
     child_cap: int = _DEFAULT_MAX_CHILDREN,
     buddy_map: dict[int, str] | None = None,
+    exclude_ids: set[int] | frozenset[int] | None = None,
 ) -> dict:
     """Describe widget into dict for snapshot.
 
@@ -862,6 +931,13 @@ def _describe_widget(
             field (Playwright ``getByLabel`` selector parity). Built once at the
             top of ``snapshot_ui`` and passed down recursively to avoid
             re-scanning ``QLabel`` per node.
+        exclude_ids: ``id(widget)`` set of widgets that are reported as their own
+            snapshot root (``active_modal`` / ``visible_dialogs`` / ``main_window``).
+            Any *descendant* whose id is in this set is skipped so the same widget
+            never appears under two roots (avoids strict-mode false-ambiguity; see
+            ``snapshot_ui``). The node passed as ``widget`` itself is always
+            described — only its children are filtered — so a root can carry its
+            own id in the set harmlessly.
     """
     info: dict[str, Any] = {
         "class": type(widget).__name__,
@@ -896,13 +972,19 @@ def _describe_widget(
     for child in widget.children():
         if not isinstance(child, QWidget):
             continue
+        # 別 root（active_modal / visible_dialogs / main_window）として個別に
+        # 報告される top-level dialog 等は subtree から除外して二重カウントを防ぐ。
+        if exclude_ids is not None and id(child) in exclude_ids:
+            continue
         if not include_invisible and not child.isVisible():
             continue
         if emitted >= child_cap:
             children.append({"_truncated": True, "remaining": "?"})
             break
         children.append(
-            _describe_widget(child, max_depth - 1, include_invisible, child_cap, buddy_map)
+            _describe_widget(
+                child, max_depth - 1, include_invisible, child_cap, buddy_map, exclude_ids
+            )
         )
         emitted += 1
     if children:
