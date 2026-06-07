@@ -6,6 +6,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **E2E coverage guide + ready-to-use templates** (`examples/coverage/`). A new
+  user-guide section ("E2E カバレッジ計測") explains how to measure coverage of the
+  code that runs *inside* QGIS — the two-process model means `pytest --cov` alone
+  only covers the runner, not the plugin/app under test. It uses coverage.py
+  subprocess measurement; since qgis-puppeteer already propagates the pytest
+  process environment to the spawned QGIS, setting `COVERAGE_PROCESS_START` is
+  enough to switch it on. Templates: a `.coveragerc`, a profile-scoped
+  `startup.py` hook (recommended), and a `coverage_subprocess.pth` alternative.
+  Deliberately *not* wired into the `qgis_puppet` plugin: a plugin-load-time hook
+  fires too late to capture import-time lines and would silently under-report.
+
 ### Changed (breaking)
 
 - **`E2EAutomationClient.execute_python` now returns the captured value, not a

@@ -19,12 +19,13 @@ selector・Locator・dialog handler 等の機能リファレンスをまとめ�
 5. [Locator API](#locator-api)
 6. [Dialog handler（想定外モーダルの自動応答）](#dialog-handler)
 7. [Signal spy / wait_for_signal](#signal-spy--wait_for_signal)
-8. [Uncaught Qt/Python 例外と test fail linkage](#uncaught-exceptions)
-9. [複数 QGIS（multi-instance）](#multi-instance)
-10. [Permissions / 信頼モード](#permissions)
-11. [環境変数リファレンス](#環境変数リファレンス)
-12. [Troubleshooting](#troubleshooting)
-13. [Roadmap](#roadmap)
+8. [E2E カバレッジ計測](#e2e-カバレッジ計測)
+9. [Uncaught Qt/Python 例外と test fail linkage](#uncaught-exceptions)
+10. [複数 QGIS（multi-instance）](#multi-instance)
+11. [Permissions / 信頼モード](#permissions)
+12. [環境変数リファレンス](#環境変数リファレンス)
+13. [Troubleshooting](#troubleshooting)
+14. [Roadmap](#roadmap)
 
 ---
 
@@ -910,6 +911,70 @@ selector が widget を引き当てられない場合、`{"fired": False, "match
 
 ---
 
+## E2E カバレッジ計測
+
+E2E テストは **2 プロセス**で動く:
+
+- **pytest ランナー側**（テストコード＋ client ライブラリ）
+- **QGIS 側**（実際の被テストコード = プラグイン/アプリ本体。WebSocket 越しに駆動される）
+
+`pytest --cov=...` を付けても測れるのは**ランナー側だけ**で、本命の QGIS 内コードは
+1 行も入らない。ここが E2E カバレッジの肝。
+
+### (A) ランナー側
+
+`pytest --cov=<runner側pkg>` で普通に取れる。env を分けて回す場合の combine 方針は
+[ADR-0003](architecture/0003-test-environments.md) を参照（env ごとに
+`.coverage.<env>` → 最終段で `coverage combine`、`COVERAGE_FILE` を切り替え）。
+
+### (B) QGIS 側（本命）
+
+`coverage.py` の **subprocess 計測**を使う。qgis-puppeteer は QGIS を spawn する際に
+**親プロセスの `os.environ` をそのまま継承**する（`spawn.py` の
+`_build_env(base=os.environ, …)`。fixture 経路も `spawn_qgis` 経由で同じ）。よって
+**環境変数を立てるだけで QGIS 内 coverage を有効化**でき、本体コードの変更は不要。
+
+手順（コピペ用テンプレ: [`examples/coverage/`](../examples/coverage/)）:
+
+1. **QGIS の Python に coverage を入れる**（ランナーとは別インタプリタ）:
+   `<qgis-python> -m pip install coverage`
+2. **`.coveragerc`** を用意（`parallel=true` / `concurrency=thread` /
+   `source=<対象pkg>`）。→ `examples/coverage/.coveragerc`
+3. **起動フックを 1 つ入れる**（`COVERAGE_PROCESS_START` がある時だけ発火 ＝
+   通常起動は no-op）:
+   - 推奨: テスト用 profile の `python/startup.py` に
+     `examples/coverage/startup.py` を置く（profile スコープ・site-packages 非汚染）
+   - 代替: QGIS Python の `site-packages/` に
+     `examples/coverage/coverage_subprocess.pth` を置く（interpreter init で発火 ＝
+     最速・import-time も拾う）
+4. **env を立てて実行**（QGIS に継承される）:
+   ```bash
+   export COVERAGE_PROCESS_START="$PWD/.coveragerc"
+   export COVERAGE_FILE="$PWD/.coverage"   # cwd 非依存で同じ場所に集約
+   pytest test_e2e/
+   coverage combine    # ランナー＋各 QGIS プロセスの .coverage.* をマージ
+   coverage report -m  # or coverage html / xml
+   ```
+
+### 注意点
+
+- **graceful shutdown 必須**: coverage は `atexit` で書き出すので QGIS が正常終了
+  すること。`qgis_process` / `spawn_qgis` / `fresh_qgis` は graceful kill するので
+  基本 OK（強制 kill は欠落する）。
+- **import-time フィデリティ**: profile/`.pth` フックはプラグイン load より**早い**ので
+  モジュールトップレベル行も拾える。プラグイン load 時に起動する方式だとここが漏れる
+  ため、この仕掛けは `qgis_puppet` プラグインには**あえて組み込んでいない**（静かな
+  過小報告を避ける）。
+- **`source` / `[paths]`**: 対象は自分の package を指定（qgis-puppeteer 自体ではなく）。
+  QGIS 内とランナーでパスが違うなら `[paths]` で alias して combine をマージ。
+- **外部 QGIS / dev モード**: 起動中 QGIS を再利用（`QPUPPETEER_E2E_USE_RUNNING_QGIS=1`）
+  したり独自 `qgis_command` wrapper を使う場合は env 継承が自前管理になる。その QGIS を
+  `COVERAGE_PROCESS_START`（と `COVERAGE_FILE`）付きで起動するか、wrapper で forward する。
+
+詳細手順とテンプレ本体は [`examples/coverage/README.md`](../examples/coverage/README.md)。
+
+---
+
 ## Uncaught exceptions
 
 Qt の slot で発生した Python 例外は、デフォルトで C++→Python 境界に飲まれて
@@ -1172,6 +1237,17 @@ await client.call("qgis_clear_session_permissions")
 | 変数 | 既定 | 用途 |
 |---|---|---|
 | `QPUPPETEER_LOG_LEVEL` | `INFO` | logger のレベル |
+
+### coverage（標準 coverage.py 変数 — 参考）
+
+qgis-puppeteer 独自ではないが、[E2E カバレッジ計測](#e2e-カバレッジ計測)で使う。
+spawn 時に親 env が QGIS へ継承されるので、pytest 実行 env に立てれば QGIS 内
+coverage が有効化される。
+
+| 変数 | 用途 |
+|---|---|
+| `COVERAGE_PROCESS_START` | `.coveragerc` への絶対パス。QGIS 側の subprocess 計測を有効化 |
+| `COVERAGE_FILE` | data file の出力先。cwd の違う QGIS とランナーで同じ場所に集約する用 |
 
 ---
 

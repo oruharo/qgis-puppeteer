@@ -1,0 +1,37 @@
+# Coverage config for measuring code that runs INSIDE QGIS during E2E tests.
+#
+# Copy this to your project root as `.coveragerc` (or merge into pyproject's
+# [tool.coverage.*]). See examples/coverage/README.md and the user guide
+# ("E2E カバレッジ計測") for the full flow.
+
+[run]
+# Each process — the pytest runner AND every spawned QGIS subprocess — writes
+# its own data file (.coverage.<host>.<pid>.<rand>); merge them later with
+# `coverage combine`.
+parallel = true
+
+# The qgis_puppet Worker runs its asyncio loop in a background thread, so
+# declare thread concurrency to track lines executed off the main thread.
+concurrency = thread
+
+# Limit measurement to YOUR package(s) under test — the code that runs inside
+# QGIS. (Replace `your_package`.) Do not list qgis-puppeteer itself unless you
+# actually want its coverage.
+source =
+    your_package
+
+# Tip: export COVERAGE_FILE=<absolute>/.coverage in the environment so the
+# runner and the QGIS subprocess (which may have a different working directory)
+# write their data files to the same place. Then run `coverage combine` there.
+
+[paths]
+# Map "path as seen inside QGIS" to "path as seen by the runner" in case they
+# differ (installed copy vs. source checkout). With a single shared checkout the
+# first entry suffices and the rest are harmless.
+source =
+    .
+    */site-packages/your_package
+
+[report]
+show_missing = true
+skip_covered = false
