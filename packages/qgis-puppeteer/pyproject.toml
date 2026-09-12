@@ -33,7 +33,9 @@ dependencies = [
 
 [project.optional-dependencies]
 # Claude Desktop / MCP gateway を使うときに追加で必要
-mcp = ["mcp>=1.0"]
+# gateway は mcp 2.x の API（mcp.server.mcpserver）に依存する。上限なしだと
+# 次のメジャーで import から壊れるので、メジャー単位で上限を付ける。
+mcp = ["mcp>=2,<3"]
 
 [project.urls]
 Homepage = "https://github.com/oruharo/qgis-puppeteer"

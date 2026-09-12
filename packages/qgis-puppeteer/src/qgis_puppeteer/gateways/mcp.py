@@ -5,15 +5,15 @@ ADR-0001 §5, §7 に基づき、MCP プロトコル層を自動化層の内部�
 (`python -m qgis_puppeteer.gateways.mcp`) を spawn する。
 
 ## 責務
-- `FastMCP` で `qgis-puppeteer` 用の MCP ツール群を公開する
+- `MCPServer`（mcp 2.x。1.x の `FastMCP`）で `qgis-puppeteer` 用の MCP ツール群を公開する
 - 接続ごとに `AutomationClient` を 1 つ開き、呼び出しごとに `.call(...)` で
   Hub に転送する
 - `GatewayContext` に sticky instance を保持し、lifespan 全体で共有する
-  （FastMCP の各 tool call は別 Task で走るため ContextVar では伝播しない）
+  （MCPServer の各 tool call は別 Task で走るため ContextVar では伝播しない）
 - `qgis_list_instances` / `qgis_use_instance` は Hub 直接照会／設定
 
 ## スレッド・ライフサイクル
-- FastMCP は asyncio ベースの単一イベントループ上で動作する
+- MCPServer は asyncio ベースの単一イベントループ上で動作する
 - AutomationClient は `@asynccontextmanager` のライフスパンで open/close する
 - sticky instance は `GatewayContext.current_instance` に保存される
 
@@ -45,10 +45,10 @@ from qgis_puppeteer.hub_state import select_by_selector
 from qgis_puppeteer.protocol import Role
 
 try:
-    from mcp.server.fastmcp import Context, FastMCP
+    from mcp.server.mcpserver import Context, MCPServer
 except ImportError as e:  # pragma: no cover - optional deps
     raise ImportError(
-        "McpGateway requires the 'mcp' optional dependency. "
+        "McpGateway requires the 'mcp' optional dependency (mcp 2.x). "
         "Install with: uv pip install 'qgis-puppeteer[mcp]'"
     ) from e
 
@@ -142,7 +142,7 @@ class GatewayContext:
 
 @asynccontextmanager
 async def _default_lifespan(
-    server: FastMCP,
+    server: MCPServer,
 ) -> AsyncIterator[GatewayContext]:
     """URL/origin を覚えた `GatewayContext` を返すだけ。接続は遅延させる。
 
@@ -302,14 +302,16 @@ def build_gateway(
     *,
     name: str = MCP_SERVER_NAME,
     lifespan: Any | None = None,
-) -> FastMCP:
-    """`FastMCP` インスタンスを構築し、全 MCP ツールを登録する。
+) -> MCPServer:
+    """`MCPServer` インスタンスを構築し、全 MCP ツールを登録する。
 
     `lifespan` を渡さない場合は `_default_lifespan` が使われ、
     環境変数経由で AutomationClient に接続する。テスト時は
     外部から自作の lifespan を注入して Fake AutomationClient を差し替える。
     """
-    mcp = FastMCP(
+    # mcp 2.x で位置引数の並びが変わった（name, title, description, instructions, ...）。
+    # 取り違えないよう、すべてキーワード引数で渡す。
+    mcp = MCPServer(
         name=name,
         instructions=(
             "QGIS automation gateway. "
@@ -328,7 +330,7 @@ def build_gateway(
 # ============================================================
 
 
-def _register_tools(mcp: FastMCP) -> None:
+def _register_tools(mcp: MCPServer) -> None:
     """ADR-0001 §5 の 14 ツール + instance 選択ツールを MCP に公開する。
 
     - QGIS ツール 14 種に `instance: str | None = None` を追加
@@ -621,7 +623,7 @@ def _stable_sticky_selector(info: Any) -> str:
 def main() -> int:
     """`python -m qgis_puppeteer.gateways.mcp` から呼ばれる。
 
-    FastMCP を stdio で run する。Claude Desktop がこのプロセスを spawn する。
+    MCPServer を stdio で run する。Claude Desktop がこのプロセスを spawn する。
     """
     logging.basicConfig(
         level=os.environ.get("QPUPPETEER_LOG_LEVEL", "INFO"),
