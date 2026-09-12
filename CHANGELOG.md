@@ -21,6 +21,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed (breaking)
 
+- **The `mcp` extra now requires `mcp>=2,<3`; the MCP gateway targets mcp 2.x.**
+  mcp 2.x renamed `FastMCP` to `MCPServer` and moved it to
+  `mcp.server.mcpserver`, so the gateway raised `ModuleNotFoundError: No module
+  named 'mcp.server.fastmcp'` at import as soon as the old unbounded `mcp>=1.0`
+  requirement resolved to 2.x — an MCP client saw only the connection close.
+  `qgis_puppeteer.gateways.mcp` now imports `Context` / `MCPServer` from
+  `mcp.server.mcpserver` and no longer imports under mcp 1.x, so install it with
+  the extra (`pip install "qgis-puppeteer[mcp]"`). The requirement is capped at
+  the major version so the next major cannot break the gateway the same way. The
+  MCP tool surface and the response shapes are unchanged.
 - **`E2EAutomationClient.execute_python` now returns the captured value, not a
   status dict.** The value is whatever the worker-side code assigns to
   `_result` (an explicit convention — there is intentionally **no** implicit

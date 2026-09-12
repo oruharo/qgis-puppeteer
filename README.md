@@ -37,14 +37,17 @@ See [docs/architecture/0001-qgis-puppeteer-architecture.md](docs/architecture/00
 > `dev` branch (or replace `@dev` with a tag once tagged):
 >
 > ```bash
-> pip install "qgis-puppeteer @ git+https://github.com/oruharo/qgis-puppeteer.git@dev#subdirectory=packages/qgis-puppeteer"
+> pip install "qgis-puppeteer[mcp] @ git+https://github.com/oruharo/qgis-puppeteer.git@dev#subdirectory=packages/qgis-puppeteer"
 > ```
 
 After PyPI publication:
 
 ```bash
-pip install qgis-puppeteer
+pip install "qgis-puppeteer[mcp]"
 ```
+
+The `[mcp]` extra installs the MCP SDK the gateway imports; without it
+`python -m qgis_puppeteer.gateways.mcp` fails with an ImportError.
 
 Then install the `qgis_puppet` plugin into QGIS by copying `plugins/qgis_puppet/`
 into your QGIS plugin directory (the QGIS Plugin Repository entry will be added
