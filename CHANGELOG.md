@@ -19,6 +19,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `spawn_qgis()` go through it. Raise the `qgis_startup_timeout` ini (or
   `register_timeout_s`) for heavy projects.
 
+- **The gateway says which build it is.** At startup it logs its package
+  version, install source (git commit and URL, or the local path), code
+  location, pid and Python version, to stderr and to `gateway.log`; a git
+  install also reports `serverInfo.version` as `0.1.0+g<sha7>`, which Claude
+  Code records at connection time. Asked for after the two-gateway mix-up,
+  where the mere existence of a log file was taken as proof of a fresh build.
+
 - **The Qt integration tests run again, and cover the field-reported scenarios.**
   `test_worker_integration` and friends were skipped everywhere — no PyQt5 in
   the venv or in CI — and had not been executed since ADR-0005 (two assertions
@@ -181,6 +188,36 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   thread freed up. `wait_for_worker()` gained the `state == "active"` filter
   when the state was introduced; this path did not. It now shares
   `wait_for_ready()` with the rest.
+
+- **The "bare `Error executing tool` after a Hub swap" was a second, stale
+  gateway.** Five rounds of field verification pointed at the gateway's error
+  handling; every faithful reproduction recovered cleanly. The process list
+  finally showed why: Claude Desktop's `claude_desktop_config.json` also
+  defined `qgis-puppeteer`, launched with `uvx --from <vendor dir> --with mcp`,
+  and the Desktop app injects that shared-pool server into Code-tab sessions
+  next to the project's `.mcp.json` entry of the same name. `uvx --from <local
+  dir>` never rebuilds when only `src/` changes (uv 0.8: only `--refresh`,
+  `--reinstall-package` or `uv run` notice), so that copy was months old — no
+  `_with_client`, no `qgis_wait_ready`, no log file — which is exactly what the
+  session saw: a tool missing from the list, a silent `gateway.log`, discovery
+  tools crashing while worker commands (which had a stale-connection retry for
+  longer) worked. Nothing in the current gateway was wrong. The guide gains a
+  "is a second gateway running?" check and the uvx path-source caveat, and
+  `pyproject.toml` declares `[tool.uv] cache-keys` so `uv run`/`uv sync` from a
+  local copy follow source changes.
+
+- **Every MCP tool is guarded, and the gateway keeps a log file.** Field
+  verification of f49f8f0 still produced a bare `Error executing tool
+  qgis_list_instances` right after a Hub swap — instantly, twice, then fine
+  once a worker command had run — and neither a faithful local reproduction
+  (Qt Worker respawning a real Hub, stdio gateway on Python 3.13 / websockets
+  17) nor Claude Code's own MCP log (events only, no stderr) showed the
+  exception. So the fix stops depending on knowing it: `_register_tools` wraps
+  every tool in `_guard_tool`, so an exception raised anywhere in a tool body,
+  including before `_with_client`, comes back as `gateway_internal_error` with
+  its type and traceback, and `main()` mirrors stderr into
+  `<TEMP>/qgis_puppeteer/gateway.log` (`QPUPPETEER_GATEWAY_LOG`), where the
+  SDK's own "unexpected exception" traceback also lands.
 
 - **The gateway no longer leaks exceptions as a bare `Error executing tool`.**
   Right after a Hub swap, `qgis_list_instances` failed three times in a row with
