@@ -126,6 +126,50 @@ pip install "pytest-qgis-puppeteer @ git+https://github.com/oruharo/qgis-puppete
 Hub への再接続を自分で張り直すが、新しいフィールドやツールは知らないままなので
 挙動が食い違う。
 
+#### gateway が二重に立っていないか確認する
+
+Claude Desktop の `claude_desktop_config.json` にも `qgis-puppeteer` を定義して
+いると、Desktop の Code タブのセッションには **Desktop が立てた gateway と
+`.mcp.json` の gateway の両方**が同じ名前で注入される。ツール一覧と呼び出しは
+片方（Desktop 側）に流れるので、`.mcp.json` をいくら新しくしても効かない。
+症状は「ツール一覧に新しいツール（`qgis_wait_ready` など）が無い」「gateway.log
+に何も書かれない」「一部のツールだけ本文なしの `Error executing tool` で落ちる」。
+
+```powershell
+Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'gateways\.mcp' } |
+  Select-Object ProcessId, ParentProcessId, CreationDate, CommandLine
+```
+
+`python -m qgis_puppeteer.gateways.mcp` が複数あり、親が `Claude.exe`（Desktop）
+と `claude.exe`（Code CLI）に分かれていればこれ。Desktop 側の定義を消すか、
+両方を同じスペック（git の `@dev`）に揃える。
+
+どのビルドが応答しているかは、gateway が起動時に名乗る 1 行で照合できる
+（stderr と `gateway.log` の両方に出る）:
+
+```
+INFO Gateway qgis-puppeteer 0.1.0, commit 1c1ff51… (git+https://…@dev), code at C:\…\site-packages\qgis_puppeteer, pid 12345, python 3.13.5
+```
+
+git インストールなら `serverInfo.version` も `0.1.0+g1c1ff51` の形になるので、
+Claude Code の MCP ログ（`Connection established with capabilities: … "version"`）
+でも commit が分かる。
+
+#### `uvx --from <ローカルディレクトリ>` は src の変更で再ビルドしない
+
+vendor コピーなどローカルパスを `uvx --from` に渡すと、uvx はその環境を
+キャッシュして **src が変わっても作り直さない**（uv 0.8 で確認。pyproject.toml
+を書き換えても気づかない）。`make vendor` で更新したつもりが古いビルドのまま、
+が起きる。回避:
+
+- `uvx --reinstall-package qgis-puppeteer --from <dir> ...`（毎回ビルド、数秒）
+- または git スペック `--from "qgis-puppeteer[mcp] @ git+...@dev#subdirectory=..."`
+  （commit が変われば作り直す）
+- `uv run --project <dir>` なら `[tool.uv] cache-keys` で src の変更に追従する
+
+`--with mcp` は上限なしで最新の mcp を連れてくるので、`[mcp]` extra
+（`mcp>=2,<3`）で入れること。
+
 ---
 
 ## Quickstart: Claude Desktop
@@ -1499,10 +1543,16 @@ JSON 本文の無い一文だけで失敗する。
 「クラッシュ」として扱い、**例外の型もメッセージも呼び出し側には渡さず**、
 gateway の stderr にだけ記録する。呼び出し側からは何が起きたか分からない。
 
-**対処**: gateway は想定外の例外を 1 回だけ接続の張り直しで吸収し、それでも
-落ちるなら `code: "gateway_internal_error"` に例外の型と traceback の末尾を
-載せて返す。この本文なしの形が今も出るなら、gateway が古い（MCP クライアントの
-セッションを張り直す。「アップグレード」参照）。
+**対処**: gateway は全ツールを最後の砦で包んでいて、どこで例外が出ても
+`code: "gateway_internal_error"` に例外の型・traceback の末尾・ログファイルの
+場所を載せて返す。接続まわりの例外は 1 回だけ張り直して再試行する。
+
+それでも本文なしの形が出る、または原因を追いたいときは **gateway のログ
+ファイル**を見る。stderr は MCP クライアントが飲み込むが、同じ内容が
+`%TEMP%\qgis_puppeteer\gateway.log`（`QPUPPETEER_GATEWAY_LOG` で変更可）に
+残る。MCP SDK が「unexpected exception」として記録する traceback もここに入る。
+Claude Code 自身のログ（`%LOCALAPPDATA%\claude-cli-nodejs\Cache\<project>\mcp-logs-qgis-puppeteer\*.jsonl`）
+には呼び出しの成否しか無く、traceback は無い。
 
 ### `instance_disconnected`
 

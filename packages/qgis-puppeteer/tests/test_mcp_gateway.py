@@ -209,6 +209,56 @@ class TestMcpGatewayListInstances:
         assert "still broken" in broken["error"]["message"]
         assert "always_broken" in broken["error"]["details"]["traceback"]
 
+    def test_exception_outside_with_client_is_still_structured(self, monkeypatch: Any) -> None:
+        """検証 4: `_with_client` の外で出た例外も本文なしにはしない。
+
+        _resolve_target は _with_client の手前で呼ばれる。ここが投げても
+        gateway_internal_error の JSON で返る（SDK の "Error executing tool" にしない）。
+        """
+        from qgis_puppeteer.gateways import mcp as gw
+
+        def boom(*_a: Any, **_k: Any) -> str | None:
+            raise RuntimeError("outside the client path")
+
+        monkeypatch.setattr(gw, "_resolve_target", boom)
+
+        async def run() -> tuple[bool, dict[str, Any]]:
+            async with fake_hub_server() as (_, hub_url):
+                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                async with Client(gateway, raise_exceptions=True) as client:
+                    result = await client.call_tool("qgis_list_layers", {})
+                    return bool(result.is_error), json.loads(_extract_text(result))
+
+        is_error, payload = _run(run())
+        assert is_error is True
+        assert payload["error"]["code"] == "gateway_internal_error"
+        assert payload["error"]["details"]["type"] == "RuntimeError"
+        assert "outside the client path" in payload["error"]["message"]
+        assert payload["error"]["details"]["log"].endswith("gateway.log")
+
+    def test_server_version_names_the_build(self) -> None:
+        """検証 6: 同じ 0.1.0 が続くので、git インストールなら commit を添える。"""
+        from qgis_puppeteer.gateways.mcp import _install_source, _server_version
+
+        version, source = _install_source()
+        assert version  # editable install でも版は取れる
+        assert source  # 空にはならない（path / commit / index のどれか）
+        sv = _server_version()
+        assert sv.startswith(version)
+        if source.startswith("commit "):
+            assert sv == f"{version}+g{source[7:14]}"
+        else:
+            assert sv == version
+
+    def test_gateway_log_path_honours_env(self, monkeypatch: Any) -> None:
+        from qgis_puppeteer.gateways.mcp import _gateway_log_path
+
+        monkeypatch.delenv("QPUPPETEER_GATEWAY_LOG", raising=False)
+        assert _gateway_log_path().name == "gateway.log"
+        assert _gateway_log_path().parent.name == "qgis_puppeteer"
+        monkeypatch.setenv("QPUPPETEER_GATEWAY_LOG", "D:/tmp/gw.log")
+        assert str(_gateway_log_path()).replace("\\", "/") == "D:/tmp/gw.log"
+
     def test_register_rejected_on_reconnect_is_hub_unreachable_not_a_crash(
         self, monkeypatch: Any
     ) -> None:

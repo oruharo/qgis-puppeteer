@@ -26,15 +26,19 @@ ADR-0001 §5, §7 に基づき、MCP プロトコル層を自動化層の内部�
 from __future__ import annotations
 
 import asyncio
+import functools
 import importlib.metadata
 import json
 import logging
+import logging.handlers
 import os
 import sys
+import tempfile
 import traceback
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar
 
 import websockets.exceptions
@@ -75,11 +79,41 @@ MCP_SERVER_URL: str = "https://github.com/oruharo/qgis-puppeteer"
 
 
 def _server_version() -> str:
-    """serverInfo に載せる版。2026-07-28 では各結果の `_meta` に入る。"""
+    """serverInfo に載せる版。2026-07-28 では各結果の `_meta` に入る。
+
+    パッケージ版だけでは「どのビルドが応答しているか」を区別できない（同じ
+    0.1.0 のまま数十コミット進む）ので、git インストールなら commit を
+    ``0.1.0+g<sha7>`` の形で添える。Claude Code は接続時に serverInfo を
+    ログに残すので、そこで照合できる。
+    """
+    version, source = _install_source()
+    if source.startswith("commit "):
+        return f"{version}+g{source[7:14]}"
+    return version
+
+
+def _install_source() -> tuple[str, str]:
+    """(パッケージ版, インストール元の説明) を返す。
+
+    pip / uv が書く ``direct_url.json`` から、git なら commit、ローカルパスなら
+    そのパスを拾う。無ければ PyPI 等からの通常インストール。
+    """
     try:
-        return importlib.metadata.version("qgis-puppeteer")
+        dist = importlib.metadata.distribution("qgis-puppeteer")
     except importlib.metadata.PackageNotFoundError:  # pragma: no cover - 未インストール実行
-        return ""
+        return "", "not installed (running from source)"
+    version = dist.version
+    raw = dist.read_text("direct_url.json")
+    if not raw:
+        return version, "installed from an index"
+    try:
+        info = json.loads(raw)
+    except ValueError:  # pragma: no cover - 壊れた metadata
+        return version, "unknown"
+    vcs = info.get("vcs_info") or {}
+    if vcs.get("commit_id"):
+        return version, f"commit {vcs['commit_id']} ({info.get('url', '?')})"
+    return version, f"path {info.get('url', '?')}"
 
 
 # ============================================================
@@ -437,10 +471,41 @@ def _internal_error_result(exc: BaseException) -> CallToolResult:
                     "type": type(exc).__name__,
                     # 末尾だけ。呼び出し側が原因箇所を特定できれば十分
                     "traceback": tb[-2000:],
+                    "log": str(_gateway_log_path()),
                 },
             }
         }
     )
+
+
+def _guard_tool(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+    """tool 関数の最後の砦。
+
+    `_with_client` の外（引数解決や lifespan 取得）で例外が出ると、MCP SDK は
+    それを「クラッシュ」として本文の無い ``Error executing tool <name>`` にし、
+    型もメッセージも呼び出し側には渡さない。tool 本体をここで包んで、どこで
+    出た例外でも `gateway_internal_error` の JSON に落とす。
+    """
+
+    @functools.wraps(fn)
+    async def guarded(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return await fn(*args, **kwargs)
+        except Exception as e:  # noqa: BLE001 - 最後の砦
+            return _internal_error_result(e)
+
+    return guarded
+
+
+def _gateway_log_path() -> Path:
+    """gateway のログファイル。呼び出し側からは stderr が見えないので、ここに残す。
+
+    `QPUPPETEER_GATEWAY_LOG` で上書き。既定は ``<TEMP>/qgis_puppeteer/gateway.log``。
+    """
+    override = os.environ.get("QPUPPETEER_GATEWAY_LOG")
+    if override:
+        return Path(override)
+    return Path(tempfile.gettempdir()) / "qgis_puppeteer" / "gateway.log"
 
 
 async def _call(
@@ -530,7 +595,7 @@ def build_gateway(
 # ============================================================
 
 
-def _register_tools(mcp: MCPServer) -> None:
+def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の列挙
     """ADR-0001 §5 の 14 ツール + instance 選択ツールを MCP に公開する。
 
     - QGIS ツール 14 種に `instance` 引数（`InstanceArg`）を追加
@@ -542,6 +607,19 @@ def _register_tools(mcp: MCPServer) -> None:
     `{"result": "<同じ JSON 文字列>"}` という outputSchema と structuredContent が
     自動生成され、同じ内容が本文と二重に流れてしまう。
     """
+    # 以下の `@mcp.tool(...)` を全部 `_guard_tool` 経由にする。SDK に例外を
+    # 渡さない（本文の無い "Error executing tool" を二度と出さない）ため。
+    _sdk_tool = mcp.tool
+
+    def _tool(**kwargs: Any) -> Callable[[Callable[..., Any]], Any]:
+        decorate = _sdk_tool(**kwargs)
+
+        def register(fn: Callable[..., Any]) -> Any:
+            return decorate(_guard_tool(fn))
+
+        return register
+
+    mcp.tool = _tool  # type: ignore[method-assign]
 
     # ------------------------------------------------------------
     # Instance 管理
@@ -1080,10 +1158,37 @@ def main() -> int:
 
     MCPServer を stdio で run する。Claude Desktop がこのプロセスを spawn する。
     """
+    fmt = "%(asctime)s %(name)s %(levelname)s %(message)s"
     logging.basicConfig(
         level=os.environ.get("QPUPPETEER_LOG_LEVEL", "INFO"),
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        format=fmt,
         stream=sys.stderr,
+    )
+    # stderr は MCP クライアントが飲み込んで呼び出し側からは見えない（Claude Code
+    # はイベントだけ jsonl に残し、traceback は捨てる）。同じ内容をファイルにも
+    # 書く。SDK が "unexpected exception" として記録する traceback もここに来る。
+    log_path = _gateway_log_path()
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = logging.handlers.RotatingFileHandler(
+            log_path, maxBytes=2_000_000, backupCount=3, encoding="utf-8"
+        )
+        fh.setFormatter(logging.Formatter(fmt))
+        logging.getLogger().addHandler(fh)
+        logger.info("Gateway log file: %s", log_path)
+    except OSError:  # pragma: no cover - 書けなくても動作は続ける
+        logger.warning("Could not open gateway log file %s", log_path, exc_info=True)
+    # どのビルドが応答しているかを 1 行で照合できるように名乗る。
+    # gateway が二重に立っていた事故（Desktop の shared pool と .mcp.json）で、
+    # ログファイルの有無だけでは版を取り違えた。
+    version, source = _install_source()
+    logger.info(
+        "Gateway qgis-puppeteer %s, %s, code at %s, pid %d, python %s",
+        version or "?",
+        source,
+        Path(__file__).resolve().parent.parent,
+        os.getpid(),
+        sys.version.split()[0],
     )
     gateway = build_gateway()
     gateway.run()  # デフォルト transport=stdio

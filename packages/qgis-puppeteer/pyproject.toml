@@ -49,6 +49,14 @@ qgis-puppeteer-hub = "qgis_puppeteer.hub:main"
 # ADR-0005 D6: launch_token を発番・注入して QGIS を起動する公式 helper
 qgis-puppeteer-launch = "qgis_puppeteer.launcher:main"
 
+# ローカルディレクトリから `uv run` / `uv sync` で使うとき、src の変更でも再ビルド
+# させる（既定は pyproject.toml の変更でしか気づかない）。`uvx --from <dir>` には
+# 効かない — uvx はツール環境をキャッシュして再検証しないので、そちらは
+# `--reinstall-package qgis-puppeteer` か git スペックを使うこと（user-guide の
+# 「アップグレード」参照）。
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.py" }]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
