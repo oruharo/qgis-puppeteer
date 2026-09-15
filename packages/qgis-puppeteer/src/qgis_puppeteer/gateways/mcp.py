@@ -138,6 +138,17 @@ SelectorArg = Annotated[
     ),
 ]
 
+PermissionArg = Annotated[
+    Literal["once", "session", "cancel"],
+    Field(
+        description=(
+            "ユーザーの判断。once=この 1 回だけ、session=この QGIS が動いている間、"
+            "cancel=実行しない。ホワイトリストへ永続追加する always は MCP からは"
+            "選べない（永続的に許可を広げるのは人間の操作に限る）。"
+        )
+    ),
+]
+
 DialogPredicateArg = Annotated[
     dict[str, Any],
     Field(
@@ -584,13 +595,15 @@ def _register_tools(mcp: MCPServer) -> None:
     async def qgis_execute_with_permission(
         ctx: Context,
         code: str,
-        permission: Literal["once", "session", "always", "cancel"],
+        permission: PermissionArg,
         instance: InstanceArg = None,
     ) -> str | CallToolResult:
         """ユーザー許可付きで Python コードを実行する。
 
-        permission は "once" / "session" / "always" / "cancel" のいずれか。値の
-        受け取り方は qgis_execute_python と同じで、`_result` に代入する。
+        permission は "once"（この 1 回だけ）/ "session"（この QGIS が動いている
+        間）/ "cancel"（実行しない）。この引数はユーザーの判断を代弁するものなので、
+        先に本人へ内容を示して確認すること。値の受け取り方は qgis_execute_python と
+        同じで、`_result` に代入する。
         """
         return await _call(
             ctx,

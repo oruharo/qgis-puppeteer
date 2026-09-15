@@ -459,7 +459,9 @@ ADR-0001 §Performance の実測値では定常コマンドの RTT が 10〜140m
 
 ### 9. execute_python の権限制御（E2E 信頼モード）
 
-`qgis_execute_python` は `qgis_puppeteer/qgis_tools/permission_manager.py` の 3-tier システム（whitelist / session / confirm）で保護されている。これは Claude Desktop 経由で LLM が破壊的コードを黙って実行するのを防ぐ UX フローであり、毎回新しいコードが走る E2E では **confirm 段階で UI 応答待ちになりテストが固まる**。
+`qgis_execute_python` は `qgis_puppeteer/qgis_tools/permission_manager.py` の 3-tier システム（whitelist / session / confirm）で保護されている。これは Claude Desktop 経由で LLM が破壊的コードを黙って実行するのを防ぐ仕組みであり、毎回新しいコードが走る E2E では **confirm 段階で弾かれてテストが失敗する**。
+
+> **注記（2026-09-14 訂正）**: 当初この行は「confirm 段階で UI 応答待ちになりテストが固まる」と書いていたが、実装はそうなっていない。QGIS 側に確認ダイアログは存在せず、`execute_python` は `requires_confirmation` と危険度分析をその場で返して終わる（`qgis_tools/python_executor.py`）。pytest 側はそれを `ConfirmationRequiredError` に変換するので、テストは**固まるのではなく即座に失敗する**。下の決定（信頼モード）は症状の説明が誤っていただけで、動機も結論も変わらない — whitelist 外のコードが毎回弾かれる以上、E2E には信頼モードが要る。
 
 #### 9.1 決定：env var による信頼モード
 
@@ -524,7 +526,7 @@ def qgis_process(hub_port: int) -> Iterator[subprocess.Popen]:
 
 - この env は **subprocess スコープで pytest fixture が明示的に設定**する想定。ユーザー / システムスコープで永続設定することは自己妨害であり、セットアップ手順書でも警告する
 - dev の既存 QGIS（Claude Desktop 経由で操作中）には env が伝播しないので信頼モードにならない
-- `QPUPPETEER_E2E_USE_RUNNING_QGIS=1` dev モードでは `qgis_process` fixture をスキップするので env も付与されない。dev モードの QGIS では通常の permission flow が走り、confirm で固まる = **dev モードは execute_python を多用するテストには向かない**（UI 操作系のデバッグ用途が主）
+- `QPUPPETEER_E2E_USE_RUNNING_QGIS=1` dev モードでは `qgis_process` fixture をスキップするので env も付与されない。dev モードの QGIS では通常の permission flow が走り、confirm で弾かれる = **dev モードは execute_python を多用するテストには向かない**（UI 操作系のデバッグ用途が主）
 - 将来 remote / 混在シナリオが出てきた場合は §9.2 の案 B（caller_role 転送）に移行する（`## Roadmap`）
 
 ### 10. テスト状態リセット戦略

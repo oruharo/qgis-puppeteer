@@ -49,6 +49,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed (breaking)
 
+- **The MCP tool can no longer grant a permanent permission.**
+  `qgis_execute_with_permission` used to accept `permission="always"`, which writes
+  the code into `<project root>/.claude/qgis_whitelist.json` and then runs it without
+  asking in every later session. That argument is filled in by the caller, and nothing
+  verifies that a human was consulted, so an MCP client could widen the permanent
+  policy on its own in a single call. The MCP tool now accepts `once`, `session` and
+  `cancel` only; the worker command still takes `always` for the pytest and script
+  paths, where the caller is the user's own code.
+
 - **Failed tool calls are reported with `isError`.** `hub_unreachable`,
   worker-side `RequestError`s and `instance_not_found` used to come back as
   *successful* results whose body happened to contain an `error` object, so a
@@ -103,6 +112,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (still JSON-formatted for Claude).
 
 ### Fixed
+
+- **The user guide no longer promises a QGIS confirmation dialog that does not
+  exist.** Four places described the `confirm` tier as "QGIS が確認ダイアログを出して
+  ユーザーに尋ねる", including a troubleshooting entry for tests hanging while waiting
+  on it. No such UI exists anywhere in the code, and that hang cannot happen:
+  `qgis_execute_python` refuses the call and returns `requires_confirmation` plus a
+  risk analysis in the same round trip. The guide now says what actually happens and
+  who involves a human — the MCP client's own approval UI, or the pytest wrapper
+  raising `ConfirmationRequiredError` — spells out which permission values each caller
+  may choose, and points at `<project root>/.claude/qgis_whitelist.json` as the
+  remaining way to grant a permanent allowance. The same false premise is corrected
+  in ADR-0002 §9 (with a dated note — the trusted-mode decision itself still holds)
+  and in the `ConfirmationRequiredError` / pytest-plugin docstrings.
 
 - **`wait_for_widget` / `Locator.snapshot()` no longer time out on a modeless
   dialog parented to the main window.** A top-level `QDialog` shown with

@@ -143,11 +143,13 @@ class WorkerCodeError(AutomationClientError):
 
 
 class ConfirmationRequiredError(AutomationClientError):
-    """``execute_python`` が permission confirm ゲートで止まった。
+    """``execute_python`` が permission confirm ゲートで弾かれた。
 
     信頼モード未設定（``QPUPPETEER_TRUSTED_MODE`` 未設定）の Worker で
-    whitelist 外コードを実行しようとすると confirm 待ちになり、E2E では silent に
-    詰まる。これを明示例外にして原因を即わかるようにする。
+    whitelist 外コードを実行しようとすると、Worker は実行せずに
+    ``requires_confirmation`` を返す。素の戻り値は ``success=False`` の dict なので
+    見落とすと silent に誤る。これを明示例外にして原因を即わかるようにする。
+    （確認 UI は存在しないので、ここで待たされることはない。）
     """
 
     def __init__(self, risk_level: str | None = None) -> None:

@@ -37,8 +37,9 @@ hub_port → hub_process → automation_client → qgis_process → hub_ready
 ## dev モード
 
 `QPUPPETEER_E2E_USE_RUNNING_QGIS=1` で既存 QGIS / Hub に接続して spawn を全
-skip する。書き始めや UI 操作系のデバッグ用途を想定（`execute_python` を
-多用するテストは confirm UI で固まるので不向き）。
+skip する。書き始めや UI 操作系のデバッグ用途を想定（信頼モードが付かないので
+`execute_python` を多用するテストは confirm ゲートで弾かれ、
+`ConfirmationRequiredError` で落ちる）。
 """
 
 from __future__ import annotations

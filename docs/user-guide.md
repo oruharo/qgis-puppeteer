@@ -145,7 +145,7 @@ Claude 側で以下のような MCP ツール呼び出しが行われる:
 |---|---|---|
 | Claude から QGIS が見えない | QGIS が起動していない、Hub が未起動 | QGIS を起動してから Claude Desktop を再起動 |
 | `instance_not_found` | Worker register 完了前に呼んだ | 数秒待って再試行 |
-| 確認ダイアログで止まる | `execute_python` 系の confirm UI | [信頼モード](#permissions) を参照 |
+| `execute_python` が実行されずに返る | ホワイトリスト外のコードで confirm ゲートに当たった | 承認を取って `qgis_execute_with_permission` で再実行（[Permissions](#permissions)） |
 
 詳しくは [Troubleshooting](#troubleshooting) も。
 
@@ -428,9 +428,9 @@ export QPUPPETEER_E2E_USE_RUNNING_QGIS=1
 pytest test_e2e/
 ```
 
-注意: `execute_python` を多用するテストは confirm UI で固まるので、
-dev モードでは UI 操作系のみ走らせるのが安全（または対象 QGIS で
-`QPUPPETEER_TRUSTED_MODE=1` を立てておく）。
+注意: `execute_python` を多用するテストは confirm ゲートで弾かれる
+（`ConfirmationRequiredError`）ので、dev モードでは UI 操作系のみ走らせるのが
+安全（または対象 QGIS で `QPUPPETEER_TRUSTED_MODE=1` を立てておく）。
 
 ### 9. 完全制御が必要な場合: fixture オーバーライド
 
@@ -1157,7 +1157,22 @@ half-open のまま残った旧 entry を ~20s で grace へ落とす（`reject`
 |---|---|
 | **whitelist** | 既知の安全コード（`QgsProject.instance().fileName()` 等の参照系）→ 即実行 |
 | **session** | テスト session 内で 1 度許可されたパターン → 即実行 |
-| **confirm** | 上記以外 → QGIS 上に確認ダイアログを出してユーザーに承認を求める |
+| **confirm** | 上記以外 → **実行せず** `requires_confirmation` と危険度分析を返す |
+
+confirm は「QGIS 側で止めて人に聞く」仕組みではない。**QGIS に確認 UI は無く**、
+`qgis_execute_python` は実行せずに `requires_confirmation: true` と危険度分析を
+返して終わる。そこから先は呼び出し側の役目になる:
+
+- **Claude（MCP）**: 内容をユーザーに示して承認を取り、`qgis_execute_with_permission`
+  に `once`（この 1 回だけ）か `session`（この QGIS が動いている間）を渡して再実行する。
+  **`always` は MCP からは選べない** — ホワイトリストへの永続追加は人間の操作に限る。
+- **pytest / スクリプト**: ラッパが `ConfirmationRequiredError` を投げる。呼び出し元が
+  本人のコードである前提なので、`always` も使える。
+
+つまり、実際に人へ確認を出しているのは **MCP クライアント側の承認 UI**（Claude Code
+なら呼び出しごとの確認）であり、qgis-puppeteer 自身は「何を実行しようとしているか」を
+判断材料として返すところまでを担う。恒久的に許可を足したいときは
+`<project root>/.claude/qgis_whitelist.json` を直接編集する。
 
 ### 信頼モード（CI / E2E 向け）
 
@@ -1412,9 +1427,10 @@ except WidgetNotActionableError as e:
 - `not_covered=False` → 別のモーダルが被っている（Dialog handler 検討）
 - `editable=False`（fill 限定） → readOnly 状態
 
-### confirm UI で固まる（dev モード）
+### confirm ゲートで弾かれる（dev モード）
 
-**症状**: `execute_python` を呼ぶと QGIS で確認ダイアログが出てテストが進まない
+**症状**: `execute_python` が `ConfirmationRequiredError` で失敗する（QGIS 側に
+確認ダイアログは出ない。呼び出しはその場で返る）
 
 **原因**: 信頼モードが OFF の QGIS で `execute_python` を呼んでいる
 
@@ -1426,8 +1442,7 @@ except WidgetNotActionableError as e:
 3. または対象 QGIS を起動するときに `QPUPPETEER_TRUSTED_MODE=1` を立てておく
 
 > pytest ラッパ `execute_python` は confirm ゲートを `ConfirmationRequiredError`
-> として raise するので、固まらず即原因が分かる（dev モードで信頼モード未設定の
-> サイン）。
+> として raise するので、原因がすぐ分かる（dev モードで信頼モード未設定のサイン）。
 
 ### `execute_python` のコード内例外が見えない（後段が謎の timeout）
 

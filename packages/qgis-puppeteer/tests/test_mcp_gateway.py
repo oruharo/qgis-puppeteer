@@ -605,6 +605,17 @@ class TestMcpGatewayToolDescriptors:
 
         assert "_result" in (tools["qgis_execute_python"].description or "")
 
+    def test_permission_cannot_grant_a_persistent_whitelist_entry(self) -> None:
+        """`always` は MCP から選べないこと。
+
+        always は実行に加えてコードをホワイトリストのファイルへ書き、以後の全
+        セッションで無確認にする。この引数は呼び出し側が埋めるだけで人間に確認
+        した保証がないので、永続的な許可の拡大は MCP 経路から外してある。
+        """
+        tools = {t.name: t for t in self._list_tools()}
+        permission = tools["qgis_execute_with_permission"].input_schema["properties"]["permission"]
+        assert set(permission["enum"]) == {"once", "session", "cancel"}
+
     def test_result_carries_text_only(self) -> None:
         """結果は本文の JSON テキスト 1 本で、structuredContent を伴わない。"""
 
