@@ -31,15 +31,17 @@ import json
 import logging
 import os
 import sys
-from collections.abc import AsyncIterator
+import traceback
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypeVar
 
 import websockets.exceptions
 
 from qgis_puppeteer.client import (
     AutomationClient,
+    AutomationClientError,
     NotConnectedError,
     RequestError,
 )
@@ -323,6 +325,21 @@ async def _get_client_or_error(
       （`AutomationClient.connect` で ConnectionRefusedError に変換済みだが、
       二重に安全側へ倒して catch する）
     """
+    client, exc = await _connect_or_exc(gateway)
+    if exc is not None:
+        return None, _format_unreachable(gateway, exc)
+    return client, None
+
+
+async def _connect_or_exc(
+    gateway: GatewayContext,
+) -> tuple[AutomationClient | None, BaseException | None]:
+    """Hub 接続を試み、成功なら (client, None)、接続失敗なら (None, exc)。
+
+    TCP / ハンドシェイク / register のどこで失敗しても「Hub が使えない」に
+    畳む。register 失敗（`RegisterError`）は再接続で新しい Hub に弾かれた
+    ケースで、ここで拾わないと tool の外へ抜けて本文の無いエラーになる。
+    """
     try:
         client = await gateway.get_client()
     except (
@@ -330,9 +347,11 @@ async def _get_client_or_error(
         OSError,
         asyncio.TimeoutError,
         TimeoutError,
+        AutomationClientError,
+        websockets.exceptions.WebSocketException,
     ) as e:  # noqa: BLE001 - intentional
-        logger.warning("Hub unreachable at %s: %s", gateway.url, e)
-        return None, _format_unreachable(gateway, e)
+        logger.warning("Hub unreachable at %s: %s: %s", gateway.url, type(e).__name__, e)
+        return None, e
     return client, None
 
 
@@ -352,26 +371,90 @@ _STALE_CONNECTION_EXC = (
 )
 
 
-async def _call(
-    ctx: Context, command: str, params: dict[str, Any], *, instance: str | None
-) -> str | CallToolResult:
-    """AutomationClient.call(...) を呼び、結果を文字列で返す。
+_T = TypeVar("_T")
 
-    QGIS/Worker の再起動を挟むと、cached client が stale な WebSocket を
-    抱えたまま残るため 1 回目の call が WinError 10053 等で落ちることがある。
-    その場合は client をリセットして 1 度だけ再接続→リトライする。
 
-    接続失敗は `hub_unreachable`、`RequestError` は worker 側の business error。
-    どちらも例外は投げず、`isError` を立てた tool error として返す。
+async def _with_client(
+    gateway: GatewayContext, op: Callable[[AutomationClient], Awaitable[_T]]
+) -> _T | CallToolResult:
+    """Hub 接続を取って ``op`` を走らせる。stale な接続なら 1 度だけ張り直す。
+
+    QGIS/Hub の再起動を挟むと、cached client が死んだ WebSocket を抱えたまま
+    残るため 1 回目の呼び出しが ConnectionClosed / WinError 10053 等で落ちる。
+    その場合は client をリセットして再接続→リトライする。worker コマンドだけ
+    でなく `qgis_list_instances` / `qgis_use_instance` / `qgis_wait_ready` も
+    同じ経路を通す — Hub を入れ替えた直後に「list は通るのに use_instance は
+    落ちる」のは、どのツールが先に stale socket を踏むかの運だった。
+
+    接続失敗は `hub_unreachable` の tool error。``op`` が投げる business error
+    （RequestError 等）は ``op`` 側で結果に変換すること。``op`` から出た
+    TimeoutError は stale 扱いになるので、意味のある timeout は ``op`` 内で捕る。
     """
-    gateway: GatewayContext = ctx.request_context.lifespan_context
-    target = _resolve_target(gateway, instance)
-
     for attempt in (0, 1):
         client, err = await _get_client_or_error(gateway)
         if err is not None:
             return err
         assert client is not None
+        try:
+            return await op(client)
+        except _STALE_CONNECTION_EXC as e:
+            if attempt == 0:
+                logger.warning(
+                    "Stale connection detected (%s); resetting and retrying",
+                    type(e).__name__,
+                )
+                await gateway.reset_client()
+                continue
+            return _format_unreachable(gateway, e)
+        except Exception as e:  # noqa: BLE001 - 最後の砦
+            # ここに来る例外は business error ではない（それは op が結果に変換
+            # している）。想定外の型でも接続まわりの可能性が高いので、1 回目は
+            # 同じくリセットして張り直す。2 回目も落ちたら、SDK に任せて本文の
+            # 無い "Error executing tool" にするのではなく、型と traceback を
+            # 載せた JSON で返す — 呼び出し側から gateway の stderr は見えない。
+            if attempt == 0:
+                logger.exception(
+                    "Unexpected %s while talking to the Hub; resetting the connection "
+                    "and retrying once",
+                    type(e).__name__,
+                )
+                await gateway.reset_client()
+                continue
+            return _internal_error_result(e)
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def _internal_error_result(exc: BaseException) -> CallToolResult:
+    """gateway 内部の想定外例外を、型と traceback 付きの tool error にする。"""
+    logger.exception("Gateway internal error: %s", exc)
+    tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    return _error_result(
+        {
+            "error": {
+                "code": "gateway_internal_error",
+                "message": f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__,
+                "details": {
+                    "type": type(exc).__name__,
+                    # 末尾だけ。呼び出し側が原因箇所を特定できれば十分
+                    "traceback": tb[-2000:],
+                },
+            }
+        }
+    )
+
+
+async def _call(
+    ctx: Context, command: str, params: dict[str, Any], *, instance: str | None
+) -> str | CallToolResult:
+    """AutomationClient.call(...) を呼び、結果を文字列で返す。
+
+    `RequestError` は worker 側の business error で、例外は投げず `isError` を
+    立てた tool error として返す。接続まわりは `_with_client` 参照。
+    """
+    gateway: GatewayContext = ctx.request_context.lifespan_context
+    target = _resolve_target(gateway, instance)
+
+    async def op(client: AutomationClient) -> str | CallToolResult:
         try:
             result = await client.call(command, params, instance=target)
         except RequestError as e:
@@ -384,21 +467,9 @@ async def _call(
                     }
                 }
             )
-        except _STALE_CONNECTION_EXC as e:
-            # 初回失敗なら stale client を捨てて 1 回だけ再試行
-            if attempt == 0:
-                logger.warning(
-                    "Stale connection detected (%s); resetting and retrying",
-                    type(e).__name__,
-                )
-                await gateway.reset_client()
-                continue
-            # 再試行後も失敗：hub_unreachable として降りる
-            return _format_unreachable(gateway, e)
         return _format_result(result)
 
-    # ループが break/return なしで抜けることはないが型チェック用
-    return _format_unreachable(gateway, RuntimeError("unreachable"))
+    return await _with_client(gateway, op)
 
 
 # ============================================================
@@ -430,6 +501,16 @@ def build_gateway(
             "- Several QGIS processes can be connected: qgis_list_instances lists them, "
             "qgis_use_instance pins one for later calls, and every tool also takes an "
             "explicit `instance`.\n"
+            "- Each listed instance has a state: active, or unresponsive when QGIS is alive "
+            "but its GUI thread is busy (loading a project, running a long script) and has "
+            "not answered the Hub's heartbeat for 20s. An unresponsive instance still "
+            "accepts calls; they run once the GUI thread is free. If a call is slow, check "
+            "last_seen_ago before assuming the selector is wrong.\n"
+            "- Right after QGIS starts, call qgis_wait_ready before anything else: it "
+            "returns once the instance answers a round trip, not merely once it is listed.\n"
+            "- code=instance_disconnected means the instance was registered but its "
+            "connection dropped; grace_expires_in says how long the Hub still waits for it "
+            "to reconnect (QGIS auto-reconnects when it can).\n"
             "- UI tools take a selector dict; build it from qgis_snapshot_ui output.\n"
             "- qgis_execute_python runs code inside QGIS and returns whatever that code "
             "assigns to `_result`.\n"
@@ -468,14 +549,23 @@ def _register_tools(mcp: MCPServer) -> None:
 
     @mcp.tool(title="QGIS インスタンス一覧", annotations=_QUERY, structured_output=False)
     async def qgis_list_instances(ctx: Context) -> str | CallToolResult:
-        """接続中の QGIS インスタンス一覧を返す。"""
+        """QGIS インスタンス一覧を返す（切断直後のものも含む）。
+
+        各要素の state は "active" / "unresponsive" / "disconnected"。
+        unresponsive は QGIS は生きているが GUI スレッドが塞がっていて（プロジェクト
+        読み込み中、長いスクリプト実行中など）Hub のハートビートに 20 秒以上応答して
+        いない状態。起動直後のプロジェクト読み込み中は普通にこうなる。呼び出しは
+        受け付けられ、GUI スレッドが空き次第処理される。disconnected は接続が切れて
+        Hub が再接続を待っている状態で、grace_expires_in 秒後に登録が消える。
+        last_seen_ago は最後に応答を確認してからの秒数。
+        """
         gateway: GatewayContext = ctx.request_context.lifespan_context
-        client, err = await _get_client_or_error(gateway)
-        if err is not None:
-            return err
-        assert client is not None
-        instances = await client.list_instances()
-        return _format_result([_instance_info_to_dict(i) for i in instances])
+
+        async def op(client: AutomationClient) -> str | CallToolResult:
+            instances = await client.list_instances(include_disconnected=True)
+            return _format_result([_instance_info_to_dict(i) for i in instances])
+
+        return await _with_client(gateway, op)
 
     @mcp.tool(
         title="使用する QGIS インスタンスを選ぶ", annotations=_MUTATE_SAFE, structured_output=False
@@ -486,7 +576,8 @@ def _register_tools(mcp: MCPServer) -> None:
         selector は launch_token > @label > label > instance_id > プロジェクト名
         の順に解決する。以後 instance を省略した呼び出しは、ここで選んだ
         インスタンスに送られる。該当が無い場合と複数一致した場合は
-        instance_not_found を返す。
+        instance_not_found、該当はあるが接続が切れて再接続待ちなら
+        instance_disconnected（grace_expires_in 付き）を返す。
         """
         # ADR-0005 D6 の解決順を Hub と共有する。ADR-0005 D3: sticky には解決後の
         # instance_id ではなく **安定キー**（launch_token > label、無ければ
@@ -494,30 +585,167 @@ def _register_tools(mcp: MCPServer) -> None:
         # 再起動しても「現在 live なそのロール」へ自動追従する（instance_id 凍結
         # による再起動失効を回避）。
         gateway: GatewayContext = ctx.request_context.lifespan_context
-        client, err = await _get_client_or_error(gateway)
-        if err is not None:
-            return err
-        assert client is not None
-        instances = await client.list_instances()
-        resolved = _resolve_selector(selector, instances)
-        if resolved is None:
-            return _error_result(
-                {
-                    "error": {
-                        "code": "instance_not_found",
-                        "message": f"No instance matches {selector!r}",
-                        "candidates": [_instance_info_to_dict(i) for i in instances],
+
+        async def op(client: AutomationClient) -> str | CallToolResult:
+            all_instances = await client.list_instances(include_disconnected=True)
+            connected = [i for i in all_instances if i.state != "disconnected"]
+            resolved = _resolve_selector(selector, connected)
+            if resolved is None:
+                disconnected = [i for i in all_instances if i.state == "disconnected"]
+                in_grace = select_by_selector(selector, disconnected)
+                if in_grace:
+                    first = in_grace[0]
+                    return _error_result(
+                        {
+                            "error": {
+                                "code": "instance_disconnected",
+                                "message": (
+                                    f"Instance '{first.label}' matches {selector!r} but its "
+                                    f"connection dropped; the Hub keeps it for "
+                                    f"{first.grace_expires_in}s more in case it reconnects"
+                                ),
+                                "instances": [_instance_info_to_dict(i) for i in in_grace],
+                            }
+                        }
+                    )
+                return _error_result(
+                    {
+                        "error": {
+                            "code": "instance_not_found",
+                            "message": f"No instance matches {selector!r}",
+                            "candidates": [_instance_info_to_dict(i) for i in connected],
+                        }
                     }
+                )
+            gateway.current_instance = _stable_sticky_selector(resolved)
+            return _format_result(
+                {
+                    "ok": True,
+                    "current": _instance_info_to_dict(resolved),
+                    "sticky_selector": gateway.current_instance,
                 }
             )
-        gateway.current_instance = _stable_sticky_selector(resolved)
-        return _format_result(
-            {
-                "ok": True,
-                "current": _instance_info_to_dict(resolved),
-                "sticky_selector": gateway.current_instance,
-            }
-        )
+
+        return await _with_client(gateway, op)
+
+    @mcp.tool(title="QGIS が使えるまで待つ", annotations=_QUERY, structured_output=False)
+    async def qgis_wait_ready(
+        ctx: Context,
+        timeout_s: Annotated[
+            float,
+            Field(
+                description="待つ上限秒。重いプロジェクトの読み込みは数分かかることがある。",
+                gt=0,
+                le=600,
+            ),
+        ] = 60.0,
+        require_project: Annotated[
+            bool,
+            Field(
+                description=(
+                    "true にすると、プロジェクトの読み込みが完了して project が入るまで待つ。"
+                    "レイヤを扱うなら true。プロジェクトを開かない QGIS では満たされないので、"
+                    "その場合は false のまま。"
+                )
+            ),
+        ] = False,
+        instance: InstanceArg = None,
+    ) -> str | CallToolResult:
+        """QGIS インスタンスが呼び出しを処理できる状態になるまで待つ。
+
+        QGIS を起動した直後や、重いプロジェクトを開いた直後に使う。起動直後は
+        Hub 自体がまだ listen していないことがあるが、それも timeout_s の内で待つ
+        （他のツールと違い hub_unreachable で即座には返らない）。「一覧に載っている」
+        だけでは足りない — 登録直後は GUI スレッドが読み込みで塞がっていて、その間の
+        呼び出しは待たされる。ここでは state が active で、かつ軽い read-only の往復
+        （qgis_get_canvas_extent）が返るまで待つ。
+
+        ready はプロジェクト読み込み完了と同じではない。QGIS は起動直後、読み込みを
+        始める前に一瞬 GUI が空くので、実測では ready が 11 秒、レイヤが出そろうのが
+        31 秒だった。レイヤを触るなら require_project=true を付ける（読み込み完了後に
+        project が届いてから往復を確認する）。
+
+        成功すると instance と待った秒数を返す。timeout_s 以内に使えなければ
+        isError と code=not_ready、その時点の一覧（Hub に繋がらなかった場合はその理由）
+        を返す。
+        """
+        gateway: GatewayContext = ctx.request_context.lifespan_context
+        target = _resolve_target(gateway, instance)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        deadline = started + timeout_s
+
+        # Hub がまだ listen していない間はここで待つ。起動直後に「まずこれを呼べ」と
+        # 言っている以上、1 回目が hub_unreachable で落ちるのでは説明と合わない。
+        while True:
+            client, exc = await _connect_or_exc(gateway)
+            if exc is None:
+                break
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return _error_result(
+                    {
+                        "error": {
+                            "code": "not_ready",
+                            "message": (
+                                f"Hub ({gateway.url}) did not start listening within "
+                                f"{timeout_s}s; QGIS, or the qgis_puppet plugin inside it, "
+                                "is probably not running yet"
+                            ),
+                            "details": {
+                                "hub_unreachable": {
+                                    "type": type(exc).__name__,
+                                    "reason": str(exc),
+                                    "url": gateway.url,
+                                }
+                            },
+                            "instances": [],
+                        }
+                    }
+                )
+            await asyncio.sleep(min(1.0, remaining))
+
+        async def op(client: AutomationClient) -> str | CallToolResult:
+            remaining = max(0.1, deadline - loop.time())
+            try:
+                info = await client.wait_for_ready(
+                    target, timeout_s=remaining, require_project=require_project
+                )
+            except TimeoutError:
+                snapshot = await client.list_instances(include_disconnected=True)
+                return _error_result(
+                    {
+                        "error": {
+                            "code": "not_ready",
+                            "message": (
+                                f"No usable QGIS instance within {timeout_s}s"
+                                + (f" for {target!r}" if target is not None else "")
+                                + (" with a project loaded" if require_project else "")
+                                + "; see instances for their current state"
+                            ),
+                            "instances": [_instance_info_to_dict(i) for i in snapshot],
+                        }
+                    }
+                )
+            except RequestError as e:
+                return _error_result(
+                    {
+                        "error": {
+                            "code": e.code.value if e.code is not None else None,
+                            "message": str(e),
+                            "details": e.details,
+                        }
+                    }
+                )
+            return _format_result(
+                {
+                    "ok": True,
+                    "instance": _instance_info_to_dict(info),
+                    "waited_s": round(loop.time() - started, 1),
+                }
+            )
+
+        return await _with_client(gateway, op)
 
     # ------------------------------------------------------------
     # Layer Tools
@@ -809,6 +1037,9 @@ def _instance_info_to_dict(info: Any) -> dict[str, Any]:
         "label": info.label,
         "pid": info.pid,
         "project": info.project,
+        "state": info.state,
+        "last_seen_ago": info.last_seen_ago,
+        "grace_expires_in": info.grace_expires_in,
     }
 
 

@@ -13,6 +13,8 @@ from qgis_puppeteer.hub_state import (
     GRACE_SECONDS,
     HEARTBEAT_TIMEOUT_SECONDS,
     IDLE_SHUTDOWN_DELAY_SECONDS,
+    LIVENESS_PROBE_SECONDS,
+    UNRESPONSIVE_CLOSE_SECONDS,
     HubState,
     RegisterOutcome,
     ResolveOutcome,
@@ -401,14 +403,63 @@ class TestResolveInstance:
         assert result.error.code == ErrorCode.INSTANCE_NOT_FOUND
 
     def test_grace_held_worker_not_selectable(self) -> None:
-        """grace 中の Worker はルーティング対象外。"""
-        state = HubState(clock=FakeClock())
-        state.register_worker("conn-1", _worker_req(label="A", pid=1234))
+        """grace 中の Worker はルーティング対象外。ただし not_found とは区別する。
+
+        「知らない selector」と「居たが切断中」を同じ code にすると、呼び出し側は
+        selector を疑って時間を捨てる。後者は instance_disconnected に残り猶予を
+        添えて返す。
+        """
+        clock = FakeClock()
+        state = HubState(clock=clock)
+        r = state.register_worker("conn-1", _worker_req(label="A", pid=1234))
+        state.mark_seen("conn-1")
+        clock.advance(12.0)
         state.disconnect_worker("conn-1")
+        clock.advance(3.0)
         result = state.resolve_instance("A")
-        # grace 中は not_found（新規接続を待つ間のルーティングは不可）
         assert result.ok is False
-        assert result.error.code == ErrorCode.INSTANCE_NOT_FOUND
+        assert result.error is not None
+        assert result.error.code == ErrorCode.INSTANCE_DISCONNECTED
+        [info] = result.error.details["instances"]
+        assert info["instance_id"] == r.instance_id
+        assert info["last_seen_ago"] == 15.0
+        assert info["grace_expires_in"] == GRACE_SECONDS - 3.0
+        assert "reconnect" in result.error.message
+        # selector 省略で active が 0、grace に居る → 同じく disconnected
+        assert state.resolve_instance(None).error.code == ErrorCode.INSTANCE_DISCONNECTED
+        # 本当に知らない selector は従来どおり not_found
+        assert state.resolve_instance("Z").error.code == ErrorCode.INSTANCE_NOT_FOUND
+        # grace 満了で消えれば not_found に戻る
+        clock.advance(GRACE_SECONDS)
+        state.sweep_expired()
+        assert state.resolve_instance("A").error.code == ErrorCode.INSTANCE_NOT_FOUND
+
+    def test_list_instances_can_include_disconnected(self) -> None:
+        clock = FakeClock()
+        state = HubState(clock=clock)
+        state.register_worker("conn-1", _worker_req(label="A", pid=1))
+        state.register_worker("conn-2", _worker_req(label="B", pid=2))
+        state.disconnect_worker("conn-2")
+        clock.advance(10.0)
+
+        assert [i.label for i in state.list_instances()] == ["A"]
+        full = state.list_instances(include_disconnected=True)
+        assert [(i.label, i.state) for i in full] == [("A", "active"), ("B", "disconnected")]
+        assert full[1].grace_expires_in == GRACE_SECONDS - 10.0
+        assert full[0].grace_expires_in is None
+
+    def test_update_worker_project(self) -> None:
+        state = HubState(clock=FakeClock())
+        state.register_worker("conn-1", _worker_req(label="A", pid=1, project=None))
+        assert state.list_instances()[0].project is None
+        assert state.update_worker_project("conn-1", "D:/work/city.qgz") is True
+        assert state.list_instances()[0].project == "D:/work/city.qgz"
+        # project basename tier で引けるようになる
+        assert state.resolve_instance("city.qgz").ok is True
+        # 切断済み / 未知 conn は無視
+        state.disconnect_worker("conn-1")
+        assert state.update_worker_project("conn-1", "x.qgz") is False
+        assert state.update_worker_project("nope", "x.qgz") is False
 
 
 # ============================================================
@@ -634,18 +685,64 @@ class TestConflictPolicy:
 
 
 class TestLivenessSweep:
-    def test_stale_active_demoted_to_grace(self) -> None:
+    def test_heartbeat_loss_marks_unresponsive_not_disconnected(self) -> None:
+        """pong 途絶は「unresponsive」であって切断ではない。
+
+        Worker の QWebSocket は QGIS の GUI スレッドに載っているので、重い
+        プロジェクト読み込み中は pong が返らない。プロセスも TCP も生きている
+        のに一覧から消してしまうと、MCP からは「そんな instance は無い」に見える。
+        """
         clock = FakeClock()
         state = HubState(clock=clock)
-        state.register_worker("c1", _worker_req(label="A", pid=1))
+        r = state.register_worker("c1", _worker_req(label="A", pid=1, launch_token="lt-abc"))
         assert state.active_worker_count() == 1
 
         clock.advance(HEARTBEAT_TIMEOUT_SECONDS + 1.0)
-        demoted = state.sweep_stale_active()
-        assert len(demoted) == 1
-        # active から落ち、grace 保持（sweep_expired まで entry は残る）
-        assert state.active_worker_count() == 0
-        assert state.has_grace_held_workers() is True
+        flagged = state.sweep_unresponsive()
+        assert flagged == [r.instance_id]
+        # active のまま。grace には落ちない。
+        assert state.active_worker_count() == 1
+        assert state.has_grace_held_workers() is False
+        # 一覧には state 付きで出続ける
+        [info] = state.list_instances()
+        assert info.state == "unresponsive"
+        assert info.last_seen_ago == HEARTBEAT_TIMEOUT_SECONDS + 1.0
+        # selector 解決もできる（request はソケットに溜まり、ループが空き次第走る）
+        assert state.resolve_instance("lt-abc").ok is True
+        assert state.resolve_instance("A").ok is True
+        # 2 回目の sweep は同じ entry を重ねて報告しない
+        clock.advance(5.0)
+        assert state.sweep_unresponsive() == []
+
+    def test_pong_after_stall_recovers(self) -> None:
+        """GUI が回復して pong が戻れば active に復帰する。
+
+        以前は grace に落ちた entry を pong が救えず（mark_seen が no-op）、
+        63 秒 pong を返し続けても grace 満了で削除され、ソケットは開いたまま
+        なので Worker は再接続もしない — 二度と辿り着けないゾンビになっていた。
+        """
+        clock = FakeClock()
+        state = HubState(clock=clock)
+        state.register_worker("c1", _worker_req(label="A", pid=1))
+        clock.advance(HEARTBEAT_TIMEOUT_SECONDS + 5.0)
+        state.sweep_unresponsive()
+        assert state.list_instances()[0].state == "unresponsive"
+
+        clock.advance(1.0)
+        assert state.mark_seen("c1") is True  # 復帰を報告
+        [info] = state.list_instances()
+        assert info.state == "active"
+        assert info.last_seen_ago == 0.0
+        assert state.mark_seen("c1") is False  # 既に active なら復帰ではない
+
+        # 復帰後、grace 相当の時間 pong を返し続けても消えない
+        for _ in range(int(GRACE_SECONDS) + 5):
+            clock.advance(1.0)
+            state.mark_seen("c1")
+            state.sweep_unresponsive()
+            state.sweep_unresponsive_expired()
+            state.sweep_expired()
+        assert state.active_worker_count() == 1
 
     def test_mark_seen_keeps_active(self) -> None:
         clock = FakeClock()
@@ -656,25 +753,91 @@ class TestLivenessSweep:
         clock.advance(HEARTBEAT_TIMEOUT_SECONDS - 1.0)
         state.mark_seen("c1")
         clock.advance(2.0)  # 直近 mark_seen からは 2s しか経ってない
-        assert state.sweep_stale_active() == []
-        assert state.active_worker_count() == 1
+        assert state.sweep_unresponsive() == []
+        assert state.list_instances()[0].state == "active"
 
-    def test_demoted_then_same_label_supersedes(self) -> None:
-        """kill -9 half-open → sweep で grace → 同 label 再起動が SUPERSEDE。"""
+    def test_long_unresponsive_is_closed_and_falls_to_grace(self) -> None:
+        """UNRESPONSIVE_CLOSE_SECONDS を超えたら half-open とみなして切断扱い。
+
+        戻り値は conn_id — Qt 層はそのソケットを閉じる。閉じることで、実は
+        生きていた Worker にはループが空いた時点で disconnected が届き、
+        自動再接続の引き金になる。
+        """
         clock = FakeClock()
         state = HubState(clock=clock)
         state.register_worker("c1", _worker_req(label="A", pid=1))
         clock.advance(HEARTBEAT_TIMEOUT_SECONDS + 1.0)
-        state.sweep_stale_active()  # 旧 A を grace へ
+        state.sweep_unresponsive()
 
-        # reject 既定でも衝突せず継承できる
+        clock.advance(UNRESPONSIVE_CLOSE_SECONDS - 1.0)
+        assert state.sweep_unresponsive_expired() == []
+        assert state.active_worker_count() == 1
+
+        clock.advance(2.0)
+        assert state.sweep_unresponsive_expired() == ["c1"]
+        assert state.active_worker_count() == 0
+        assert state.has_grace_held_workers() is True
+        assert state.list_instances() == []
+        # Qt 層が閉じたあとに届く disconnected は grace 開始時刻を上書きしない
+        grace_started = clock()
+        clock.advance(3.0)
+        state.disconnect_worker("c1")
+        clock.advance(GRACE_SECONDS - 3.0 - 1.0)
+        assert state.sweep_expired() == []
+        clock.advance(2.0)
+        assert state.sweep_expired() != []
+        assert clock() - grace_started >= GRACE_SECONDS
+
+    def test_unresponsive_then_same_label_supersedes_via_probe(self) -> None:
+        """kill -9 half-open → unresponsive → 同 label 再起動は probe 経由で SUPERSEDE。
+
+        unresponsive は active 扱いなので衝突判定に入るが、C1=(b) の liveness
+        probe で pong が無ければ死亡とみなして継承する。切断扱いにしなくても
+        再起動の継承は成立する（半 open 検出を待つ必要はない）。
+        """
+        clock = FakeClock()
+        state = HubState(clock=clock)
+        state.register_worker("c1", _worker_req(label="A", pid=1))
+        clock.advance(HEARTBEAT_TIMEOUT_SECONDS + 1.0)
+        state.sweep_unresponsive()
+
         r2 = state.register_worker("c2", _worker_req(label="A", pid=2))
-        assert r2.ok is True
-        assert r2.superseded is True
+        assert r2.ok is False
+        assert r2.pending is True
+        assert r2.liveness_probe_conn_ids == ("c1",)
+        # probe 窓内に pong 無し → 継承
+        clock.advance(LIVENESS_PROBE_SECONDS + 0.1)
+        final = state.finalize_pending_registration("c2")
+        assert final is not None
+        assert final.ok is True
+        assert final.superseded is True
+        assert state.active_worker_count() == 1
+
+    def test_unresponsive_but_alive_incumbent_wins_probe(self) -> None:
+        """unresponsive 中でも probe に pong を返せば生きている → 新参は reject。"""
+        clock = FakeClock()
+        state = HubState(clock=clock)
+        state.register_worker("c1", _worker_req(label="A", pid=1))
+        clock.advance(HEARTBEAT_TIMEOUT_SECONDS + 1.0)
+        state.sweep_unresponsive()
+
+        r2 = state.register_worker("c2", _worker_req(label="A", pid=2))
+        assert r2.pending is True
+        clock.advance(0.5)
+        state.mark_seen("c1")  # GUI が空いて pong が返った
+        final = state.finalize_pending_registration("c2")
+        assert final is not None
+        assert final.ok is False
+        assert final.error is not None
+        assert final.error.code is ErrorCode.LABEL_CONFLICT
+
+    def test_timer_invariants(self) -> None:
+        assert LIVENESS_PROBE_SECONDS < HEARTBEAT_TIMEOUT_SECONDS < UNRESPONSIVE_CLOSE_SECONDS
+        assert HEARTBEAT_TIMEOUT_SECONDS < GRACE_SECONDS
 
     def test_mark_seen_unknown_conn_is_noop(self) -> None:
         state = HubState(clock=FakeClock())
-        state.mark_seen("nope")  # 例外を投げない
+        assert state.mark_seen("nope") is False  # 例外を投げない
 
 
 # ============================================================

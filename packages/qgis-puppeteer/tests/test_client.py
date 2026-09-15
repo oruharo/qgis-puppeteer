@@ -48,6 +48,10 @@ class FakeHub:
         self.received_requests: list[dict[str, Any]] = []
         # register_ack で常に ok=False を返す（エラー系テスト用）
         self.reject_register: bool = False
+        # list_instances で state="unresponsive" として返す instance_id
+        self.unresponsive: set[str] = set()
+        # list_instances で返す project（instance_id → path）。未設定は None
+        self.projects: dict[str, str | None] = {}
         # Origin 検証モード（ws ハンドラでは検証できないのでテストでは無視）
 
     async def handler(self, ws: ServerConnection) -> None:
@@ -129,7 +133,8 @@ class FakeHub:
                     "instance_id": iid,
                     "label": parts[1] if len(parts) >= 2 else iid,
                     "pid": pid_int,
-                    "project": None,
+                    "project": self.projects.get(iid),
+                    "state": "unresponsive" if iid in self.unresponsive else "active",
                 }
 
             await ws.send(
@@ -197,10 +202,11 @@ class FakeHub:
 
 
 @asynccontextmanager
-async def fake_hub_server() -> AsyncIterator[tuple[FakeHub, str]]:
+async def fake_hub_server(port: int = 0) -> AsyncIterator[tuple[FakeHub, str]]:
     hub = FakeHub()
-    # port=0 で OS に空きポートを割り当てさせる
-    async with serve(hub.handler, "127.0.0.1", 0) as server:
+    # port=0 で OS に空きポートを割り当てさせる（「あとから Hub が立つ」を
+    # 再現したいテストは、先に確保したポート番号を渡す）
+    async with serve(hub.handler, "127.0.0.1", port) as server:
         sock = next(iter(server.sockets))
         port = sock.getsockname()[1]
         yield hub, f"ws://127.0.0.1:{port}"
@@ -353,8 +359,147 @@ class TestListInstances:
                         instances = await client.list_instances()
                         assert len(instances) == 1
                         assert instances[0].instance_id == "worker-alpha-4321"
+                        assert instances[0].state == "active"
                 finally:
                     await worker.stop()
+
+        _run(inner())
+
+    def test_wait_for_instance_skips_unresponsive(self) -> None:
+        """unresponsive な instance は「まだ使えない」ので wait は待ち続ける。"""
+
+        async def inner() -> None:
+            async with fake_hub_server() as (hub, url):
+                worker = _FakeWorker(url, label="alpha", pid=4321)
+                await worker.start()
+                await worker.ready.wait()
+                hub.unresponsive.add("worker-alpha-4321")
+
+                try:
+                    async with AutomationClient(url=url) as client:
+                        # 一覧には出る
+                        [info] = await client.list_instances()
+                        assert info.state == "unresponsive"
+                        # だが wait は満たさない
+                        with pytest.raises(TimeoutError):
+                            await client.wait_for_instance(
+                                "alpha", timeout_s=0.4, poll_interval_s=0.05
+                            )
+                        # 応答が戻れば解決する
+                        hub.unresponsive.clear()
+                        found = await client.wait_for_instance(
+                            "alpha", timeout_s=2.0, poll_interval_s=0.05
+                        )
+                        assert found.instance_id == "worker-alpha-4321"
+                finally:
+                    await worker.stop()
+
+        _run(inner())
+
+    def test_wait_for_ready_probes_a_round_trip(self) -> None:
+        """一覧に載るだけでなく、往復が返って初めて ready。"""
+
+        async def inner() -> None:
+            async with fake_hub_server() as (hub, url):
+                worker = _FakeWorker(url, label="alpha", pid=4321)
+                await worker.start()
+                await worker.ready.wait()
+                try:
+                    async with AutomationClient(url=url) as client:
+                        info = await client.wait_for_ready(timeout_s=2.0, poll_interval_s=0.05)
+                        assert info.instance_id == "worker-alpha-4321"
+                        probes = [
+                            r
+                            for r in hub.received_requests
+                            if r["command"] == "qgis_get_canvas_extent"
+                        ]
+                        assert len(probes) == 1
+                        assert probes[0]["instance"] == "worker-alpha-4321"
+                        # selector 指定でも同じ
+                        info2 = await client.wait_for_ready(
+                            "alpha", timeout_s=2.0, poll_interval_s=0.05
+                        )
+                        assert info2.instance_id == info.instance_id
+                finally:
+                    await worker.stop()
+
+        _run(inner())
+
+    def test_wait_for_ready_times_out_while_unresponsive(self) -> None:
+        async def inner() -> None:
+            async with fake_hub_server() as (hub, url):
+                worker = _FakeWorker(url, label="alpha", pid=4321)
+                await worker.start()
+                await worker.ready.wait()
+                hub.unresponsive.add("worker-alpha-4321")
+                try:
+                    async with AutomationClient(url=url) as client:
+                        with pytest.raises(TimeoutError):
+                            await client.wait_for_ready(timeout_s=0.4, poll_interval_s=0.05)
+                        # unresponsive の間は probe を撃たない（ソケットに溜めない）
+                        assert not [
+                            r
+                            for r in hub.received_requests
+                            if r["command"] == "qgis_get_canvas_extent"
+                        ]
+                finally:
+                    await worker.stop()
+
+        _run(inner())
+
+    def test_wait_for_ready_require_project_waits_for_the_load_to_finish(self) -> None:
+        """ready（GUI が空いた）と「プロジェクトが読めた」は別。後者を待つ口。"""
+
+        async def inner() -> None:
+            async with fake_hub_server() as (hub, url):
+                worker = _FakeWorker(url, label="alpha", pid=4321)
+                await worker.start()
+                await worker.ready.wait()
+                try:
+                    async with AutomationClient(url=url) as client:
+                        # GUI は空いている（probe は通る）が project はまだ無い
+                        with pytest.raises(TimeoutError) as ei:
+                            await client.wait_for_ready(
+                                timeout_s=0.4, poll_interval_s=0.05, require_project=True
+                            )
+                        assert "require_project" in str(ei.value)
+                        # project 無しなら probe すら撃たない
+                        assert not [
+                            r
+                            for r in hub.received_requests
+                            if r["command"] == "qgis_get_canvas_extent"
+                        ]
+                        # 読み込み完了（update_info 相当）→ 満たされる
+                        hub.projects["worker-alpha-4321"] = "D:/work/city.qgz"
+                        info = await client.wait_for_ready(
+                            timeout_s=2.0, poll_interval_s=0.05, require_project=True
+                        )
+                        assert info.project == "D:/work/city.qgz"
+                finally:
+                    await worker.stop()
+
+        _run(inner())
+
+    def test_wait_for_ready_without_selector_refuses_ambiguity(self) -> None:
+        async def inner() -> None:
+            async with fake_hub_server() as (_, url):
+                w1 = _FakeWorker(url, label="a", pid=1)
+                w2 = _FakeWorker(url, label="b", pid=2)
+                await w1.start()
+                await w1.ready.wait()
+                await w2.start()
+                await w2.ready.wait()
+                try:
+                    async with AutomationClient(url=url) as client:
+                        with pytest.raises(RequestError) as ei:
+                            await client.wait_for_ready(timeout_s=1.0)
+                        assert ei.value.code is ErrorCode.INSTANCE_AMBIGUOUS
+                        assert (
+                            await client.wait_for_ready("b", timeout_s=2.0)
+                        ).instance_id == "worker-b-2"
+                finally:
+                    await w1.stop()
+                    await w2.stop()
 
         _run(inner())
 

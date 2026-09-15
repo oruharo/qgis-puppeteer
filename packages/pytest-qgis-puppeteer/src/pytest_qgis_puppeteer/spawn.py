@@ -23,7 +23,6 @@ import os
 import subprocess
 import sys
 import threading
-import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -331,21 +330,26 @@ def _wait_for_worker_by_token(
     timeout_s: float,
     poll_interval_s: float = 0.25,
 ) -> str:
-    """``list_instances()`` を poll し、自分の launch_token に一致する Worker を返す。
+    """自分の launch_token の Worker が **使える** ようになるまで待つ。
 
     ADR-0005 D6: pid diff heuristic を廃止し、helper が注入した
     ``launch_token`` で **決定的** に相関する。pid 再利用や xdist 並列 spawn の
     race に左右されない（U9）。
+
+    待つ条件は `E2EAutomationClient.wait_for_ready` に委譲する。``list_instances``
+    は heartbeat が途絶えた instance も ``state="unresponsive"`` で返すように
+    なったので、register されたことだけを見ると「登録はできたが GUI スレッドが
+    塞がっていて何も処理できない」個体を掴んでしまう。
     """
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        for info in automation_client.list_instances():
-            if getattr(info, "launch_token", None) == launch_token:
-                return info.instance_id
-        time.sleep(poll_interval_s)
-    raise WorkerRegisterTimeout(
-        f"QGIS subprocess (launch_token={launch_token}) did not register to Hub within {timeout_s}s"
-    )
+    try:
+        return automation_client.wait_for_ready(
+            launch_token, timeout_s=timeout_s, poll_interval_s=poll_interval_s
+        )
+    except TimeoutError as e:
+        raise WorkerRegisterTimeout(
+            f"QGIS subprocess (launch_token={launch_token}) did not register "
+            f"to Hub and answer a command within {timeout_s}s"
+        ) from e
 
 
 def _shutdown_worker_best_effort(

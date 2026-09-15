@@ -65,6 +65,7 @@ from qgis_puppeteer.protocol import (
     Request,
     Response,
     Role,
+    UpdateInfo,
     decode_message,
     encode_message,
 )
@@ -216,7 +217,7 @@ class Hub(QObject):
                 lambda text, cid=conn_id: self._on_text_message(cid, text)
             )
             # ADR-0005 D5: pong 受信を liveness 更新に使う。
-            ws.pong.connect(lambda _e=0, _p=b"", cid=conn_id: self._state.mark_seen(cid))
+            ws.pong.connect(lambda _e=0, _p=b"", cid=conn_id: self._on_pong(cid))
             ws.disconnected.connect(lambda cid=conn_id: self._on_disconnected(cid))
             logger.info("New connection: %s", conn_id)
 
@@ -259,6 +260,8 @@ class Hub(QObject):
             self._handle_list_instances(conn_id, msg)
         elif isinstance(msg, Bye):
             self._handle_bye(conn_id, msg)
+        elif isinstance(msg, UpdateInfo):
+            self._handle_update_info(conn_id, msg)
         else:
             # RegisterAck / ListInstancesResponse は Hub からの送信専用なので
             # inbound で来たら仕様違反。落とさず warning に留めて握り潰す。
@@ -409,8 +412,20 @@ class Hub(QObject):
     # ------------------------------------------------------------
 
     def _handle_list_instances(self, conn_id: str, req: ListInstancesRequest) -> None:
-        instances = self._state.list_instances()
+        instances = self._state.list_instances(include_disconnected=req.include_disconnected)
         self._send(conn_id, ListInstancesResponse(id=req.id, instances=instances))
+
+    # ------------------------------------------------------------
+    # update_info
+    # ------------------------------------------------------------
+
+    def _handle_update_info(self, conn_id: str, msg: UpdateInfo) -> None:
+        """Worker の自己申告情報（project）を差し替える。応答は無い。"""
+        if self._kinds.get(conn_id) is not _ConnectionKind.WORKER:
+            logger.warning("update_info from non-worker connection %s ignored", conn_id)
+            return
+        if self._state.update_worker_project(conn_id, msg.project):
+            logger.info("Worker %s project -> %r", msg.instance_id, msg.project)
 
     # ------------------------------------------------------------
     # bye
@@ -473,22 +488,43 @@ class Hub(QObject):
     # 定期 sweep
     # ------------------------------------------------------------
 
+    def _on_pong(self, conn_id: str) -> None:
+        if self._state.mark_seen(conn_id):
+            logger.info("Worker %s is responding again (heartbeat resumed)", conn_id)
+
     def _on_sweep(self) -> None:
-        # ADR-0005 D5: まず生存確認 ping を撒き、ハートビート途絶 active を
-        # grace へ落とす（kill -9 half-open の救済）。次に grace 期限切れを掃除。
+        # ADR-0005 D5: まず生存確認 ping を撒く。pong が途絶えた active は
+        # unresponsive の印を付けるだけで、entry もルーティングも残す — QGIS の
+        # GUI スレッドが塞がっているだけなら pong が戻り次第 active に復帰する。
         for ws in self._sockets.values():
             try:
                 ws.ping()
             except Exception:  # noqa: BLE001 - ping は best-effort
                 logger.debug("ws.ping() failed", exc_info=True)
-        demoted = self._state.sweep_stale_active()
-        if demoted:
+        flagged = self._state.sweep_unresponsive()
+        if flagged:
+            # 普通の起動でも project 読み込みで 17 秒台まで伸びる（実測）ので、
+            # ここは異常ではない。warning にすると毎回鳴って無視される。
             logger.info(
-                "Demoted %d stale active workers to grace (heartbeat lost): %s",
-                len(demoted),
-                demoted,
+                "%d worker(s) stopped answering heartbeat (socket still open; "
+                "marked unresponsive, will recover on next pong — normal while "
+                "QGIS loads a project): %s",
+                len(flagged),
+                flagged,
             )
-            self._reassess_idle_shutdown()
+
+        # unresponsive が UNRESPONSIVE_CLOSE_SECONDS 続いたら half-open とみなして
+        # Hub 側から閉じる。閉じると `disconnected` → grace の通常経路に乗り、
+        # 実は生きていた Worker はループが空いた時点で自動再接続してくる。
+        for conn_id in self._state.sweep_unresponsive_expired():
+            ws = self._sockets.get(conn_id)
+            logger.warning(
+                "Worker %s unresponsive for too long; closing its socket "
+                "(half-open cleanup / forces reconnect if it is alive)",
+                conn_id,
+            )
+            if ws is not None:
+                ws.abort()
 
         removed = self._state.sweep_expired()
         if removed:

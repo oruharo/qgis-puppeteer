@@ -25,10 +25,12 @@ from pytest_qgis_puppeteer.automation_client import (
     E2EAutomationClient,
     ModalBlockedError,
     NonSerializableResultError,
+    RequestError,
     WorkerCodeError,
     _find_in_snapshot,
     _raise_for_execute_result,
 )
+from qgis_puppeteer.protocol import Error, ErrorCode, InstanceInfo
 
 # ============================================================
 # fixtures
@@ -254,6 +256,88 @@ class TestCommandWiring:
 # ============================================================
 # wait_for_modal / wait_for_modal_closed
 # ============================================================
+
+
+class TestWaitForReady:
+    """`wait_for_ready`: 一覧に載るだけでなく、往復が返って初めて ready。"""
+
+    @staticmethod
+    def _info(
+        instance_id: str = "w-1",
+        *,
+        label: str = "A",
+        state: str = "active",
+        project: str | None = None,
+        launch_token: str | None = None,
+    ) -> InstanceInfo:
+        return InstanceInfo(
+            instance_id=instance_id,
+            label=label,
+            pid=1,
+            project=project,
+            launch_token=launch_token,
+            state=state,
+        )
+
+    def test_waits_for_active_then_probes_a_round_trip(self) -> None:
+        e2e, inner = _make_client()
+        inner.list_instances = AsyncMock(
+            side_effect=[
+                [],
+                [self._info(state="unresponsive")],
+                [self._info()],
+            ]
+        )
+        assert e2e.wait_for_ready(timeout_s=5.0, poll_interval_s=0.01) == "w-1"
+        # unresponsive の間は probe を撃たない（ソケットに溜めない）
+        assert inner.call.await_count == 1
+        assert inner.call.await_args.args[0] == "qgis_get_canvas_extent"
+        assert inner.call.await_args.kwargs["instance"] == "w-1"
+
+    def test_selector_picks_the_matching_instance(self) -> None:
+        e2e, inner = _make_client()
+        inner.list_instances = AsyncMock(
+            return_value=[
+                self._info("w-other", label="B", launch_token="lt-other"),
+                self._info("w-mine", label="A", launch_token="lt-mine"),
+            ]
+        )
+        assert e2e.wait_for_ready("lt-mine", timeout_s=5.0, poll_interval_s=0.01) == "w-mine"
+        assert inner.call.await_args.kwargs["instance"] == "w-mine"
+
+    def test_require_project_waits_for_the_load_to_finish(self) -> None:
+        """ready（GUI が空いた）と「プロジェクトが読めた」は別。"""
+        e2e, inner = _make_client()
+        inner.list_instances = AsyncMock(
+            side_effect=[
+                [self._info(project=None)],
+                [self._info(project=None)],
+                [self._info(project="D:/work/city.qgz")],
+            ]
+        )
+        got = e2e.wait_for_ready(timeout_s=5.0, poll_interval_s=0.01, require_project=True)
+        assert got == "w-1"
+        # project が無い間は probe すら撃たない
+        assert inner.call.await_count == 1
+
+    def test_business_error_from_the_probe_still_counts_as_ready(self) -> None:
+        """Worker が応答した以上、コマンドが何を返そうと経路は通っている。"""
+        e2e, inner = _make_client()
+        inner.list_instances = AsyncMock(return_value=[self._info()])
+        inner.call = AsyncMock(
+            side_effect=RequestError(
+                Error(code=ErrorCode.INVALID_COMMAND, message="unknown command")
+            )
+        )
+        assert e2e.wait_for_ready(timeout_s=5.0, poll_interval_s=0.01) == "w-1"
+
+    def test_timeout_reports_what_it_saw(self) -> None:
+        e2e, inner = _make_client()
+        inner.list_instances = AsyncMock(return_value=[self._info(state="unresponsive")])
+        with pytest.raises(TimeoutError) as ei:
+            e2e.wait_for_ready(timeout_s=0.2, poll_interval_s=0.05)
+        assert "unresponsive" in str(ei.value)
+        assert inner.call.await_count == 0
 
 
 class TestWaitForModal:

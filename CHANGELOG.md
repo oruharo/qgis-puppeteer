@@ -8,6 +8,37 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`E2EAutomationClient.wait_for_ready()`, and the E2E fixtures use it.** The
+  liveness work went into the shared Hub/Worker/client layers, so pytest E2E
+  already benefited — a long `qgis_execute_python` no longer demotes its own
+  instance out of `list_instances` — but the readiness notion stopped at
+  `wait_for_worker()`, which only checks that an active instance is listed.
+  The MCP side measured 20s between "listed" and "all layers loaded". The E2E
+  client now has the same two-step wait (state=active plus a cheap read-only
+  round trip, optionally `require_project=True`), and `hub_ready` and
+  `spawn_qgis()` go through it. Raise the `qgis_startup_timeout` ini (or
+  `register_timeout_s`) for heavy projects.
+
+- **`qgis_wait_ready` MCP tool / `AutomationClient.wait_for_ready()`.** Waits until
+  an instance can actually take a call: `state == "active"` *and* a cheap
+  read-only round trip (`qgis_get_canvas_extent`) comes back, so a QGIS that is
+  listed but still loading its project on the GUI thread is not reported ready.
+  Times out with `not_ready` and a snapshot of every instance's state. Replaces
+  the hand-written polling scripts each client had to carry. Ready is not the
+  same as "project loaded": QGIS's GUI is briefly idle before it starts reading
+  the project (measured: ready at 11s, all 39 layers at 31s), so
+  `require_project=True` additionally waits for `project` to be set — which now
+  happens from `iface.projectRead`, after the layers exist.
+- **`instance_disconnected` error code.** A selector that matches a Worker in
+  its reconnect grace period now gets this code, with `last_seen_ago` and
+  `grace_expires_in`, instead of `instance_not_found`. "Wrong selector" and "it
+  was here a moment ago" are different problems; conflating them cost real time
+  retrying selectors that were correct.
+- **`list_instances(include_disconnected=True)`.** Returns grace-period entries
+  as `state="disconnected"` with `grace_expires_in`. The MCP `qgis_list_instances`
+  uses it, so a QGIS that just died or dropped its connection is visible for 60s
+  with a countdown rather than silently gone.
+
 - **The dialog-handler tools are now on the MCP surface.**
   `qgis_register_dialog_handler`, `qgis_unregister_dialog_handler`,
   `qgis_list_dialog_handlers` and `qgis_clear_dialog_handlers` existed as worker
@@ -48,6 +79,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fires too late to capture import-time lines and would silently under-report.
 
 ### Changed (breaking)
+
+- **A selector that matches a Worker in its reconnect grace period now fails
+  with `instance_disconnected` instead of `instance_not_found`.** Clients that
+  retried on `instance_not_found` during a QGIS restart should treat
+  `instance_disconnected` the same way (and can use its `grace_expires_in` to
+  bound the wait).
+
+- **`list_instances` now includes unresponsive Workers, with `state` and
+  `last_seen_ago`.** Each `InstanceInfo` carries `state` (`"active"`,
+  `"unresponsive"`, or `"disconnected"` when asked for) and `last_seen_ago`
+  (seconds since the Hub last got a pong).
+  Previously an instance that had missed heartbeats was silently dropped from the
+  list. Clients that treated "listed" as "ready" should check `state`;
+  `AutomationClient.wait_for_instance` / `wait_for_new_instance` and the pytest
+  `wait_for_worker` already do, and keep waiting while the instance is
+  unresponsive. Older clients decoding a new Hub's list see the extra keys and
+  ignore them; a new client talking to an older Hub defaults `state` to
+  `"active"`.
 
 - **The MCP tool can no longer grant a permanent permission.**
   `qgis_execute_with_permission` used to accept `permission="always"`, which writes
@@ -112,6 +161,74 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (still JSON-formatted for Claude).
 
 ### Fixed
+
+- **`spawn_qgis()` could return an instance that cannot answer.** Its
+  launch_token wait matched on the token alone, and `list_instances` now also
+  returns instances whose heartbeat has stopped, so a QGIS still busy loading
+  was reported as spawned and the caller's first command blocked until the GUI
+  thread freed up. `wait_for_worker()` gained the `state == "active"` filter
+  when the state was introduced; this path did not. It now shares
+  `wait_for_ready()` with the rest.
+
+- **The gateway no longer leaks exceptions as a bare `Error executing tool`.**
+  Right after a Hub swap, `qgis_list_instances` failed three times in a row with
+  that one line and no JSON body, then recovered only after some other tool
+  happened to run. Anything outside the stale-connection set escaped the tool,
+  the MCP SDK treated it as a crash, and the caller saw neither the exception
+  type nor its message — the gateway's stderr is not visible from the client.
+  Every tool now goes through one path: a stale connection or an unexpected
+  exception on the first attempt resets the connection and retries once; a
+  second failure comes back as `gateway_internal_error` with the exception type
+  and the tail of the traceback. A reconnect whose register is rejected is
+  reported as `hub_unreachable` with the reason instead of escaping.
+
+- **A Worker whose Hub died could never get it back.** The reconnect timer
+  only reopened the socket; spawning the Hub (`ensure_hub_reachable`) ran once,
+  in `connect_to_hub`, at plugin load. Kill the Hub and QGIS sat alive but
+  isolated forever, cycling connect → refused → retry. The reconnect path now
+  goes through `ensure_hub_reachable` too (a TCP probe when the Hub is up, a
+  spawn when it is not), with exponential backoff up to 30s so a Hub that
+  cannot be started does not keep stalling the GUI thread. Killing the Hub is
+  now a supported way to upgrade it while QGIS keeps running.
+- **`qgis_wait_ready` no longer fails on the first call after QGIS starts.**
+  It told callers to call it first, but returned `hub_unreachable` immediately
+  when the Hub was not listening yet — which is exactly the situation right
+  after launch. It now retries the connection within `timeout_s` and, if the
+  Hub never comes up, reports `not_ready` with the unreachable reason in
+  `details.hub_unreachable`. Other tools still return `hub_unreachable` at
+  once.
+
+- **`InstanceInfo.project` was frozen at plugin load.** It was read once when
+  the Worker was built in `initGui`, before any project is open, and never
+  refreshed — so a QGIS started through the launcher reported `project: null`
+  forever, and the project-basename selector tier could not match it. The
+  plugin now sends a new `update_info` message (Worker → Hub) from
+  `iface.projectRead` (after the load completes), `QgsProject.cleared` and
+  `QgsProject.fileNameChanged` (save-as); a Worker that reconnects carries the
+  current value in its register. `fileNameChanged` alone was the first attempt
+  and does not fire when a project is opened — verified on QGIS 3.34.
+- **`qgis_list_instances` / `qgis_use_instance` / `qgis_wait_ready` reconnect
+  after a Hub restart.** Only worker commands had the stale-connection retry;
+  the discovery tools used the cached client as-is, so after swapping the Hub
+  "list works but use_instance fails" depended on which tool hit the dead
+  socket first. All tools now share one reconnect path.
+
+- **A QGIS whose GUI thread stalls no longer turns into an unreachable zombie.**
+  The Worker's `QWebSocket` lives on the QGIS GUI thread, so a heavy project load
+  or a long `qgis_execute_python` stops heartbeat pongs while the process and the
+  TCP connection stay alive. The Hub treated 20s without a pong as a disconnect:
+  the instance vanished from `list_instances` and every call failed with
+  `instance_not_found` even though QGIS was fine. Worse, a grace-period entry
+  ignored pongs (`mark_seen` was a no-op for it), so once the GUI freed up the
+  instance did **not** come back; after 60s the Hub deleted the entry without
+  closing the socket, and the Worker — still connected, never told — never
+  reconnected. Heartbeat loss is now a separate `unresponsive` state: the entry
+  stays listed and routable, calls queue until the GUI thread is free, and the
+  next pong restores `active`. Only after `UNRESPONSIVE_CLOSE_SECONDS` (300s)
+  does the Hub assume a half-open socket, close it itself, and let the normal
+  grace path run — which also triggers the Worker's auto-reconnect if it was
+  alive. Same-label restarts after kill -9 still supersede promptly through the
+  existing liveness probe.
 
 - **The user guide no longer promises a QGIS confirmation dialog that does not
   exist.** Four places described the `confirm` tier as "QGIS が確認ダイアログを出して

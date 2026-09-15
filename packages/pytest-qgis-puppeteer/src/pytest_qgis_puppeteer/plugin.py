@@ -1430,11 +1430,17 @@ def hub_ready(
     automation_client: E2EAutomationClient,
     qgis_process: None,
 ) -> str:
+    """Worker が登録され、**コマンドを処理できる**ようになるまで待つ。
+
+    register 直後の QGIS はプロジェクト読み込みで GUI スレッドが塞がっている
+    ことがあるので、一覧に載るだけでは足りない（`wait_for_ready` 参照）。
+    重いプロジェクトでは ini の ``qgis_startup_timeout`` を伸ばすこと。
+    """
     del qgis_process
     timeout_s = float(
         pytestconfig.getini("qgis_startup_timeout") or DEFAULT_WORKER_REGISTER_TIMEOUT_S
     )
-    return automation_client.wait_for_worker(timeout_s=timeout_s)
+    return automation_client.wait_for_ready(timeout_s=timeout_s)
 
 
 # ==============================================================

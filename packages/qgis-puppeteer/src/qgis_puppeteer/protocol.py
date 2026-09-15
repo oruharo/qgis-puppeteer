@@ -53,11 +53,17 @@ class MessageType(str, Enum):
     # 終了通知
     BYE = "bye"
 
+    # Worker → Hub: 登録後の自己申告情報の更新（project の読み込み・切替など）
+    UPDATE_INFO = "update_info"
+
 
 class ErrorCode(str, Enum):
     """エラーコード（ADR-0001 §3 "エラーコード初期セット"）。"""
 
     INSTANCE_NOT_FOUND = "instance_not_found"
+    # selector には一致するが、その Worker は切断済みで grace 中（再接続待ち）。
+    # not_found とは違い「居たが今は応答経路が無い」。details に grace_expires_in。
+    INSTANCE_DISCONNECTED = "instance_disconnected"
     INSTANCE_AMBIGUOUS = "instance_ambiguous"
     INSTANCE_TIMEOUT = "instance_timeout"
     PROTOCOL_VERSION_MISMATCH = "protocol_version_mismatch"
@@ -99,6 +105,16 @@ class InstanceInfo:
     # ADR-0005: label が worker により明示指定されたか（auto 採番でないか）。
     # sticky の安定キー選択に使う（auto-label は再起動で変わるため不適）。
     label_explicit: bool = False
+    # "active" | "unresponsive" | "disconnected"。unresponsive は TCP は繋がって
+    # いるがハートビート pong が返っていない状態（QGIS の GUI スレッドが塞がって
+    # いるのが典型）で、ルーティングは受け付ける。disconnected は切断済みで
+    # grace 中（`include_disconnected=True` で要求したときだけ載る）。
+    # 旧 Hub からは省略される。
+    state: str = "active"
+    # 最後に Hub が応答を確認してからの経過秒。旧 Hub からは None。
+    last_seen_ago: float | None = None
+    # disconnected のみ: Hub が登録を破棄するまでの残り秒。
+    grace_expires_in: float | None = None
 
 
 @dataclass(frozen=True)
@@ -210,9 +226,14 @@ class Response:
 
 @dataclass(frozen=True)
 class ListInstancesRequest:
-    """インスタンス一覧取得リクエスト。Hub に直接処理される。"""
+    """インスタンス一覧取得リクエスト。Hub に直接処理される。
+
+    ``include_disconnected`` を立てると grace 中（切断済み・再接続待ち）の
+    entry も ``state="disconnected"`` で返す。既定は従来どおり出さない。
+    """
 
     id: str
+    include_disconnected: bool = False
 
     @property
     def type(self) -> MessageType:
@@ -247,6 +268,24 @@ class Bye:
         return MessageType.BYE
 
 
+@dataclass(frozen=True)
+class UpdateInfo:
+    """Worker → Hub: 登録後に変わった自己申告情報を伝える。
+
+    register は plugin ロード時（プロジェクトを開く前）に一度きりなので、
+    その後の読み込み・切替で変わる ``project`` はこれで追いかける。Hub は
+    entry を更新するだけで応答しない。
+    """
+
+    id: str
+    instance_id: str
+    project: str | None = None
+
+    @property
+    def type(self) -> MessageType:
+        return MessageType.UPDATE_INFO
+
+
 # Union 型：プロトコルで流通する全メッセージ型
 Message = (
     RegisterRequest
@@ -256,6 +295,7 @@ Message = (
     | ListInstancesRequest
     | ListInstancesResponse
     | Bye
+    | UpdateInfo
 )
 
 
@@ -411,7 +451,10 @@ def _build_message(msg_type: MessageType, payload: dict[str, Any]) -> Message:
         )
 
     if msg_type is MessageType.LIST_INSTANCES:
-        return ListInstancesRequest(id=payload["id"])
+        return ListInstancesRequest(
+            id=payload["id"],
+            include_disconnected=bool(payload.get("include_disconnected", False)),
+        )
 
     if msg_type is MessageType.LIST_INSTANCES_RESPONSE:
         raw_instances = payload.get("instances", [])
@@ -425,6 +468,9 @@ def _build_message(msg_type: MessageType, payload: dict[str, Any]) -> Message:
                 registered_seq=int(item.get("registered_seq", 0)),
                 registered_at=item.get("registered_at"),
                 label_explicit=bool(item.get("label_explicit", False)),
+                state=str(item.get("state", "active")),
+                last_seen_ago=item.get("last_seen_ago"),
+                grace_expires_in=item.get("grace_expires_in"),
             )
             for item in raw_instances
         ]
@@ -432,6 +478,13 @@ def _build_message(msg_type: MessageType, payload: dict[str, Any]) -> Message:
 
     if msg_type is MessageType.BYE:
         return Bye(id=payload["id"], instance_id=payload["instance_id"])
+
+    if msg_type is MessageType.UPDATE_INFO:
+        return UpdateInfo(
+            id=payload["id"],
+            instance_id=payload["instance_id"],
+            project=payload.get("project"),
+        )
 
     # MessageType 列挙を網羅的に扱っているが、将来の追加に備えて保険
     raise ProtocolDecodeError(f"unhandled message type: {msg_type}")

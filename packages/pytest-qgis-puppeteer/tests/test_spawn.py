@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -36,12 +37,17 @@ from pytest_qgis_puppeteer.spawn import (
 class _FakeInstance:
     """``InstanceInfo`` の最小スタブ。spawn.py は ``pid`` / ``instance_id`` /
     ``label`` しか触らないので、これで足りる。
+
+    ``state`` / ``project`` は `wait_for_ready` の選別条件（active であること、
+    必要なら project が入っていること）を再現するために持つ。
     """
 
     instance_id: str
     pid: int
     label: str = ""
     launch_token: str | None = None
+    state: str = "active"
+    project: str | None = None
 
 
 class _FakeAutomationClient:
@@ -49,6 +55,11 @@ class _FakeAutomationClient:
 
     ``list_instances()`` の戻り値をシナリオごとに切り替えるため、`feed()` で
     時系列を仕込めるようにしている。``execute_python`` は呼ばれた事実だけ記録。
+
+    ``wait_for_ready`` は本物（`E2EAutomationClient`）の契約のうち
+    「``state == "active"`` で selector に一致するものを返す」だけを真似る。
+    往復 probe までは再現しない（そちらは test_automation_client 側で本物を
+    テストしている）。
     """
 
     def __init__(self) -> None:
@@ -58,6 +69,25 @@ class _FakeAutomationClient:
 
     def feed(self, *snapshots: list[_FakeInstance]) -> None:
         self._scripted.extend(snapshots)
+
+    def wait_for_ready(
+        self,
+        selector: str | None = None,
+        *,
+        timeout_s: float = 60.0,
+        poll_interval_s: float = 0.25,
+        **_kwargs: Any,
+    ) -> str:
+        deadline = time.monotonic() + timeout_s
+        while True:
+            for info in self.list_instances():
+                if getattr(info, "state", "active") != "active":
+                    continue
+                if selector is None or getattr(info, "launch_token", None) == selector:
+                    return info.instance_id
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"fake: nothing became ready within {timeout_s}s")
+            time.sleep(poll_interval_s)
 
     def bind_popens(self, popens: list[Any]) -> None:
         """ADR-0005 D6: spawn_qgis が注入した launch_token を fed instance に
@@ -245,7 +275,32 @@ class TestBuildEnv:
 
 
 class TestWaitForWorkerByToken:
-    """launch_token による決定的 instance_id 解決（pid diff heuristic を置換）。"""
+    """launch_token による決定的 instance_id 解決（pid diff heuristic を置換）。
+
+    実体は `E2EAutomationClient.wait_for_ready` に委譲しているので、ここで見るのは
+    「token を selector として渡すこと」と「TimeoutError を
+    `WorkerRegisterTimeout` に変換すること」。選別と往復 probe の中身は
+    test_automation_client の TestWaitForReady 側で本物をテストしている。
+    """
+
+    def test_skips_unresponsive_instances(self) -> None:
+        """register 直後に GUI が塞がっている個体は「使える」ではない。
+
+        `list_instances` が unresponsive も返すようになったので、state を見ずに
+        token 一致だけで拾うと、何も処理できない個体を掴んでしまう。
+        """
+        client = _FakeAutomationClient()
+        client.feed(
+            [_FakeInstance(instance_id="mine", pid=1, launch_token="lt-me", state="unresponsive")],
+            [_FakeInstance(instance_id="mine", pid=1, launch_token="lt-me", state="active")],
+        )
+        result = _wait_for_worker_by_token(
+            client,  # type: ignore[arg-type]
+            launch_token="lt-me",
+            timeout_s=1.0,
+            poll_interval_s=0.01,
+        )
+        assert result == "mine"
 
     def test_returns_instance_id_when_token_matches(self) -> None:
         client = _FakeAutomationClient()
