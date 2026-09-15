@@ -8,6 +8,34 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The dialog-handler tools are now on the MCP surface.**
+  `qgis_register_dialog_handler`, `qgis_unregister_dialog_handler`,
+  `qgis_list_dialog_handlers` and `qgis_clear_dialog_handlers` existed as worker
+  commands and were documented in the user guide as MCP tools — with a "Claude
+  Desktop からの利用例" showing Claude registering a handler — but the gateway never
+  published them, so that flow could not happen. The gateway now exposes all four
+  (20 tools in total), with `action` and `permission` narrowed to enums in the
+  input schema.
+- **Tool and parameter descriptions now document the contracts the model has to
+  follow.** `qgis_execute_python` / `qgis_execute_with_permission` state that a value
+  comes back only when the code assigns `_result`; `instance` and `selector` carry
+  JSON-Schema descriptions (selector lists every matching and scoping key);
+  `qgis_snapshot_ui`, `qgis_click_widget`, `qgis_set_widget_value`, `qgis_screenshot`
+  and `qgis_select_features` spell out their defaults and the error codes they can
+  return; and the server's `instructions` orient a client around instance selection,
+  selectors, `_result` and `isError`. `qgis_use_instance`'s ADR rationale moved into a
+  code comment — it was being shipped to the model as the tool description.
+- **MCP tools now carry titles and annotations.** All 16 tools declare a display
+  title and `ToolAnnotations`. The seven query-only tools (`qgis_list_instances`,
+  `qgis_list_layers`, `qgis_get_layer_info`, `qgis_get_selected_features`,
+  `qgis_get_whitelist`, `qgis_get_canvas_extent`, `qgis_snapshot_ui`) are marked
+  `readOnlyHint`, which lets MCP clients dispatch them in parallel, while
+  `qgis_execute_python`, `qgis_execute_with_permission`, `qgis_click_widget` and
+  `qgis_set_widget_value` carry `openWorldHint` because one call can turn into
+  arbitrary work. The server itself now reports a title, its package version and
+  its project URL — under the 2026-07-28 revision that identity travels in every
+  result's `_meta`, where the version was previously empty.
+
 - **E2E coverage guide + ready-to-use templates** (`examples/coverage/`). A new
   user-guide section ("E2E カバレッジ計測") explains how to measure coverage of the
   code that runs *inside* QGIS — the two-process model means `pytest --cov` alone
@@ -21,6 +49,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed (breaking)
 
+- **Failed tool calls are reported with `isError`.** `hub_unreachable`,
+  worker-side `RequestError`s and `instance_not_found` used to come back as
+  *successful* results whose body happened to contain an `error` object, so a
+  client could not tell a failed call from a working one. They now return
+  `isError: true`. The body is unchanged — the same readable JSON with the same
+  error codes — because raising would have the client fold it into a generic
+  "error executing tool" message.
+- **Tool results no longer carry `structuredContent`.** The `-> str` return
+  annotations made the SDK publish an auto-generated `{"result": "<string>"}`
+  output schema and mirror the whole JSON body into `structuredContent`, so every
+  result travelled twice (a 333-character error result carried 381 further
+  characters of duplicate; UI snapshots are far larger). The contract is, and
+  stays, the JSON text in the content block.
 - **The `mcp` extra now requires `mcp>=2,<3`; the MCP gateway targets mcp 2.x.**
   mcp 2.x renamed `FastMCP` to `MCPServer` and moved it to
   `mcp.server.mcpserver`, so the gateway raised `ModuleNotFoundError: No module

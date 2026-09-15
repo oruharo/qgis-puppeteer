@@ -297,6 +297,11 @@ class TestMcpGatewayToolInventory:
             "qgis_snapshot_ui",
             "qgis_click_widget",
             "qgis_set_widget_value",
+            # dialog handler（worker 側 handler の公開。user-guide が MCP ツールと明記）
+            "qgis_register_dialog_handler",
+            "qgis_unregister_dialog_handler",
+            "qgis_list_dialog_handlers",
+            "qgis_clear_dialog_handlers",
         }
         assert expected.issubset(set(names)), f"missing tools: {expected - set(names)}"
 
@@ -380,6 +385,95 @@ class TestMcpGatewayHubUnreachable:
         assert "Timeout" in payload["error"]["details"]["type"]
 
 
+class TestMcpGatewayErrorSignalling:
+    """失敗は `isError` で返す（本文の JSON は成功時と同じ書式のまま）。
+
+    例外を投げるとクライアント側で汎用メッセージに丸められる。本文を読める
+    まま残しつつ、呼び出しが失敗したことはフラグで伝える。
+    """
+
+    def test_hub_unreachable_is_marked_as_error(self) -> None:
+        @asynccontextmanager
+        async def _lifespan(_server: Any) -> AsyncIterator[GatewayContext]:
+            ctx = GatewayContext(url="ws://127.0.0.1:1", origin=DEFAULT_ORIGIN)
+
+            async def _raise_timeout() -> AutomationClient:
+                raise asyncio.TimeoutError("simulated handshake timeout")
+
+            ctx.get_client = _raise_timeout  # type: ignore[method-assign]
+            yield ctx
+
+        async def run() -> tuple[bool, dict[str, Any]]:
+            gateway = build_gateway(lifespan=_lifespan)
+            async with Client(gateway, raise_exceptions=True) as client:
+                result = await client.call_tool("qgis_list_layers", {})
+                return result.is_error, json.loads(_extract_text(result))
+
+        is_error, payload = _run(run())
+        assert is_error is True
+        assert payload["error"]["code"] == "hub_unreachable"
+
+    def test_worker_error_is_marked_as_error(self) -> None:
+        async def run() -> tuple[bool, dict[str, Any]]:
+            async with fake_hub_server() as (_hub, hub_url):
+                worker = _FakeWorker(hub_url, label="a", pid=1)
+
+                def responder(req: dict[str, Any]) -> dict[str, Any]:
+                    return {
+                        "type": "response",
+                        "id": req["id"],
+                        "ok": False,
+                        "error": {"code": "worker_execution_error", "message": "boom"},
+                    }
+
+                worker.responder = responder
+                await worker.start()
+                await worker.ready.wait()
+
+                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                async with Client(gateway, raise_exceptions=True) as client:
+                    result = await client.call_tool("qgis_execute_python", {"code": "1/0"})
+                    return result.is_error, json.loads(_extract_text(result))
+
+        is_error, payload = _run(run())
+        assert is_error is True
+        assert payload["error"]["code"] == "worker_execution_error"
+
+    def test_unknown_selector_is_marked_as_error(self) -> None:
+        async def run() -> tuple[bool, dict[str, Any]]:
+            async with fake_hub_server() as (_hub, hub_url):
+                worker = _FakeWorker(hub_url, label="only", pid=7)
+                await worker.start()
+                await worker.ready.wait()
+
+                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                async with Client(gateway, raise_exceptions=True) as client:
+                    result = await client.call_tool(
+                        "qgis_use_instance", {"selector": "does-not-exist"}
+                    )
+                    return result.is_error, json.loads(_extract_text(result))
+
+        is_error, payload = _run(run())
+        assert is_error is True
+        assert payload["error"]["code"] == "instance_not_found"
+
+    def test_success_is_not_marked_as_error(self) -> None:
+        async def run() -> tuple[bool, dict[str, Any]]:
+            async with fake_hub_server() as (_hub, hub_url):
+                worker = _FakeWorker(hub_url, label="a", pid=1)
+                await worker.start()
+                await worker.ready.wait()
+
+                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                async with Client(gateway, raise_exceptions=True) as client:
+                    result = await client.call_tool("qgis_list_layers", {})
+                    return result.is_error, json.loads(_extract_text(result))
+
+        is_error, payload = _run(run())
+        assert is_error is False
+        assert isinstance(payload, dict)
+
+
 class TestMcpGatewayLegacyHandshake:
     """`mode="legacy"`（initialize 握手＋JSON-RPC）でも同じように動くこと。
 
@@ -431,6 +525,103 @@ class TestMcpGatewayLegacyHandshake:
         assert {"qgis_use_instance", "qgis_list_layers"} <= set(names)
         # 別リクエストで設定した sticky が次のリクエストに効いている
         assert payload["from"] == "B"
+
+
+class TestMcpGatewayToolDescriptors:
+    """クライアントに見せる記述子：表示名・注釈・結果の形。"""
+
+    @staticmethod
+    @asynccontextmanager
+    async def _lifespan(_server: Any) -> AsyncIterator[GatewayContext]:
+        """Hub には触らない lifespan（記述子の確認だけなら接続は不要）。"""
+        yield GatewayContext(url="ws://127.0.0.1:1", origin=DEFAULT_ORIGIN)
+
+    def _list_tools(self) -> list[Any]:
+        async def run() -> list[Any]:
+            gateway = build_gateway(lifespan=self._lifespan)
+            async with Client(gateway, raise_exceptions=True) as client:
+                return list((await client.list_tools()).tools)
+
+        return _run(run())
+
+    def test_every_tool_has_title_and_annotations(self) -> None:
+        tools = self._list_tools()
+        missing = [t.name for t in tools if not t.title or t.annotations is None]
+        assert not missing, f"title / annotations 未設定: {missing}"
+
+    def test_read_only_hint_marks_exactly_the_query_tools(self) -> None:
+        """read_only が立ったツールはクライアント側で並列に投げられる。
+
+        状態を書き換えるものを取り違えると、並列実行で壊れる側に倒れるので
+        「照会のみ」の一覧をここで固定する。
+        """
+        tools = self._list_tools()
+        read_only = {t.name for t in tools if t.annotations and t.annotations.read_only_hint}
+        assert read_only == {
+            "qgis_list_instances",
+            "qgis_list_layers",
+            "qgis_get_layer_info",
+            "qgis_get_selected_features",
+            "qgis_get_whitelist",
+            "qgis_get_canvas_extent",
+            "qgis_snapshot_ui",
+            "qgis_list_dialog_handlers",
+        }
+
+    def test_open_world_hint_marks_the_arbitrary_tools(self) -> None:
+        """任意の Python 実行・UI 操作に化けうるものだけ open_world を立てる。"""
+        tools = self._list_tools()
+        open_world = {t.name for t in tools if t.annotations and t.annotations.open_world_hint}
+        assert open_world == {
+            "qgis_execute_python",
+            "qgis_execute_with_permission",
+            "qgis_click_widget",
+            "qgis_set_widget_value",
+        }
+
+    def test_no_tool_declares_an_output_schema(self) -> None:
+        """`-> str` から自動生成される {"result": ...} schema を切っていること。
+
+        付いたままだと同じ JSON が本文と structuredContent に二重に載る
+        （`structured_output=False`）。
+        """
+        tools = self._list_tools()
+        with_schema = [t.name for t in tools if t.output_schema is not None]
+        assert not with_schema, f"outputSchema が付いている: {with_schema}"
+
+    def test_tricky_parameters_are_documented(self) -> None:
+        """モデルが値を組み立てにくい引数と契約は、説明として渡す。
+
+        selector の受け付けるキー、instance の省略時の既定、`_result` に代入
+        しないと値が返らないことは、ここに書かれていなければ推測になる。
+        """
+        tools = {t.name: t for t in self._list_tools()}
+
+        selector = tools["qgis_click_widget"].input_schema["properties"]["selector"]
+        assert "object_name" in selector.get("description", "")
+
+        instance = tools["qgis_list_layers"].input_schema["properties"]["instance"]
+        assert "qgis_use_instance" in instance.get("description", "")
+
+        assert "_result" in (tools["qgis_execute_python"].description or "")
+
+    def test_result_carries_text_only(self) -> None:
+        """結果は本文の JSON テキスト 1 本で、structuredContent を伴わない。"""
+
+        async def run() -> tuple[Any, dict[str, Any]]:
+            async with fake_hub_server() as (_hub, hub_url):
+                worker = _FakeWorker(hub_url, label="a", pid=1)
+                await worker.start()
+                await worker.ready.wait()
+
+                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                async with Client(gateway, raise_exceptions=True) as client:
+                    result = await client.call_tool("qgis_list_layers", {})
+                    return result.structured_content, json.loads(_extract_text(result))
+
+        structured, payload = _run(run())
+        assert structured is None
+        assert isinstance(payload, dict)
 
 
 # ============================================================

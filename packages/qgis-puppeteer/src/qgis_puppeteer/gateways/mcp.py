@@ -11,6 +11,7 @@ ADR-0001 §5, §7 に基づき、MCP プロトコル層を自動化層の内部�
 - `GatewayContext` に sticky instance を保持し、lifespan 全体で共有する
   （MCPServer の各 tool call は別 Task で走るため ContextVar では伝播しない）
 - `qgis_list_instances` / `qgis_use_instance` は Hub 直接照会／設定
+- 失敗は例外ではなく `isError` の tool error として返す（本文は読める JSON のまま）
 
 ## スレッド・ライフサイクル
 - MCPServer は asyncio ベースの単一イベントループ上で動作する
@@ -25,6 +26,7 @@ ADR-0001 §5, §7 に基づき、MCP プロトコル層を自動化層の内部�
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import json
 import logging
 import os
@@ -32,7 +34,7 @@ import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Annotated, Any, Literal
 
 import websockets.exceptions
 
@@ -46,6 +48,8 @@ from qgis_puppeteer.protocol import Role
 
 try:
     from mcp.server.mcpserver import Context, MCPServer
+    from mcp.types import CallToolResult, TextContent, ToolAnnotations
+    from pydantic import Field
 except ImportError as e:  # pragma: no cover - optional deps
     raise ImportError(
         "McpGateway requires the 'mcp' optional dependency (mcp 2.x). "
@@ -64,6 +68,85 @@ ENV_HUB_URL: str = "QPUPPETEER_HUB_URL"
 ENV_ORIGIN: str = "QPUPPETEER_HUB_ORIGIN"
 
 MCP_SERVER_NAME: str = "qgis-puppeteer"
+MCP_SERVER_TITLE: str = "QGIS Puppeteer"
+MCP_SERVER_URL: str = "https://github.com/oruharo/qgis-puppeteer"
+
+
+def _server_version() -> str:
+    """serverInfo に載せる版。2026-07-28 では各結果の `_meta` に入る。"""
+    try:
+        return importlib.metadata.version("qgis-puppeteer")
+    except importlib.metadata.PackageNotFoundError:  # pragma: no cover - 未インストール実行
+        return ""
+
+
+# ============================================================
+# ツール注釈（MCP の hint。保証ではない）
+# ============================================================
+# `read_only_hint` が立ったツールは、クライアント側で並列に投げられる。
+# QGIS の状態を書き換えるか、任意のコード・UI 操作に化けうるかで分ける。
+
+_QUERY = ToolAnnotations(
+    read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False
+)
+"""照会のみ。QGIS にも gateway にも副作用がない。"""
+
+_MUTATE_SAFE = ToolAnnotations(
+    read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False
+)
+"""状態は変えるが、同じ引数なら同じ状態に落ち着き、データを壊さない。"""
+
+_MUTATE_ARBITRARY = ToolAnnotations(
+    read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=True
+)
+"""任意の Python 実行・UI クリックに化けうる。何が起きるかは呼び出し内容次第。"""
+
+_MUTATE_WIDGET_VALUE = ToolAnnotations(
+    read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=True
+)
+"""値の設定自体は冪等だが、signal 経由で任意の処理が走りうる。"""
+
+_MUTATE_STANDING_RULE = ToolAnnotations(
+    read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False
+)
+"""以後のダイアログを自動で操作する規則を登録する。登録は冪等だが、効果は将来に及ぶ。"""
+
+
+# ============================================================
+# ツール引数（モデルが読む説明をスキーマに載せる）
+# ============================================================
+
+InstanceArg = Annotated[
+    str | None,
+    Field(
+        description=(
+            "対象の QGIS インスタンス（launch_token / @label / label / instance_id / "
+            "プロジェクト名）。省略時は qgis_use_instance で選んだインスタンス。"
+        )
+    ),
+]
+
+SelectorArg = Annotated[
+    dict[str, Any],
+    Field(
+        description=(
+            "対象ウィジェットの指定。照合キーは object_name（最も確実）/ text / class / "
+            "title / label / placeholder / role / text_contains / text_re / attr。"
+            "絞り込みは scope（既定 'modal'、ほかに 'active_window' / 'any'）/ "
+            "root_object_name / index。qgis_snapshot_ui の出力から組み立てる。"
+        )
+    ),
+]
+
+DialogPredicateArg = Annotated[
+    dict[str, Any],
+    Field(
+        description=(
+            "対象モーダルの条件。title / class / object_name を主に使い、書いたキーを "
+            "すべて満たすものに一致する。空の {} はすべての modal に一致する。"
+        )
+    ),
+]
 
 
 # ============================================================
@@ -180,14 +263,26 @@ def _format_result(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2, default=str)
 
 
-def _format_unreachable(gateway: GatewayContext, exc: BaseException) -> str:
-    """Hub に届かない旨を一貫した JSON でユーザーに返す。
+def _error_result(payload: Any) -> CallToolResult:
+    """失敗を MCP の tool error（`isError`）として返す。
+
+    本文は成功時と同じ `_format_result` の JSON テキスト。例外を投げると
+    クライアント側で汎用メッセージに丸められてしまうので、読める本文は
+    そのまま渡しつつ「呼び出しは失敗した」ことだけを立てる。
+    """
+    return CallToolResult(
+        content=[TextContent(type="text", text=_format_result(payload))], is_error=True
+    )
+
+
+def _format_unreachable(gateway: GatewayContext, exc: BaseException) -> CallToolResult:
+    """Hub に届かない旨を一貫した形でユーザーに返す。
 
     Gateway 起動時点では QGIS が立ち上がっていないのが普通で、tool 呼び出し
-    時に初めて接続を試みる。接続失敗は珍しくないので、例外を投げず Claude
-    に読める形のエラー JSON に落とす。
+    時に初めて接続を試みる。接続失敗は珍しくないので、例外は投げずに
+    `isError` + 読める JSON 本文に落とす。
     """
-    return _format_result(
+    return _error_result(
         {
             "error": {
                 "code": "hub_unreachable",
@@ -207,8 +302,8 @@ def _format_unreachable(gateway: GatewayContext, exc: BaseException) -> str:
 
 async def _get_client_or_error(
     gateway: GatewayContext,
-) -> tuple[AutomationClient | None, str | None]:
-    """Hub 接続を試み、成功なら (client, None)、失敗なら (None, 整形済み JSON)。
+) -> tuple[AutomationClient | None, CallToolResult | None]:
+    """Hub 接続を試み、成功なら (client, None)、失敗なら (None, tool error)。
 
     接続エラーのみ catch：`RequestError` などの business error は上位で扱う。
 
@@ -246,15 +341,17 @@ _STALE_CONNECTION_EXC = (
 )
 
 
-async def _call(ctx: Context, command: str, params: dict[str, Any], *, instance: str | None) -> str:
+async def _call(
+    ctx: Context, command: str, params: dict[str, Any], *, instance: str | None
+) -> str | CallToolResult:
     """AutomationClient.call(...) を呼び、結果を文字列で返す。
 
     QGIS/Worker の再起動を挟むと、cached client が stale な WebSocket を
     抱えたまま残るため 1 回目の call が WinError 10053 等で落ちることがある。
     その場合は client をリセットして 1 度だけ再接続→リトライする。
 
-    接続失敗は `hub_unreachable` JSON、`RequestError` は business error JSON。
-    どちらも例外を上に投げない（Claude 側のエラー表示を冗長にしないため）。
+    接続失敗は `hub_unreachable`、`RequestError` は worker 側の business error。
+    どちらも例外は投げず、`isError` を立てた tool error として返す。
     """
     gateway: GatewayContext = ctx.request_context.lifespan_context
     target = _resolve_target(gateway, instance)
@@ -267,7 +364,7 @@ async def _call(ctx: Context, command: str, params: dict[str, Any], *, instance:
         try:
             result = await client.call(command, params, instance=target)
         except RequestError as e:
-            return _format_result(
+            return _error_result(
                 {
                     "error": {
                         "code": e.code.value if e.code is not None else None,
@@ -313,10 +410,21 @@ def build_gateway(
     # 取り違えないよう、すべてキーワード引数で渡す。
     mcp = MCPServer(
         name=name,
+        title=MCP_SERVER_TITLE,
+        version=_server_version(),
+        website_url=MCP_SERVER_URL,
+        description="Control a running QGIS from Claude via the qgis_puppet plugin.",
         instructions=(
-            "QGIS automation gateway. "
-            "Use qgis_list_instances / qgis_use_instance to select a target "
-            "when multiple QGIS processes are running."
+            "QGIS automation gateway.\n"
+            "- Several QGIS processes can be connected: qgis_list_instances lists them, "
+            "qgis_use_instance pins one for later calls, and every tool also takes an "
+            "explicit `instance`.\n"
+            "- UI tools take a selector dict; build it from qgis_snapshot_ui output.\n"
+            "- qgis_execute_python runs code inside QGIS and returns whatever that code "
+            "assigns to `_result`.\n"
+            "- A failed call comes back with isError and a JSON body "
+            '{"error": {"code", "message", ...}}; code=hub_unreachable means QGIS, or the '
+            "qgis_puppet plugin inside it, is not running yet."
         ),
         lifespan=lifespan or _default_lifespan,
     )
@@ -333,16 +441,22 @@ def build_gateway(
 def _register_tools(mcp: MCPServer) -> None:
     """ADR-0001 §5 の 14 ツール + instance 選択ツールを MCP に公開する。
 
-    - QGIS ツール 14 種に `instance: str | None = None` を追加
+    - QGIS ツール 14 種に `instance` 引数（`InstanceArg`）を追加
     - sticky 管理用の `qgis_list_instances` / `qgis_use_instance` を新設
+    - ADR-0002 のダイアログ自動処理 4 種（worker 側 handler の公開）
+
+    各ツールには表示名と注釈を付ける。結果は `_format_result` の JSON テキスト
+    1 本に揃える（`structured_output=False`）：`-> str` のまま SDK に任せると
+    `{"result": "<同じ JSON 文字列>"}` という outputSchema と structuredContent が
+    自動生成され、同じ内容が本文と二重に流れてしまう。
     """
 
     # ------------------------------------------------------------
     # Instance 管理
     # ------------------------------------------------------------
 
-    @mcp.tool()
-    async def qgis_list_instances(ctx: Context) -> str:
+    @mcp.tool(title="QGIS インスタンス一覧", annotations=_QUERY, structured_output=False)
+    async def qgis_list_instances(ctx: Context) -> str | CallToolResult:
         """接続中の QGIS インスタンス一覧を返す。"""
         gateway: GatewayContext = ctx.request_context.lifespan_context
         client, err = await _get_client_or_error(gateway)
@@ -352,18 +466,22 @@ def _register_tools(mcp: MCPServer) -> None:
         instances = await client.list_instances()
         return _format_result([_instance_info_to_dict(i) for i in instances])
 
-    @mcp.tool()
-    async def qgis_use_instance(ctx: Context, selector: str) -> str:
+    @mcp.tool(
+        title="使用する QGIS インスタンスを選ぶ", annotations=_MUTATE_SAFE, structured_output=False
+    )
+    async def qgis_use_instance(ctx: Context, selector: str) -> str | CallToolResult:
         """以後のツール呼び出しで使う instance を sticky に設定する。
 
-        selector は ADR-0005 D6 の解決順（launch_token > @label > label >
-        instance_id > project basename）で Hub 側が照会する。
-
-        ADR-0005 D3: sticky には解決後の instance_id ではなく **安定キー**
-        （launch_token > label、無ければ instance_id）を保持する。各 dispatch
-        で Hub が再解決するため、worker を再起動しても「現在 live なその
-        ロール」へ自動追従する（instance_id 凍結による再起動失効を回避）。
+        selector は launch_token > @label > label > instance_id > プロジェクト名
+        の順に解決する。以後 instance を省略した呼び出しは、ここで選んだ
+        インスタンスに送られる。該当が無い場合と複数一致した場合は
+        instance_not_found を返す。
         """
+        # ADR-0005 D6 の解決順を Hub と共有する。ADR-0005 D3: sticky には解決後の
+        # instance_id ではなく **安定キー**（launch_token > label、無ければ
+        # instance_id）を保持する。各 dispatch で Hub が再解決するため、worker を
+        # 再起動しても「現在 live なそのロール」へ自動追従する（instance_id 凍結
+        # による再起動失効を回避）。
         gateway: GatewayContext = ctx.request_context.lifespan_context
         client, err = await _get_client_or_error(gateway)
         if err is not None:
@@ -372,7 +490,7 @@ def _register_tools(mcp: MCPServer) -> None:
         instances = await client.list_instances()
         resolved = _resolve_selector(selector, instances)
         if resolved is None:
-            return _format_result(
+            return _error_result(
                 {
                     "error": {
                         "code": "instance_not_found",
@@ -394,15 +512,15 @@ def _register_tools(mcp: MCPServer) -> None:
     # Layer Tools
     # ------------------------------------------------------------
 
-    @mcp.tool()
-    async def qgis_list_layers(ctx: Context, instance: str | None = None) -> str:
+    @mcp.tool(title="レイヤ一覧", annotations=_QUERY, structured_output=False)
+    async def qgis_list_layers(ctx: Context, instance: InstanceArg = None) -> str | CallToolResult:
         """QGIS プロジェクトのレイヤ一覧を返す。"""
         return await _call(ctx, "qgis_list_layers", {}, instance=instance)
 
-    @mcp.tool()
+    @mcp.tool(title="レイヤ情報", annotations=_QUERY, structured_output=False)
     async def qgis_get_layer_info(
-        ctx: Context, layer_name: str, instance: str | None = None
-    ) -> str:
+        ctx: Context, layer_name: str, instance: InstanceArg = None
+    ) -> str | CallToolResult:
         """指定レイヤのメタデータを返す。"""
         return await _call(
             ctx,
@@ -411,14 +529,17 @@ def _register_tools(mcp: MCPServer) -> None:
             instance=instance,
         )
 
-    @mcp.tool()
+    @mcp.tool(title="フィーチャを選択", annotations=_MUTATE_SAFE, structured_output=False)
     async def qgis_select_features(
         ctx: Context,
         layer_name: str,
         expression: str,
-        instance: str | None = None,
-    ) -> str:
-        """式に一致するフィーチャを選択する。"""
+        instance: InstanceArg = None,
+    ) -> str | CallToolResult:
+        """式に一致するフィーチャを選択する（QGIS の式構文）。
+
+        例: "population" > 1000
+        """
         return await _call(
             ctx,
             "qgis_select_features",
@@ -426,13 +547,13 @@ def _register_tools(mcp: MCPServer) -> None:
             instance=instance,
         )
 
-    @mcp.tool()
+    @mcp.tool(title="選択中フィーチャを取得", annotations=_QUERY, structured_output=False)
     async def qgis_get_selected_features(
         ctx: Context,
         layer_name: str,
         limit: int = 100,
-        instance: str | None = None,
-    ) -> str:
+        instance: InstanceArg = None,
+    ) -> str | CallToolResult:
         """選択中フィーチャの属性を最大 limit 件返す。"""
         return await _call(
             ctx,
@@ -445,19 +566,32 @@ def _register_tools(mcp: MCPServer) -> None:
     # Python Execution
     # ------------------------------------------------------------
 
-    @mcp.tool()
-    async def qgis_execute_python(ctx: Context, code: str, instance: str | None = None) -> str:
-        """ホワイトリストで許可された Python コードを実行する。"""
+    @mcp.tool(title="Python を実行", annotations=_MUTATE_ARBITRARY, structured_output=False)
+    async def qgis_execute_python(
+        ctx: Context, code: str, instance: InstanceArg = None
+    ) -> str | CallToolResult:
+        """ホワイトリストで許可された Python コードを QGIS 内で実行する。
+
+        値を受け取るには、コード内で `_result` に代入する。最終式の自動評価は
+        行わないので、代入しなければ result_set=false で返る。ホワイトリストに
+        無いコードは qgis_execute_with_permission を使う。
+        """
         return await _call(ctx, "qgis_execute_python", {"code": code}, instance=instance)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="許可付きで Python を実行", annotations=_MUTATE_ARBITRARY, structured_output=False
+    )
     async def qgis_execute_with_permission(
         ctx: Context,
         code: str,
-        permission: str,
-        instance: str | None = None,
-    ) -> str:
-        """ユーザー許可付きで Python コードを実行する。"""
+        permission: Literal["once", "session", "always", "cancel"],
+        instance: InstanceArg = None,
+    ) -> str | CallToolResult:
+        """ユーザー許可付きで Python コードを実行する。
+
+        permission は "once" / "session" / "always" / "cancel" のいずれか。値の
+        受け取り方は qgis_execute_python と同じで、`_result` に代入する。
+        """
         return await _call(
             ctx,
             "qgis_execute_with_permission",
@@ -465,13 +599,17 @@ def _register_tools(mcp: MCPServer) -> None:
             instance=instance,
         )
 
-    @mcp.tool()
-    async def qgis_get_whitelist(ctx: Context, instance: str | None = None) -> str:
+    @mcp.tool(title="ホワイトリストを取得", annotations=_QUERY, structured_output=False)
+    async def qgis_get_whitelist(
+        ctx: Context, instance: InstanceArg = None
+    ) -> str | CallToolResult:
         """現在のホワイトリスト内容を返す。"""
         return await _call(ctx, "qgis_get_whitelist", {}, instance=instance)
 
-    @mcp.tool()
-    async def qgis_clear_session_permissions(ctx: Context, instance: str | None = None) -> str:
+    @mcp.tool(title="セッション許可をクリア", annotations=_MUTATE_SAFE, structured_output=False)
+    async def qgis_clear_session_permissions(
+        ctx: Context, instance: InstanceArg = None
+    ) -> str | CallToolResult:
         """セッション中に付与された実行許可をクリアする。"""
         return await _call(ctx, "qgis_clear_session_permissions", {}, instance=instance)
 
@@ -479,15 +617,18 @@ def _register_tools(mcp: MCPServer) -> None:
     # Screenshot & Canvas
     # ------------------------------------------------------------
 
-    @mcp.tool()
+    @mcp.tool(title="キャンバスを撮影", annotations=_MUTATE_SAFE, structured_output=False)
     async def qgis_screenshot(
         ctx: Context,
         output_path: str | None = None,
         width: int | None = None,
         height: int | None = None,
-        instance: str | None = None,
-    ) -> str:
-        """QGIS キャンバスのスクリーンショットを撮る。"""
+        instance: InstanceArg = None,
+    ) -> str | CallToolResult:
+        """QGIS キャンバスのスクリーンショットを撮り、保存先のパスを返す。
+
+        output_path を省略すると一時ファイルに保存する。
+        """
         params: dict[str, Any] = {}
         if output_path is not None:
             params["output_path"] = output_path
@@ -497,20 +638,22 @@ def _register_tools(mcp: MCPServer) -> None:
             params["height"] = height
         return await _call(ctx, "qgis_screenshot", params, instance=instance)
 
-    @mcp.tool()
-    async def qgis_get_canvas_extent(ctx: Context, instance: str | None = None) -> str:
+    @mcp.tool(title="キャンバス範囲を取得", annotations=_QUERY, structured_output=False)
+    async def qgis_get_canvas_extent(
+        ctx: Context, instance: InstanceArg = None
+    ) -> str | CallToolResult:
         """現在のキャンバス範囲を返す。"""
         return await _call(ctx, "qgis_get_canvas_extent", {}, instance=instance)
 
-    @mcp.tool()
+    @mcp.tool(title="キャンバス範囲を設定", annotations=_MUTATE_SAFE, structured_output=False)
     async def qgis_set_canvas_extent(
         ctx: Context,
         xmin: float,
         ymin: float,
         xmax: float,
         ymax: float,
-        instance: str | None = None,
-    ) -> str:
+        instance: InstanceArg = None,
+    ) -> str | CallToolResult:
         """キャンバス範囲を指定する。"""
         return await _call(
             ctx,
@@ -523,15 +666,19 @@ def _register_tools(mcp: MCPServer) -> None:
     # UI Tools
     # ------------------------------------------------------------
 
-    @mcp.tool()
+    @mcp.tool(title="UI スナップショット", annotations=_QUERY, structured_output=False)
     async def qgis_snapshot_ui(
         ctx: Context,
         max_depth: int = 8,
         include_invisible: bool = False,
         include_main_window: bool = False,
-        instance: str | None = None,
-    ) -> str:
-        """UI ウィジェットツリーの JSON スナップショットを返す。"""
+        instance: InstanceArg = None,
+    ) -> str | CallToolResult:
+        """UI ウィジェットツリーの JSON スナップショットを返す。
+
+        既定ではモーダルと可視ダイアログのみ。QGIS 本体のツリーは巨大なので、
+        include_main_window=true のときだけ含む。selector を組み立てる材料にする。
+        """
         return await _call(
             ctx,
             "qgis_snapshot_ui",
@@ -543,13 +690,19 @@ def _register_tools(mcp: MCPServer) -> None:
             instance=instance,
         )
 
-    @mcp.tool()
+    @mcp.tool(
+        title="ウィジェットをクリック", annotations=_MUTATE_ARBITRARY, structured_output=False
+    )
     async def qgis_click_widget(
         ctx: Context,
-        selector: dict[str, Any],
-        instance: str | None = None,
-    ) -> str:
-        """UI ウィジェットをクリックする。"""
+        selector: SelectorArg,
+        instance: InstanceArg = None,
+    ) -> str | CallToolResult:
+        """UI ウィジェットをクリックする。
+
+        見つからない・複数一致・無効などは error コードで返る
+        （widget_not_found / selector_ambiguous / widget_disabled）。
+        """
         return await _call(
             ctx,
             "qgis_click_widget",
@@ -557,20 +710,78 @@ def _register_tools(mcp: MCPServer) -> None:
             instance=instance,
         )
 
-    @mcp.tool()
+    @mcp.tool(
+        title="ウィジェットに値を設定", annotations=_MUTATE_WIDGET_VALUE, structured_output=False
+    )
     async def qgis_set_widget_value(
         ctx: Context,
-        selector: dict[str, Any],
+        selector: SelectorArg,
         value: Any,
-        instance: str | None = None,
-    ) -> str:
-        """UI ウィジェットに値を設定する。"""
+        instance: InstanceArg = None,
+    ) -> str | CallToolResult:
+        """UI ウィジェットに値を設定する。
+
+        value は対象の種類に応じて解釈する（LineEdit は文字列、ComboBox は項目
+        テキスト、CheckBox は真偽値など）。失敗は widget_readonly /
+        combo_item_not_found などの error コードで返る。
+        """
         return await _call(
             ctx,
             "qgis_set_widget_value",
             {"selector": selector, "value": value},
             instance=instance,
         )
+
+    # ------------------------------------------------------------
+    # Dialog Handlers（ADR-0002: modal が出たときの自動処理）
+    # ------------------------------------------------------------
+
+    @mcp.tool(
+        title="ダイアログ自動処理を登録",
+        annotations=_MUTATE_STANDING_RULE,
+        structured_output=False,
+    )
+    async def qgis_register_dialog_handler(
+        ctx: Context,
+        name: str,
+        predicate: DialogPredicateArg,
+        action: Literal["accept", "reject", "close"],
+        once: bool = False,
+        instance: InstanceArg = None,
+    ) -> str | CallToolResult:
+        """モーダルダイアログが出たときの自動処理を登録する。
+
+        以後、predicate に一致する modal が現れるたびに action を適用する。
+        同じ name で登録し直すと上書きされる。once=true なら 1 度発火した
+        時点で自動的に解除される。
+        """
+        return await _call(
+            ctx,
+            "qgis_register_dialog_handler",
+            {"name": name, "predicate": predicate, "action": action, "once": once},
+            instance=instance,
+        )
+
+    @mcp.tool(title="ダイアログ自動処理を解除", annotations=_MUTATE_SAFE, structured_output=False)
+    async def qgis_unregister_dialog_handler(
+        ctx: Context, name: str, instance: InstanceArg = None
+    ) -> str | CallToolResult:
+        """登録済みのダイアログ自動処理を name で解除する。"""
+        return await _call(ctx, "qgis_unregister_dialog_handler", {"name": name}, instance=instance)
+
+    @mcp.tool(title="ダイアログ自動処理の一覧", annotations=_QUERY, structured_output=False)
+    async def qgis_list_dialog_handlers(
+        ctx: Context, instance: InstanceArg = None
+    ) -> str | CallToolResult:
+        """登録済みのダイアログ自動処理を一覧する。"""
+        return await _call(ctx, "qgis_list_dialog_handlers", {}, instance=instance)
+
+    @mcp.tool(title="ダイアログ自動処理を全解除", annotations=_MUTATE_SAFE, structured_output=False)
+    async def qgis_clear_dialog_handlers(
+        ctx: Context, instance: InstanceArg = None
+    ) -> str | CallToolResult:
+        """登録済みのダイアログ自動処理をすべて解除する（teardown 用）。"""
+        return await _call(ctx, "qgis_clear_dialog_handlers", {}, instance=instance)
 
 
 # ============================================================
