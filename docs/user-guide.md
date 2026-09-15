@@ -1317,6 +1317,36 @@ coverage が有効化される。
 
 ---
 
+## 開発者向け: Qt / QGIS 統合テスト
+
+`uv run pytest` は Hub / Worker の Qt 配線を **通らない**。venv には PyQt5 も
+qgis も無いので、`test_worker_integration` / `test_integration_hub_client` /
+`test_hub_spawn_integration` / `test_worker_liveness_integration` /
+`test_ui_tools_snapshot` は skip される（`5 skipped` の正体）。ハートビート・
+再接続・Hub の立て直し・`update_info` のような「現場で壊れた」挙動は全部この層に
+あるので、`hub.py` / `worker.py` / `plugins/qgis_puppet` を触ったら push 前に
+QGIS 同梱の Python で回す:
+
+```bash
+python scripts/qt_tests.py            # 上記 5 ファイル（約 1 分）
+python scripts/qt_tests.py -k respawn -v
+```
+
+初回は QGIS の pip で `.qgis-site/` に pytest を入れる。`QGIS_ROOT` で
+インストール先を指定できる。venv に PyQt5 を入れて済ませない理由: Windows の
+PyQt5 wheel（5.15.11）と Qt（5.15.2）の版がずれていて、Hub subprocess が
+client 切断時に heap corruption で落ちる（QGIS の Qt では起きない）。
+
+CI の ubuntu ジョブには PyQt5 が dev 依存で入るので、同じテストが `uv run pytest`
+で走る（`qgis` が要る `test_ui_tools_snapshot` を除く）。
+
+`test_worker_liveness_integration.py` は mapix 側の実機検証で見つかった
+シナリオをそのまま再現している: Hub kill → Worker が立て直して再登録、GUI を
+28 秒止める → `unresponsive` のまま一覧に残り復帰、`update_project` →
+`project` が入り basename で引ける、bye 無し切断 → `instance_disconnected`。
+
+---
+
 ## Troubleshooting
 
 ### `label_conflict`（同時同 label）

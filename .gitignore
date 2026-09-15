@@ -53,3 +53,6 @@ Desktop.ini
 
 # Project-local
 outputs/
+
+# scripts/qt_tests.py が QGIS の pip で pytest を入れる場所
+.qgis-site/

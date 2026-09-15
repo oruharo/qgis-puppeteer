@@ -19,6 +19,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `spawn_qgis()` go through it. Raise the `qgis_startup_timeout` ini (or
   `register_timeout_s`) for heavy projects.
 
+- **The Qt integration tests run again, and cover the field-reported scenarios.**
+  `test_worker_integration` and friends were skipped everywhere — no PyQt5 in
+  the venv or in CI — and had not been executed since ADR-0005 (two assertions
+  still expected the old `worker-<label>-<pid>` ids). They now run in CI on
+  Linux (PyQt5 is a dev dependency there) and on Windows through
+  `scripts/qt_tests.py`, which drives QGIS's own Python so the Hub subprocess
+  uses a consistent Qt. New `test_worker_liveness_integration` reproduces what
+  mapix verified by hand: Hub killed → Worker respawns it and re-registers;
+  GUI stalled past the heartbeat → `unresponsive` stays listed and recovers;
+  `update_project` → `project` set and routable by basename; drop without bye →
+  `instance_disconnected` with `grace_expires_in`.
+
 - **`qgis_wait_ready` MCP tool / `AutomationClient.wait_for_ready()`.** Waits until
   an instance can actually take a call: `state == "active"` *and* a cheap
   read-only round trip (`qgis_get_canvas_extent`) comes back, so a QGIS that is
