@@ -41,6 +41,7 @@ from qgis_puppeteer.protocol import (
     Request,
     Response,
     Role,
+    UpdateInfo,
 )
 
 logger = logging.getLogger("qgis_puppeteer.worker_state")
@@ -76,6 +77,18 @@ def _allow_test_handlers() -> bool:
 # ============================================================
 # 例外
 # ============================================================
+
+
+def next_reconnect_delay_ms(failures: int, base_ms: int, *, cap_ms: int = 30_000) -> int:
+    """再接続の待ち時間。連続失敗ごとに倍にし、cap で頭打ち。
+
+    Hub が居ない間は再接続のたびに `ensure_hub_reachable`（TCP probe →
+    spawn 試行、最長 5 秒）が GUI スレッドで走る。1 秒間隔で回すと QGIS が
+    ずっと引っかかるので、失敗が続くほど間を空ける。成功したら 0 に戻す。
+    """
+    if failures <= 0:
+        return base_ms
+    return min(base_ms * (2 ** min(failures, 16)), cap_ms)
 
 
 class WorkerRegisterError(Exception):
@@ -330,6 +343,22 @@ class WorkerState:
         if self.instance_id is not None:
             self.previous_instance_id = self.instance_id
             self.instance_id = None
+
+    def set_project(self, project: str | None) -> bool:
+        """自己申告の project を差し替える。変わったときだけ True。
+
+        次の register（再接続）にも載るよう config を書き換える。
+        """
+        if self.config.project == project:
+            return False
+        self.config.project = project
+        return True
+
+    def build_update_info(self, msg_id: str) -> UpdateInfo | None:
+        """Hub へ送る update_info を組み立てる。未登録なら None（送る先が無い）。"""
+        if self.instance_id is None:
+            return None
+        return UpdateInfo(id=msg_id, instance_id=self.instance_id, project=self.config.project)
 
     def build_bye(self, msg_id: str) -> Bye | None:
         """明示的終了時の Bye メッセージを組み立てる。

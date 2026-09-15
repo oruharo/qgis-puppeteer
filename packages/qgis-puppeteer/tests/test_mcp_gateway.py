@@ -17,13 +17,15 @@ in-memory 接続には mcp 2.x の `mcp.Client` を使い、`build_gateway()` �
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
-from qgis_puppeteer.client import AutomationClient
+from qgis_puppeteer.client import AutomationClient, RegisterError
 
 # skip するのは mcp extra が入っていない環境だけ。gateway 側の import 失敗
 # （mcp のメジャー不一致など）まで skip に巻き込むと、テストが 1 本も
@@ -98,7 +100,243 @@ class TestMcpGatewayListInstances:
         assert len(instances) == 1
         assert instances[0]["label"] == "alpha"
         assert instances[0]["pid"] == 1111
+        assert instances[0]["state"] == "active"
+        assert "last_seen_ago" in instances[0]
         assert instances[0]["instance_id"] == "worker-alpha-1111"
+
+    def test_discovery_tools_reconnect_after_the_hub_connection_went_stale(self) -> None:
+        """Hub を入れ替えた直後でも list_instances / use_instance が張り直して通る。
+
+        以前は worker コマンド（_call）だけが stale 再接続を持っていて、discovery
+        系は cached client の死んだ socket をそのまま踏んで落ちていた。
+        """
+
+        async def run() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+            async with fake_hub_server() as (_, hub_url):
+                worker = _FakeWorker(hub_url, label="alpha", pid=1111)
+                await worker.start()
+                await worker.ready.wait()
+                ctx = GatewayContext(url=hub_url, origin=DEFAULT_ORIGIN)
+
+                @asynccontextmanager
+                async def _lifespan(_server: Any) -> AsyncIterator[GatewayContext]:
+                    try:
+                        yield ctx
+                    finally:
+                        await ctx.reset_client()
+
+                gateway = build_gateway(lifespan=_lifespan)
+                async with Client(gateway, raise_exceptions=True) as client:
+                    first = json.loads(
+                        _extract_text(await client.call_tool("qgis_list_instances", {}))
+                    )
+                    assert first[0]["label"] == "alpha"
+                    # Hub 再起動相当：cached client の socket を足元から閉じる
+                    assert ctx.client is not None
+                    await ctx.client.close()
+                    listed = json.loads(
+                        _extract_text(await client.call_tool("qgis_list_instances", {}))
+                    )
+                    await ctx.client.close()
+                    used = json.loads(
+                        _extract_text(
+                            await client.call_tool("qgis_use_instance", {"selector": "alpha"})
+                        )
+                    )
+                    return listed, used
+
+        listed, used = _run(run())
+        assert listed[0]["label"] == "alpha"
+        assert used["ok"] is True
+        assert used["current"]["label"] == "alpha"
+
+    def test_unexpected_client_error_is_retried_then_reported_with_type(
+        self, monkeypatch: Any
+    ) -> None:
+        """stale 判定に無い例外でも、1 回目はリセット + 再試行、2 回目は型付き JSON。
+
+        検証 3: Hub 入れ替え後に qgis_list_instances が本文の無い
+        "Error executing tool" で落ち、何度呼んでも回復しなかった。gateway の
+        stderr は呼び出し側から見えないので、例外を外へ漏らさない。
+        """
+
+        async def run() -> tuple[dict[str, Any], dict[str, Any]]:
+            async with fake_hub_server() as (_, hub_url):
+                worker = _FakeWorker(hub_url, label="alpha", pid=1111)
+                await worker.start()
+                await worker.ready.wait()
+                ctx = GatewayContext(url=hub_url, origin=DEFAULT_ORIGIN)
+
+                @asynccontextmanager
+                async def _lifespan(_server: Any) -> AsyncIterator[GatewayContext]:
+                    try:
+                        yield ctx
+                    finally:
+                        await ctx.reset_client()
+
+                original = AutomationClient.list_instances
+                calls = {"n": 0}
+
+                async def flaky(self: AutomationClient, **kw: Any) -> Any:
+                    calls["n"] += 1
+                    if calls["n"] == 1:
+                        raise RuntimeError("boom from a place nobody expected")
+                    return await original(self, **kw)
+
+                async def always_broken(self: AutomationClient, **kw: Any) -> Any:
+                    raise RuntimeError("still broken")
+
+                gateway = build_gateway(lifespan=_lifespan)
+                async with Client(gateway, raise_exceptions=True) as client:
+                    monkeypatch.setattr(AutomationClient, "list_instances", flaky)
+                    ok = json.loads(
+                        _extract_text(await client.call_tool("qgis_list_instances", {}))
+                    )
+                    monkeypatch.setattr(AutomationClient, "list_instances", always_broken)
+                    result = await client.call_tool("qgis_list_instances", {})
+                    assert result.is_error
+                    broken = json.loads(_extract_text(result))
+                    await worker.stop()
+                    return ok, broken
+
+        ok, broken = _run(run())
+        # 1 回目の想定外例外は接続を張り直して吸収され、結果は正常
+        assert ok[0]["label"] == "alpha"
+        # 2 回続けて落ちたら、型と traceback を載せた JSON になる（SDK の
+        # 本文なし "Error executing tool" にはしない）
+        assert broken["error"]["code"] == "gateway_internal_error"
+        assert broken["error"]["details"]["type"] == "RuntimeError"
+        assert "still broken" in broken["error"]["message"]
+        assert "always_broken" in broken["error"]["details"]["traceback"]
+
+    def test_register_rejected_on_reconnect_is_hub_unreachable_not_a_crash(
+        self, monkeypatch: Any
+    ) -> None:
+        """再接続で新しい Hub に register を弾かれても、構造化エラーで返る。"""
+
+        async def run() -> dict[str, Any]:
+            async with fake_hub_server() as (_, hub_url):
+                ctx = GatewayContext(url=hub_url, origin=DEFAULT_ORIGIN)
+
+                @asynccontextmanager
+                async def _lifespan(_server: Any) -> AsyncIterator[GatewayContext]:
+                    try:
+                        yield ctx
+                    finally:
+                        await ctx.reset_client()
+
+                async def reject(self: AutomationClient) -> None:
+                    raise RegisterError(None)
+
+                monkeypatch.setattr(AutomationClient, "_register", reject)
+                gateway = build_gateway(lifespan=_lifespan)
+                async with Client(gateway, raise_exceptions=True) as client:
+                    result = await client.call_tool("qgis_list_instances", {})
+                    assert result.is_error
+                    return json.loads(_extract_text(result))
+
+        payload = _run(run())
+        assert payload["error"]["code"] == "hub_unreachable"
+        assert payload["error"]["details"]["type"] == "RegisterError"
+
+    def test_wait_ready_keeps_waiting_while_the_hub_is_not_listening(self) -> None:
+        """起動直後（Hub がまだ listen していない）に呼んでも即落ちしない。
+
+        他のツールは hub_unreachable を即返すが、wait_ready は「まずこれを呼べ」と
+        言っている手前、Hub が立つのも timeout_s の内で待つ。
+        """
+
+        async def run() -> tuple[dict[str, Any], dict[str, Any]]:
+            # 先にポートを確保して閉じ、その番号で「まだ居ない Hub」を指す
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+            url = f"ws://127.0.0.1:{port}"
+            ctx = GatewayContext(url=url, origin=DEFAULT_ORIGIN)
+
+            @asynccontextmanager
+            async def _lifespan(_server: Any) -> AsyncIterator[GatewayContext]:
+                try:
+                    yield ctx
+                finally:
+                    await ctx.reset_client()
+
+            gateway = build_gateway(lifespan=_lifespan)
+            async with Client(gateway, raise_exceptions=True) as client:
+                # (1) 期限内に Hub が立たない → not_ready（hub_unreachable ではない）
+                early = await client.call_tool("qgis_wait_ready", {"timeout_s": 0.6})
+                early_payload = json.loads(_extract_text(early))
+                assert early.is_error
+
+                # (2) 待っている最中に Hub と Worker が立つ → ok
+                async def hub_comes_up_later() -> None:
+                    await asyncio.sleep(0.8)
+                    async with fake_hub_server(port=port):
+                        worker = _FakeWorker(url, label="late", pid=7)
+                        await worker.start()
+                        await worker.ready.wait()
+                        try:
+                            await asyncio.sleep(4.0)
+                        finally:
+                            await worker.stop()
+
+                hub_task = asyncio.create_task(hub_comes_up_later())
+                try:
+                    late = await client.call_tool("qgis_wait_ready", {"timeout_s": 8})
+                    late_payload = json.loads(_extract_text(late))
+                finally:
+                    hub_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await hub_task
+                return early_payload, late_payload
+
+        early, late = _run(run())
+        assert early["error"]["code"] == "not_ready"
+        assert "did not start listening" in early["error"]["message"]
+        assert "hub_unreachable" in early["error"]["details"]
+        assert late["ok"] is True
+        assert late["instance"]["label"] == "late"
+        assert late["waited_s"] >= 0.8
+
+    def test_wait_ready_returns_once_a_round_trip_succeeds(self) -> None:
+        async def run() -> dict[str, Any]:
+            async with fake_hub_server() as (hub, hub_url):
+                worker = _FakeWorker(hub_url, label="alpha", pid=1111)
+                await worker.start()
+                await worker.ready.wait()
+                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                async with Client(gateway, raise_exceptions=True) as client:
+                    result = await client.call_tool("qgis_wait_ready", {"timeout_s": 5})
+                    payload = json.loads(_extract_text(result))
+                    payload["_probed"] = [
+                        r["command"]
+                        for r in hub.received_requests
+                        if r["command"] == "qgis_get_canvas_extent"
+                    ]
+                    return payload
+
+        payload = _run(run())
+        assert payload["ok"] is True
+        assert payload["instance"]["label"] == "alpha"
+        assert payload["instance"]["state"] == "active"
+        assert payload["_probed"] == ["qgis_get_canvas_extent"]
+
+    def test_wait_ready_reports_not_ready_with_snapshot(self) -> None:
+        async def run() -> tuple[bool, dict[str, Any]]:
+            async with fake_hub_server() as (hub, hub_url):
+                worker = _FakeWorker(hub_url, label="alpha", pid=1111)
+                await worker.start()
+                await worker.ready.wait()
+                hub.unresponsive.add("worker-alpha-1111")
+                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                async with Client(gateway, raise_exceptions=True) as client:
+                    result = await client.call_tool("qgis_wait_ready", {"timeout_s": 0.3})
+                    return bool(result.is_error), json.loads(_extract_text(result))
+
+        is_error, payload = _run(run())
+        assert is_error is True
+        assert payload["error"]["code"] == "not_ready"
+        assert payload["error"]["instances"][0]["state"] == "unresponsive"
 
 
 class TestMcpGatewayToolDispatch:
@@ -278,6 +516,7 @@ class TestMcpGatewayToolInventory:
         expected = {
             # instance 管理
             "qgis_list_instances",
+            "qgis_wait_ready",
             "qgis_use_instance",
             # layer
             "qgis_list_layers",
@@ -559,6 +798,7 @@ class TestMcpGatewayToolDescriptors:
         read_only = {t.name for t in tools if t.annotations and t.annotations.read_only_hint}
         assert read_only == {
             "qgis_list_instances",
+            "qgis_wait_ready",
             "qgis_list_layers",
             "qgis_get_layer_info",
             "qgis_get_selected_features",
@@ -604,6 +844,13 @@ class TestMcpGatewayToolDescriptors:
         assert "qgis_use_instance" in instance.get("description", "")
 
         assert "_result" in (tools["qgis_execute_python"].description or "")
+
+    def test_wait_ready_exposes_require_project(self) -> None:
+        tools = {t.name: t for t in self._list_tools()}
+        props = tools["qgis_wait_ready"].input_schema["properties"]
+        assert props["require_project"]["type"] == "boolean"
+        assert props["require_project"]["default"] is False
+        assert "レイヤ" in props["require_project"]["description"]
 
     def test_permission_cannot_grant_a_persistent_whitelist_entry(self) -> None:
         """`always` は MCP から選べないこと。

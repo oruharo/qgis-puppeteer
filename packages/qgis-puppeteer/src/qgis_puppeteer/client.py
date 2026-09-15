@@ -394,12 +394,17 @@ class AutomationClient:
             raise RequestError(msg.error)
         return msg.result
 
-    async def list_instances(self) -> list[InstanceInfo]:
-        """Hub から active Worker の一覧を取得する。"""
+    async def list_instances(self, *, include_disconnected: bool = False) -> list[InstanceInfo]:
+        """Hub から Worker の一覧を取得する。
+
+        既定は接続中（``active`` / ``unresponsive``）のみ。
+        ``include_disconnected=True`` で grace 中（切断済み・再接続待ち）の
+        entry も ``state="disconnected"`` として含める（診断用）。
+        """
         self._require_connected()
         req_id = self._new_id()
         fut = self._make_future(req_id)
-        await self._send(ListInstancesRequest(id=req_id))
+        await self._send(ListInstancesRequest(id=req_id, include_disconnected=include_disconnected))
         msg = await self._await_reply(req_id, fut, None)
         if not isinstance(msg, ListInstancesResponse):
             raise RequestError(
@@ -433,19 +438,111 @@ class AutomationClient:
         ``launch_token`` を渡せば公式 launch helper 起動分を **決定的** に
         待ち受けできる（推奨）。``label`` でも可。
 
+        ``state == "active"`` の instance だけを候補にする。register 直後に
+        プロジェクト読み込みで GUI スレッドが塞がると Hub 上は unresponsive に
+        なるが、それは「まだ使えない」なので待ち続ける。
+
         Raises:
             TimeoutError: ``timeout_s`` 以内に一意解決しなかった。
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_s
         while True:
-            instances = await self.list_instances()
+            instances = [i for i in await self.list_instances() if i.state == "active"]
             match = _match_selector(selector, instances)
             if match is not None:
                 return match
             if loop.time() >= deadline:
                 raise TimeoutError(f"No instance matched {selector!r} within {timeout_s}s")
             await asyncio.sleep(poll_interval_s)
+
+    async def wait_for_ready(
+        self,
+        selector: str | None = None,
+        *,
+        timeout_s: float = 60.0,
+        poll_interval_s: float = 0.5,
+        probe_command: str = "qgis_get_canvas_extent",
+        require_project: bool = False,
+    ) -> InstanceInfo:
+        """instance が **使える** 状態になるまで待つ。
+
+        「一覧に載っている」と「呼び出しが処理される」は別物。register 直後は
+        プロジェクト読み込みで GUI スレッドが塞がり、Hub 上は unresponsive に
+        なる。ここでは 2 段で確認する:
+
+        1. ``state == "active"`` の instance が selector に一意に解決する
+           （selector 省略時は active が 1 台だけであること）
+        2. その instance に軽い read-only コマンド（既定 ``qgis_get_canvas_extent``）
+           を投げて応答が返る（= GUI スレッドが空いている）
+
+        2 の往復は GUI が塞がっていれば空くまで返らないので、残り時間いっぱい
+        待つ。
+
+        **ready ≠ プロジェクト読み込み完了。** QGIS は起動直後、プロジェクトを
+        読み始める前に一瞬 GUI が空く。実測では ready が 11 秒、レイヤが出そろう
+        のが 31 秒で、20 秒ずれた。レイヤを触りたいなら ``require_project=True``
+        を付ける — ``project`` は ``iface.projectRead``（読み込み **完了後**）で
+        Hub に届くので、それが入ってから probe する。プロジェクトを開かない
+        QGIS では永遠に満たされないので、その場合は付けないこと。
+
+        Raises:
+            TimeoutError: ``timeout_s`` 以内に使える状態にならなかった。
+            RequestError(instance_ambiguous): selector 省略で active が複数。
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        while True:
+            actives = [i for i in await self.list_instances() if i.state == "active"]
+            if require_project:
+                actives = [i for i in actives if i.project]
+            candidate: InstanceInfo | None
+            if selector is None:
+                if len(actives) > 1:
+                    raise RequestError(
+                        Error(
+                            code=ErrorCode.INSTANCE_AMBIGUOUS,
+                            message=f"{len(actives)} active instances; pass a selector",
+                            details={"candidates": [i.instance_id for i in actives]},
+                        )
+                    )
+                candidate = actives[0] if actives else None
+            else:
+                candidate = _match_selector(selector, actives)
+
+            if candidate is not None:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                try:
+                    await self.call(
+                        probe_command,
+                        {},
+                        instance=candidate.instance_id,
+                        timeout_ms=max(1, int(remaining * 1000)),
+                    )
+                    return candidate
+                except RequestError as e:
+                    # Worker が応答したなら（コマンド不明でも）経路は通っている。
+                    # 経路そのものの失敗だけ「まだ」とみなして待ち直す。
+                    if e.code not in (
+                        ErrorCode.INSTANCE_NOT_FOUND,
+                        ErrorCode.INSTANCE_DISCONNECTED,
+                        ErrorCode.INSTANCE_TIMEOUT,
+                    ):
+                        return candidate
+                except asyncio.TimeoutError:
+                    break
+
+            if loop.time() >= deadline:
+                break
+            await asyncio.sleep(poll_interval_s)
+
+        raise TimeoutError(
+            f"No instance became ready within {timeout_s}s"
+            + (f" for selector {selector!r}" if selector is not None else "")
+            + (" (require_project: no project loaded yet)" if require_project else "")
+        )
 
     async def wait_for_new_instance(
         self,
@@ -469,7 +566,7 @@ class AutomationClient:
         deadline = loop.time() + timeout_s
         while True:
             instances = await self.list_instances()
-            newer = [i for i in instances if i.registered_seq > since_seq]
+            newer = [i for i in instances if i.registered_seq > since_seq and i.state == "active"]
             if len(newer) > 1:
                 raise AttributionAmbiguousError(
                     f"{len(newer)} instances registered after seq={since_seq}; "

@@ -99,6 +99,33 @@ pip install "qgis-puppeteer[mcp] @ git+https://github.com/oruharo/qgis-puppeteer
 pip install "pytest-qgis-puppeteer @ git+https://github.com/oruharo/qgis-puppeteer.git@dev#subdirectory=packages/pytest-qgis-puppeteer"
 ```
 
+### アップグレード（dev を追いかけている場合）
+
+動いているプロセスは 3 種類あり、それぞれ入れ替わるタイミングが違う。
+**全部そろえないと、進行中のセッションでは MCP ツールが落ちる。**
+
+| プロセス | コードの出どころ | 新しくなるのは |
+|---|---|---|
+| MCP gateway | `uvx --from ...@dev`（MCP クライアントが起動） | **MCP クライアントのセッションを張り直したとき**。セッション開始時に取得したものに固定される |
+| Hub | `qgis_puppet` プラグインが auto-spawn（ワークツリー / vendor 配下） | Hub プロセスを kill したとき。Worker が数秒で新しい Hub を立て直して再接続する。MCP クライアントが繋がっている間は idle 終了しないので、放っておくと古いまま |
+| Worker（プラグイン） | `QGIS_PLUGINPATH` / vendor 配下 | QGIS を起動し直したとき |
+
+手順:
+
+1. コードを更新する（`git pull` / vendor 更新）
+2. Hub プロセスを kill する。QGIS は起動したままでよい — Worker が数秒で
+   Hub を立て直して再接続する。**instance_id は変わる**（grace は Hub の
+   メモリ上の状態なので、Hub と一緒に消える。引き継がれるのは Worker 側だけが
+   切れて同じ Hub に戻る場合）。`launch_token` / label のセレクタと sticky は
+   そのまま効く。プラグイン側（`plugins/qgis_puppet`）も変えたなら QGIS を
+   起動し直す
+3. **MCP クライアントのセッションを張り直す**（Claude Desktop なら再起動、
+   Claude Code なら `/mcp` で reconnect か新セッション）
+
+3 を飛ばすと、古い gateway が新しい Hub に繋ぎに行く。gateway は再起動された
+Hub への再接続を自分で張り直すが、新しいフィールドやツールは知らないままなので
+挙動が食い違う。
+
 ---
 
 ## Quickstart: Claude Desktop
@@ -137,6 +164,8 @@ Claude 側で以下のような MCP ツール呼び出しが行われる:
 - `mcp__qgis-puppeteer__qgis_select_features`
 - `mcp__qgis-puppeteer__qgis_screenshot`
 - `mcp__qgis-puppeteer__qgis_use_instance`（multi-instance 時）
+- `mcp__qgis-puppeteer__qgis_wait_ready`（QGIS 起動直後に、呼び出しが通る状態
+  になるまで待つ）
 - ... 他
 
 ### よくある初期トラブル
@@ -415,6 +444,11 @@ def test_two_workers_compare(automation_client, hub_port, qgis_bin):
 ```
 
 `spawn_qgis()` は context exit で graceful → force kill する。
+
+`launch_token` の Worker が register し、**かつ軽い read-only の往復が返る**
+まで待ってから返る（`wait_for_ready()`）。重いプロジェクトを開く QGIS では
+`register_timeout_s` を伸ばすこと — 一覧に載ってからレイヤが揃うまで実測で
+20 秒の開きがあった。
 register タイムアウト（既定 60s）は `register_timeout_s=` で上書き可能。
 
 ### 8. dev モード（既存 QGIS に相乗り）
@@ -1052,11 +1086,22 @@ start qgis-bin.exe --profile=qgis-b
 # 一覧
 instances = await client.list_instances()
 # [InstanceInfo(instance_id="w-7k3p9q2m4x8a", label="A", pid=1234, project="...",
-#               launch_token=None, registered_seq=1),
+#               launch_token=None, registered_seq=1, state="active", last_seen_ago=0.4),
 #  InstanceInfo(instance_id="w-2f5e1c8b0d6a", label="B", pid=5678, project="...",
-#               launch_token="lt-...", registered_seq=2)]
+#               launch_token="lt-...", registered_seq=2, state="unresponsive",
+#               last_seen_ago=47.2)]
 # instance_id は pid 非依存の不透明 nonce（ADR-0005）。再起動で変わるので
 # ハードコードせず label / @label / launch_token で参照する。
+# state="unresponsive" は「QGIS は生きているが GUI スレッドが塞がっていて
+# ハートビートに 20 秒以上応答していない」。呼び出しは受け付けられ、GUI が
+# 空き次第処理される（Troubleshooting「instance が unresponsive」参照）。
+# list_instances(include_disconnected=True) なら切断直後（grace 中）の entry も
+# state="disconnected" と grace_expires_in 付きで見える。
+# project は QGIS 側でプロジェクトを開く・閉じる・別名保存するたびに更新される
+# （iface.projectRead / QgsProject.cleared / fileNameChanged → update_info）。
+# projectRead は読み込み**完了後**に発火するので、project が入っていれば
+# レイヤも出そろっている。使えるまで待つなら qgis_wait_ready / wait_for_ready
+# （レイヤを触るなら require_project=True）。
 
 # A に切り替え
 await client.call("qgis_use_instance", {"label": "A"})
@@ -1142,9 +1187,12 @@ pytest の `spawn_qgis()` は内部でこの仕組みを使い、pid diff では
 連続再起動する開発では **label 明示 + `QPUPPETEER_WORKER_TAKEOVER=1`** を推奨。
 takeover を既定にしないのは同時 multi-instance の安全性を守るため。
 
-なお Hub は WS ping/pong で active の生存を監視し、kill -9 等で TCP が
-half-open のまま残った旧 entry を ~20s で grace へ落とす（`reject` 既定でも
-少し待てば SUPERSEDE で素直に継承できる）。
+なお Hub は WS ping/pong で active の応答性を監視している。20 秒 pong が
+無い entry は `unresponsive` になるが、切断扱いにはしない（QGIS の GUI
+スレッドが塞がっているだけのことが多いため。Troubleshooting「instance が
+`unresponsive`」参照）。kill -9 等で TCP が half-open のまま残った旧 entry に
+同 label で再登録すると、Hub が旧 entry へ ping を撃ち、2 秒以内に pong が
+無ければ SUPERSEDE で継承する（`reject` 既定でも待たずに済む）。
 
 ---
 
@@ -1283,8 +1331,9 @@ half-open のまま active と誤認されている可能性。
 
 **対処**:
 
-1. 数十秒待つ → Hub の heartbeat sweep が旧 entry を grace へ落とし、
-   再登録が **SUPERSEDE** で素通りする
+1. そのまま再起動してよい → Hub は旧 entry に ping を撃ち、2 秒以内に pong が
+   無ければ死亡とみなして再登録を **SUPERSEDE** で通す（旧 entry は
+   `qgis_list_instances` に `state: "unresponsive"` で出ている）
 2. 待てない開発ループは `QPUPPETEER_WORKER_TAKEOVER=1` で起動（旧 active を
    強制的に明け渡す）
 3. 複数台を同時に動かしたい場合は label を別にする、または
@@ -1399,13 +1448,114 @@ set OSGEO4W_ROOT=C:\Program Files\QGIS 3.34
 **症状**: `error: "instance_not_found"` が返る
 
 **原因**: 指定した label / instance_id の Worker が Hub に register されて
-いない。または register 完了前に呼んだ。
+いない。または register 完了前に呼んだ。QGIS が動いているのにこれが出る
+なら、プロセスが落ちて Hub の grace（60 秒）も過ぎたか、selector が違う。
+GUI スレッドが塞がっているだけではこの error にならない（下の
+「instance が `unresponsive`」を参照）。
 
 **対処**:
 
 1. `qgis_list_instances` で現在の Worker 一覧を確認
-2. pytest なら `wait_for_worker` を使って register 完了を待つ
+2. pytest なら `wait_for_ready()` を使って「使える」まで待つ（fixture 経由なら
+   `hub_ready` / `spawn_qgis()` が内部で呼ぶ）
 3. multi-instance のラベル衝突 → `QPUPPETEER_WORKER_LABEL` を変える
+
+### `Error executing tool …`（本文が無い）
+
+**症状**: MCP ツールが `Error executing tool qgis_list_instances` のように、
+JSON 本文の無い一文だけで失敗する。
+
+**原因**: gateway の中で想定外の例外が tool の外へ抜けた。MCP SDK はそれを
+「クラッシュ」として扱い、**例外の型もメッセージも呼び出し側には渡さず**、
+gateway の stderr にだけ記録する。呼び出し側からは何が起きたか分からない。
+
+**対処**: gateway は想定外の例外を 1 回だけ接続の張り直しで吸収し、それでも
+落ちるなら `code: "gateway_internal_error"` に例外の型と traceback の末尾を
+載せて返す。この本文なしの形が今も出るなら、gateway が古い（MCP クライアントの
+セッションを張り直す。「アップグレード」参照）。
+
+### `instance_disconnected`
+
+**症状**: `error: "instance_disconnected"` が返る。`grace_expires_in` が付く。
+
+**原因**: selector に一致する Worker は居たが、接続が切れて Hub が再接続を
+待っている（grace 60 秒）。QGIS を閉じた直後、プラグイン再読込でプロセスが
+落ちた直後、または 5 分以上 unresponsive だったので Hub 側から閉じた直後。
+`instance_not_found` とは違い、**selector は合っている**。
+
+**対処**:
+
+1. QGIS が生きているなら自動再接続を待つ（`grace_expires_in` 以内なら
+   instance_id も引き継がれる）。`qgis_wait_ready` で待てる
+2. QGIS が落ちているなら起動し直す。同じ label / launch_token で登録されれば
+   sticky はそのまま効く
+
+### QGIS を起動した直後に呼び出しが通らない
+
+**症状**: `qgis_list_instances` には出るのに最初の呼び出しが長く待たされる、
+または timeout する。
+
+**原因**: register はプラグインのロード時で、プロジェクトの読み込みはその後
+GUI スレッドで走る。その間 Worker は `unresponsive` で、呼び出しはソケットに
+溜まる。
+
+**対処**: `qgis_wait_ready`（MCP）/ `wait_for_ready()`（client / pytest）を
+先に呼ぶ。`state == "active"` になり、かつ軽い read-only の往復
+（`qgis_get_canvas_extent`）が返るまで待つ。`qgis_wait_ready` は Hub がまだ
+listen していない段階で呼んでも `timeout_s` の内で待つ（他のツールは
+`hub_unreachable` を即返す）ので、QGIS 起動直後の最初の呼び出しにそのまま
+使える。
+
+pytest では `hub_ready` fixture と `spawn_qgis()` が内部で `wait_for_ready()`
+を呼ぶので、テスト側で待つ必要はない。`wait_for_worker()` は「register 済みの
+active が居る」までしか見ない（往復は確認しない）ので、明示的に使う場合は
+その差に注意。
+
+**ready ≠ プロジェクト読み込み完了**に注意。QGIS は起動直後、プロジェクトを
+読み始める前に一瞬 GUI が空く。実測（39 レイヤ・リモート PostGIS）:
+
+```
+[ 10.4s] state=active
+[ 11.2s] wait_ready が返る        ← GUI は空いている
+[ 12.1s] レイヤ数 0
+[ 31.0s] レイヤ数 39              ← 読み込み完了
+```
+
+レイヤを触るなら **`require_project=True`** を付ける。`project` は
+`iface.projectRead`（読み込み完了後）で Hub に届くので、それが入ってから往復を
+確認する。プロジェクトを開かない QGIS では永遠に満たされないので、その場合は
+付けない。
+
+### instance が `unresponsive` と出る / 呼び出しが返ってこない
+
+**症状**: `qgis_list_instances` に `"state": "unresponsive"` で載っている。
+呼び出しが長く待たされる、または timeout する。QGIS のウィンドウは固まって
+見える。
+
+**原因**: Worker の WebSocket は QGIS の **GUI スレッド** に載っている。
+重いプロジェクトの読み込み、ネットワークドライブの走査、長い
+`qgis_execute_python` など GUI スレッドを塞ぐ処理の間は Hub のハートビートに
+pong を返せないので、20 秒で `unresponsive` になる。プロセスも接続も生きて
+いて、**その間に送った呼び出しはソケットに溜まり、GUI が空いた時点で順に
+処理される**。pong が戻れば `active` に復帰する。
+
+**普通の起動でもこうなる。** 何も異常が無い起動で `last_seen_ago` は 17 秒台
+まで伸びる（実測 17.4 秒、閾値まで 2.6 秒）。そこに呼び出しが 1 つ乗れば
+超える。起動中の `unresponsive` は想定内で、Hub のログも INFO。
+
+**対処**:
+
+1. `last_seen_ago` を見る。伸び続けているなら GUI がまだ塞がっている。
+   数十秒〜数分の読み込みなら待てば戻る
+2. 起動直後なら `qgis_wait_ready`（MCP）/ `wait_for_ready()`（client / pytest）
+   を先に呼ぶ。`active` になり往復が返るまで待つ
+3. 5 分（`UNRESPONSIVE_CLOSE_SECONDS`）応答が無いと Hub はプロセス死亡
+   （kill -9 の half-open）とみなしてソケットを閉じる。実は生きていた
+   Worker は GUI が空いた時点で切断に気づいて自動再接続する。60 秒の grace
+   内なら instance_id も引き継ぐ
+4. 20 秒を超える `qgis_execute_python` は自分自身を `unresponsive` にする。
+   害はない（次の pong で戻る）が、返るまで他の呼び出しも待たされるので、
+   長い処理は Worker 側で QThread に逃がすか分割する
 
 ### `widget_not_actionable`（timeout）
 

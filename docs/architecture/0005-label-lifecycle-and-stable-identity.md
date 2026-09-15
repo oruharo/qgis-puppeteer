@@ -179,6 +179,24 @@ takeover（D4）で機能的には解決するが、`reject` 既定運用でも�
 - これにより `reject` 運用でも「kill → 数十秒待てば SUPERSEDE 経路で素直に継承」
   が成立する（待てない人は takeover を使う）。
 
+> **注記（2026-09-15 変更）**: 「2 回欠落で disconnected 認定 → grace」は
+> 実運用で誤検出を起こしたので改めた。Worker の `QWebSocket` は QGIS の GUI
+> スレッドに載っており、重いプロジェクト読み込みや長い handler でイベント
+> ループが塞がると、プロセスも TCP も生きているのに pong だけが止まる。
+> これを切断扱いにすると instance が一覧から消え、しかも grace 中の entry は
+> pong で復帰できず（`mark_seen` が no-op だった）、満了後もソケットは開いた
+> ままなので Worker は再接続せず、二度と辿り着けないゾンビになっていた。
+>
+> 現在は pong 途絶を **`unresponsive`（active の一種）** として扱う。entry も
+> ルーティングも残し、`list_instances` に `state` / `last_seen_ago` 付きで出す。
+> pong が戻れば active に復帰。`UNRESPONSIVE_CLOSE_SECONDS`（300s）続いたら
+> half-open とみなして **Hub 側からソケットを閉じ**、通常の切断 → grace に
+> 落とす（閉じることで、生きていた Worker の自動再接続も引き金になる）。
+> D5 の目的である「kill -9 後の同 label 継承」は、切断扱いを待たずとも
+> C1=(b) の liveness probe（pong 無し → SUPERSEDE）で成立するので損なわれない。
+> タイマ不変条件は `LIVENESS_PROBE < HEARTBEAT_TIMEOUT < UNRESPONSIVE_CLOSE`、
+> `HEARTBEAT_TIMEOUT < GRACE`。
+
 ### D6. `launch_token` による決定的相関 + 公式 launch helper
 
 attribution（U8/U9）を解くため、**label とは別の専用相関トークン**を導入する。

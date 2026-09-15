@@ -25,6 +25,7 @@ from qgis_puppeteer.protocol import (
     Request,
     Response,
     Role,
+    UpdateInfo,
     decode_message,
     encode_message,
 )
@@ -146,6 +147,18 @@ class TestRoundTrip:
     def test_list_instances_request(self) -> None:
         msg = ListInstancesRequest(id="uuid-12")
         assert decode_message(encode_message(msg)) == msg
+        full = ListInstancesRequest(id="uuid-12b", include_disconnected=True)
+        assert decode_message(encode_message(full)) == full
+        # 旧 client の payload（フラグ無し）は既定 False
+        old = decode_message('{"type": "list_instances", "id": "uuid-12c"}')
+        assert isinstance(old, ListInstancesRequest)
+        assert old.include_disconnected is False
+
+    def test_update_info(self) -> None:
+        msg = UpdateInfo(id="uuid-15", instance_id="w-abc", project="D:/a.qgz")
+        assert decode_message(encode_message(msg)) == msg
+        cleared = UpdateInfo(id="uuid-16", instance_id="w-abc", project=None)
+        assert decode_message(encode_message(cleared)) == cleared
 
     def test_list_instances_response(self) -> None:
         msg = ListInstancesResponse(
@@ -162,10 +175,24 @@ class TestRoundTrip:
                     label="B",
                     pid=5678,
                     project=None,
+                    state="disconnected",
+                    last_seen_ago=47.2,
+                    grace_expires_in=12.8,
                 ),
             ],
         )
         assert decode_message(encode_message(msg)) == msg
+
+    def test_list_instances_response_from_old_hub_defaults_to_active(self) -> None:
+        """state / last_seen_ago を知らない Hub からの payload は active 扱い。"""
+        raw = (
+            '{"type": "list_instances_response", "id": "uuid-13b", "instances": '
+            '[{"instance_id": "worker-a-1", "label": "A", "pid": 1}]}'
+        )
+        msg = decode_message(raw)
+        assert isinstance(msg, ListInstancesResponse)
+        assert msg.instances[0].state == "active"
+        assert msg.instances[0].last_seen_ago is None
 
     def test_bye(self) -> None:
         msg = Bye(id="uuid-14", instance_id="worker-a-1234")

@@ -57,6 +57,7 @@ from qgis_puppeteer.worker_state import (
     WorkerConfig,
     WorkerRegisterError,
     WorkerState,
+    next_reconnect_delay_ms,
 )
 
 logger = logging.getLogger("qgis_puppeteer.worker")
@@ -136,10 +137,12 @@ class Worker(QObject):
         # PyQt5 は両方サポート。ここでは errorOccurred を使う
         self._ws.error.connect(self._on_socket_error)
 
-        # 再接続タイマー
+        # 再接続タイマー。接続だけでなく Hub の立て直しも通す（_reconnect）。
         self._reconnect_timer = QTimer(self)
         self._reconnect_timer.setSingleShot(True)
-        self._reconnect_timer.timeout.connect(self._open_socket)
+        self._reconnect_timer.timeout.connect(self._reconnect)
+        # 連続失敗回数（バックオフ用）。register できたら 0 に戻る。
+        self._reconnect_failures: int = 0
 
         # 明示的 disconnect 中なら auto-reconnect を抑止
         self._closing: bool = False
@@ -189,6 +192,24 @@ class Worker(QObject):
     def is_registered(self) -> bool:
         return self._state.is_registered
 
+    def update_project(self, project: str | None) -> None:
+        """開いているプロジェクトが変わったことを Hub に伝える。
+
+        register は plugin ロード時の 1 回きりで、ランチャー起動では QGIS が
+        プロジェクトを開く前なので永久に None のままだった。登録済みなら
+        update_info を送り、未登録なら次の register に載せる。
+        """
+        if not self._state.set_project(project):
+            return
+        msg = self._state.build_update_info(self._new_msg_id())
+        if msg is None:
+            return
+        try:
+            self._ws.sendTextMessage(encode_message(msg))
+            logger.info("Worker project -> %r", project)
+        except Exception:  # pragma: no cover - 送信失敗は次の register で追いつく
+            logger.debug("Failed to send update_info", exc_info=True)
+
     def connect_to_hub(self) -> None:
         """Hub への接続を開始する（非同期、`registered` シグナルで完了通知）。
 
@@ -198,12 +219,19 @@ class Worker(QObject):
         `hub_startup_failed` シグナルを発火して WebSocket 接続はしない。
         """
         self._closing = False
+        self._reconnect_failures = 0
         if self._hub_lock_path is not None and not self._try_ensure_hub_ready():
             return
         self._open_socket()
 
-    def _try_ensure_hub_ready(self) -> bool:
-        """ensure_hub_reachable を呼び出し、失敗時は signal を発火して False を返す。"""
+    def _try_ensure_hub_ready(self, *, give_up: bool = True) -> bool:
+        """ensure_hub_reachable を呼び出し、失敗なら False を返す。
+
+        ``give_up=True``（初回接続）: 失敗したら `hub_startup_failed` を発火して
+        auto-reconnect も止める（プラグインがメッセージバーで知らせる）。
+        ``give_up=False``（再接続）: ログだけ出して呼び出し側の再試行に任せる。
+        Hub が一時的に消えただけで Worker が永久に諦めるのは困る。
+        """
         assert self._hub_lock_path is not None
         host = self._hub_url.host() or "127.0.0.1"
         port = self._hub_url.port() if self._hub_url.port() != -1 else 9876
@@ -220,6 +248,13 @@ class Worker(QObject):
             )
             return True
         except HubStartupError as e:
+            if not give_up:
+                logger.warning(
+                    "Hub not reachable and could not be (re)spawned (attempt %d): %s",
+                    self._reconnect_failures + 1,
+                    e,
+                )
+                return False
             logger.warning("Hub startup failed: %s", e)
             self._closing = True
             self._reconnect_timer.stop()
@@ -267,8 +302,25 @@ class Worker(QObject):
             return
         if self._reconnect_timer.isActive():
             return
-        logger.info("Worker reconnecting in %d ms", self._reconnect_delay_ms)
-        self._reconnect_timer.start(self._reconnect_delay_ms)
+        delay = next_reconnect_delay_ms(self._reconnect_failures, self._reconnect_delay_ms)
+        logger.info("Worker reconnecting in %d ms", delay)
+        self._reconnect_timer.start(delay)
+
+    def _reconnect(self) -> None:
+        """再接続タイマーの着火先。Hub が消えていれば立て直してから繋ぐ。
+
+        以前は `_open_socket` に直結していたので、Hub プロセスが死ぬと
+        「connect → 拒否 → タイマー → connect …」を永久に回るだけで、Hub を
+        作り直す経路（`ensure_hub_reachable`）は初回の `connect_to_hub` にしか
+        無かった。Hub が生きていれば TCP probe 1 回で済むので、毎回通して問題ない。
+        """
+        if self._closing:
+            return
+        if self._hub_lock_path is not None and not self._try_ensure_hub_ready(give_up=False):
+            self._reconnect_failures += 1
+            self._schedule_reconnect()
+            return
+        self._open_socket()
 
     # ------------------------------------------------------------
     # 内部：Qt シグナルハンドラ
@@ -276,6 +328,7 @@ class Worker(QObject):
 
     def _on_connected(self) -> None:
         """ハンドシェイク成功：register メッセージを送信。"""
+        self._reconnect_failures = 0
         msg = self._state.build_register(self._new_msg_id())
         self._ws.sendTextMessage(encode_message(msg))
 
@@ -285,6 +338,10 @@ class Worker(QObject):
         self._state.on_disconnect()
         if was_registered:
             self.unregistered.emit()
+        else:
+            # 繋がらなかった（接続拒否など）= 1 回の失敗。登録済みからの切断は
+            # 新しい障害なので数えず、まず素早く 1 回目を試す。
+            self._reconnect_failures += 1
         self._schedule_reconnect()
 
     def _on_text_message(self, text: str) -> None:

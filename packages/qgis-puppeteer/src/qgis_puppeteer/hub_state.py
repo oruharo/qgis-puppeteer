@@ -39,16 +39,28 @@ GRACE_SECONDS: float = 60.0
 IDLE_SHUTDOWN_DELAY_SECONDS: float = 30.0
 
 # ADR-0005 D5: ハートビート（ping/pong）の既定。10s 間隔・2 回欠落で
-# disconnected 認定 → 旧 entry を速やかに grace へ落とし SUPERSEDE を促す。
+# 「unresponsive」認定。これは切断ではない — Worker の QWebSocket は QGIS の
+# GUI スレッドに載っているので、重いプロジェクト読み込みや長い handler で
+# イベントループが塞がると pong は返らないが、プロセスも TCP も生きている。
+# unresponsive な entry は list_instances に state 付きで出続け、ルーティングも
+# 受け付ける（request はソケットに溜まり、ループが空き次第処理される）。
+# pong が戻れば active に復帰する。
 HEARTBEAT_INTERVAL_SECONDS: float = 10.0
 HEARTBEAT_TIMEOUT_SECONDS: float = 20.0
+
+# unresponsive がこの時間続いたら、kill -9 等で TCP が half-open になった
+# ものとみなして Hub 側からソケットを閉じ、通常の切断（grace）へ落とす。
+# 本当に生きていた Worker はループが空いた時点で `disconnected` を受け取って
+# 自動再接続するので、閉じることが復帰の引き金にもなる。
+UNRESPONSIVE_CLOSE_SECONDS: float = 300.0
 
 # ADR-0005 C1=(b): active 同 label 衝突時、incumbent へ ping して生死を確認
 # する待ち時間。生きていれば pong がこの窓内に返る（通常ミリ秒）。
 LIVENESS_PROBE_SECONDS: float = 2.0
 
 # ADR-0005 H3: タイマ不変条件。
-#   LIVENESS_PROBE < HEARTBEAT_TIMEOUT < GRACE
+#   LIVENESS_PROBE < HEARTBEAT_TIMEOUT < UNRESPONSIVE_CLOSE
+#   HEARTBEAT_TIMEOUT < GRACE
 # かつ「grace entry が 1 件でも存在する間は idle-shutdown を抑止する」
 # （ADR-0001 §4 の『grace は idle-shutdown を妨げない』を ADR-0005 が上書き）。
 # これにより kill→再起動の谷間で Hub が自殺して grace entry を失い、
@@ -90,6 +102,9 @@ class WorkerEntry:
     registered_at: float | None = None
     # ADR-0005 D5: 最後に生存確認（register / pong）した時刻。liveness sweep 用。
     last_seen_at: float | None = None
+    # ハートビートが途絶えた時刻。TCP は生きているが pong が返らない状態
+    # （GUI スレッドが塞がっている、または half-open）。pong で None に戻る。
+    unresponsive_since: float | None = None
 
 
 @dataclass(frozen=True)
@@ -585,7 +600,8 @@ class HubState:
         entry = self._workers_by_conn.get(conn_id)
         if entry is None:
             return
-        entry.disconnected_at = self._clock()
+        if entry.disconnected_at is None:
+            entry.disconnected_at = self._clock()
 
     def bye_worker(self, conn_id: str) -> None:
         """Worker からの明示的 bye：grace を経ずに即削除。"""
@@ -597,39 +613,75 @@ class HubState:
     def disconnect_client(self, conn_id: str) -> None:
         self._clients.discard(conn_id)
 
-    def mark_seen(self, conn_id: str) -> None:
+    def mark_seen(self, conn_id: str) -> bool:
         """ADR-0005 D5: 生存確認（pong 受信等）で last_seen_at を更新する。
 
         Qt 配線層が QWebSocket の pong / 任意の受信フレームで呼ぶ想定。
         未知 conn_id は無視（既に切断・evict 済みなら何もしない）。
-        """
-        entry = self._workers_by_conn.get(conn_id)
-        if entry is not None and entry.disconnected_at is None:
-            entry.last_seen_at = self._clock()
-
-    def sweep_stale_active(self, timeout_s: float = HEARTBEAT_TIMEOUT_SECONDS) -> list[str]:
-        """ADR-0005 D5: ハートビート途絶の active entry を grace へ落とす。
-
-        kill -9 等で TCP が half-open になり close フレームが来ないケースで、
-        旧 entry が active のまま居座ると同一 label 再起動が reject される。
-        last_seen_at が timeout を超えた active を disconnected 扱いにし、
-        以降の同 label 登録が SUPERSEDE 経路に乗れるようにする。
+        unresponsive だった entry はここで active に復帰する。
 
         Returns:
-            grace に落とした instance_id 一覧（Qt 層が通知に使える）。
+            unresponsive から復帰したなら True（Qt 層がログに使う）。
+        """
+        entry = self._workers_by_conn.get(conn_id)
+        if entry is None or entry.disconnected_at is not None:
+            return False
+        entry.last_seen_at = self._clock()
+        recovered = entry.unresponsive_since is not None
+        entry.unresponsive_since = None
+        return recovered
+
+    def sweep_unresponsive(self, timeout_s: float = HEARTBEAT_TIMEOUT_SECONDS) -> list[str]:
+        """ADR-0005 D5: ハートビート途絶の active entry に unresponsive の印を付ける。
+
+        切断扱いにはしない。entry は active のまま list_instances に
+        ``state="unresponsive"`` で出続け、selector 解決もルーティングも
+        受け付ける。GUI スレッドが塞がっているだけなら、ループが空いて pong が
+        戻った時点で `mark_seen` が印を外す。
+
+        kill -9 等の half-open は `sweep_unresponsive_expired` が
+        UNRESPONSIVE_CLOSE_SECONDS 後に拾う。同 label 再起動はそれを待たずに
+        済む — active 衝突は C1=(b) の liveness probe に乗り、pong が無ければ
+        SUPERSEDE で継承される。
+
+        Returns:
+            今回新たに unresponsive にした instance_id 一覧。
         """
         now = self._clock()
-        demoted: list[str] = []
+        flagged: list[str] = []
         for entry in self._workers_by_conn.values():
-            if entry.disconnected_at is not None:
+            if entry.disconnected_at is not None or entry.unresponsive_since is not None:
                 continue
             # ADR-0005 H-3: last_seen_at 未設定は「一度も生存確認できていない」
             # = 即 stale 扱い（永久免除の穴を塞ぐ）。
             last_seen = entry.last_seen_at if entry.last_seen_at is not None else 0.0
             if now - last_seen >= timeout_s:
+                entry.unresponsive_since = now
+                flagged.append(entry.instance_id)
+        return flagged
+
+    def sweep_unresponsive_expired(
+        self, close_after_s: float = UNRESPONSIVE_CLOSE_SECONDS
+    ) -> list[str]:
+        """unresponsive が長引いた entry を切断扱い（grace）にする。
+
+        Qt 配線層は戻り値の conn_id のソケットを **閉じる** こと。half-open
+        なら後始末になり、実は生きていた Worker にはループが空いた時点で
+        `disconnected` が届いて自動再接続が走る（閉じなければ、Hub からは
+        消えたのに Worker は繋がっているつもりのままになる）。
+
+        Returns:
+            grace に落とした entry の conn_id 一覧。
+        """
+        now = self._clock()
+        to_close: list[str] = []
+        for conn_id, entry in self._workers_by_conn.items():
+            if entry.disconnected_at is not None or entry.unresponsive_since is None:
+                continue
+            if now - entry.unresponsive_since >= close_after_s:
                 entry.disconnected_at = now
-                demoted.append(entry.instance_id)
-        return demoted
+                to_close.append(conn_id)
+        return to_close
 
     def sweep_expired(self) -> list[str]:
         """grace を超過した entry を削除し、削除した instance_id 一覧を返す。"""
@@ -669,25 +721,59 @@ class HubState:
             return False
         return self.active_worker_count() == 0 and self.client_count() == 0
 
-    def list_instances(self) -> list[InstanceInfo]:
-        """active Worker のみを InstanceInfo 化して返す。"""
+    def list_instances(self, *, include_disconnected: bool = False) -> list[InstanceInfo]:
+        """切断されていない Worker を InstanceInfo 化して返す。
+
+        unresponsive（TCP は繋がっているが pong が返らない）も含める。
+        ``state`` で区別し、``last_seen_ago`` で最後の応答からの経過秒を出す。
+        grace 中（切断済み）の entry は ``include_disconnected=True`` のときだけ
+        ``state="disconnected"`` と ``grace_expires_in`` 付きで出す。
+        """
+        now = self._clock()
         out: list[InstanceInfo] = []
         for entry in self._workers_by_conn.values():
-            if entry.disconnected_at is not None:
+            if entry.disconnected_at is not None and not include_disconnected:
                 continue
-            out.append(
-                InstanceInfo(
-                    instance_id=entry.instance_id,
-                    label=entry.label,
-                    pid=entry.pid,
-                    project=entry.project,
-                    launch_token=entry.launch_token,
-                    registered_seq=entry.registered_seq,
-                    registered_at=entry.registered_at,
-                    label_explicit=entry.label_explicit,
-                )
-            )
+            out.append(self._to_info(entry, now))
         return out
+
+    def _to_info(self, entry: WorkerEntry, now: float) -> InstanceInfo:
+        if entry.disconnected_at is not None:
+            state = "disconnected"
+            grace_expires_in: float | None = round(
+                max(0.0, GRACE_SECONDS - (now - entry.disconnected_at)), 1
+            )
+        else:
+            state = "unresponsive" if entry.unresponsive_since is not None else "active"
+            grace_expires_in = None
+        return InstanceInfo(
+            instance_id=entry.instance_id,
+            label=entry.label,
+            pid=entry.pid,
+            project=entry.project,
+            launch_token=entry.launch_token,
+            registered_seq=entry.registered_seq,
+            registered_at=entry.registered_at,
+            label_explicit=entry.label_explicit,
+            state=state,
+            last_seen_ago=(
+                None if entry.last_seen_at is None else round(now - entry.last_seen_at, 1)
+            ),
+            grace_expires_in=grace_expires_in,
+        )
+
+    def update_worker_project(self, conn_id: str, project: str | None) -> bool:
+        """Worker からの update_info で project を差し替える。
+
+        register は plugin ロード時の 1 回きりなので、その後に開いた
+        プロジェクトはこれでしか追えない（selector の project tier と
+        list_instances の表示の両方に効く）。切断済み entry は無視。
+        """
+        entry = self._workers_by_conn.get(conn_id)
+        if entry is None or entry.disconnected_at is not None:
+            return False
+        entry.project = project
+        return True
 
     def find_worker_conn(self, instance_id: str) -> str | None:
         """instance_id からルーティング先 conn_id を引く（active のみ）。"""
@@ -709,10 +795,13 @@ class HubState:
         selector=None は active が 1 台のみなら自動選択、複数なら ambiguous。
         """
         actives = [e for e in self._workers_by_conn.values() if e.disconnected_at is None]
+        graces = [e for e in self._workers_by_conn.values() if e.disconnected_at is not None]
 
         # selector 未指定
         if selector is None:
             if len(actives) == 0:
+                if graces:
+                    return self._disconnected_outcome(graces)
                 return self._not_found_outcome("No active instances")
             if len(actives) == 1:
                 return ResolveOutcome(ok=True, instance_id=actives[0].instance_id)
@@ -722,6 +811,13 @@ class HubState:
         matched = select_by_selector(selector, actives)
         if matched:
             return self._single_or_error(matched, selector)
+
+        # active には無いが grace 中に居る → 「知らない selector」ではなく
+        # 「居たが切断中」。待てば戻るのか selector が違うのかを呼び出し側が
+        # 即決できるよう、別コードで残り猶予を添える。
+        in_grace = select_by_selector(selector, graces)
+        if in_grace:
+            return self._disconnected_outcome(in_grace)
 
         return self._not_found_outcome(f"No instance matches {selector!r}")
 
@@ -736,6 +832,36 @@ class HubState:
         return ResolveOutcome(
             ok=False,
             error=Error(code=ErrorCode.INSTANCE_NOT_FOUND, message=message),
+        )
+
+    def _disconnected_outcome(self, entries: list[WorkerEntry]) -> ResolveOutcome:
+        now = self._clock()
+        infos = [self._to_info(e, now) for e in entries]
+        first = infos[0]
+        return ResolveOutcome(
+            ok=False,
+            error=Error(
+                code=ErrorCode.INSTANCE_DISCONNECTED,
+                message=(
+                    f"Instance '{first.label}' disconnected "
+                    f"{first.last_seen_ago if first.last_seen_ago is not None else '?'}s "
+                    f"after its last heartbeat; the Hub keeps its registration for "
+                    f"{first.grace_expires_in}s more in case it reconnects"
+                ),
+                details={
+                    "instances": [
+                        {
+                            "instance_id": i.instance_id,
+                            "label": i.label,
+                            "pid": i.pid,
+                            "project": i.project,
+                            "last_seen_ago": i.last_seen_ago,
+                            "grace_expires_in": i.grace_expires_in,
+                        }
+                        for i in infos
+                    ]
+                },
+            ),
         )
 
     def _ambiguous_outcome(self, matched: list[WorkerEntry]) -> ResolveOutcome:

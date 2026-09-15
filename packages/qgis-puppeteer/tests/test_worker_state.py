@@ -23,6 +23,7 @@ from qgis_puppeteer.worker_state import (
     WorkerConfig,
     WorkerRegisterError,
     WorkerState,
+    next_reconnect_delay_ms,
 )
 
 # ============================================================
@@ -52,6 +53,35 @@ class TestBuildRegister:
         msg = state.build_register("m")
         assert msg.label is None
         assert msg.project is None
+
+
+class TestReconnectBackoff:
+    def test_doubles_per_failure_and_caps(self) -> None:
+        assert next_reconnect_delay_ms(0, 1_000) == 1_000
+        assert next_reconnect_delay_ms(1, 1_000) == 2_000
+        assert next_reconnect_delay_ms(3, 1_000) == 8_000
+        assert next_reconnect_delay_ms(5, 1_000) == 30_000  # cap
+        assert next_reconnect_delay_ms(100, 1_000) == 30_000  # 2**16 でも溢れない
+        assert next_reconnect_delay_ms(2, 500, cap_ms=1_500) == 1_500
+
+
+class TestUpdateInfo:
+    def test_set_project_reports_change_and_feeds_next_register(self) -> None:
+        state = WorkerState(config=WorkerConfig(pid=1, label="A", project=None))
+        assert state.set_project("D:/a.qgz") is True
+        assert state.set_project("D:/a.qgz") is False  # 変化なし
+        assert state.build_register("m").project == "D:/a.qgz"
+
+    def test_build_update_info_requires_registration(self) -> None:
+        state = WorkerState(config=WorkerConfig(pid=1, label="A"))
+        state.set_project("D:/a.qgz")
+        assert state.build_update_info("m") is None
+        state.instance_id = "w-1"
+        msg = state.build_update_info("m2")
+        assert msg is not None
+        assert (msg.id, msg.instance_id, msg.project) == ("m2", "w-1", "D:/a.qgz")
+        state.set_project(None)
+        assert state.build_update_info("m3").project is None
 
 
 # ============================================================

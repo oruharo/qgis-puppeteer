@@ -33,9 +33,11 @@ from qgis_puppeteer.client import (
     ConfirmationRequiredError,
     InstanceInfo,
     NonSerializableResultError,
+    RequestError,
     WorkerCodeError,
 )
-from qgis_puppeteer.protocol import Role
+from qgis_puppeteer.hub_state import select_by_selector
+from qgis_puppeteer.protocol import ErrorCode, Role
 from qgis_puppeteer.selector_match import (
     record_matches_selector,
     resolve_with_index,
@@ -131,6 +133,15 @@ def _raise_for_execute_result(result: Any) -> None:
         stdout=result.get("stdout"),
         stderr=result.get("stderr"),
     )
+
+
+# `wait_for_ready` の probe で「まだ経路が通っていない」とみなすエラー。
+# これ以外（コマンド不明なども含む）は Worker が応答した証拠なので ready 扱い。
+_NOT_ROUTED_YET = (
+    ErrorCode.INSTANCE_NOT_FOUND,
+    ErrorCode.INSTANCE_DISCONNECTED,
+    ErrorCode.INSTANCE_TIMEOUT,
+)
 
 
 class E2EAutomationClient:
@@ -397,6 +408,8 @@ class E2EAutomationClient:
 
         QGIS subprocess を起動した直後は Worker が register するまで数秒〜
         十数秒かかるので、`list_instances` を poll する。既定 30 秒タイムアウト。
+        Hub 上で ``unresponsive``（register 後に GUI スレッドが塞がっている）
+        なものは「まだ使えない」ので数えない。
 
         Returns:
             先頭 Worker の `instance_id`（単一 Worker 想定）。
@@ -404,7 +417,7 @@ class E2EAutomationClient:
         deadline = time.monotonic() + timeout_s
         last_count = -1
         while time.monotonic() < deadline:
-            instances = self.list_instances()
+            instances = [i for i in self.list_instances() if i.state == "active"]
             if instances:
                 logger.info(
                     "Worker ready: instance_id=%s (label=%s)",
@@ -423,6 +436,98 @@ class E2EAutomationClient:
     # ------------------------------------------------------------
     # 便利メソッド（Worker コマンド薄ラッパ）
     # ------------------------------------------------------------
+
+    def wait_for_ready(
+        self,
+        selector: str | None = None,
+        *,
+        timeout_s: float = 60.0,
+        poll_interval_s: float = 0.25,
+        require_project: bool = False,
+        probe_command: str = "qgis_get_canvas_extent",
+    ) -> str:
+        """Worker が **呼び出しを処理できる** 状態になるまで待ち、instance_id を返す。
+
+        `wait_for_worker` は「register 済みの active が居る」までしか見ない。
+        register 直後の QGIS はプロジェクト読み込みで GUI スレッドが塞がって
+        いることがあり、そこへ投げた最初のコマンドは空くまで返らない（実測では
+        一覧に載ってから全レイヤが揃うまで 20 秒の開きがあった）。ここでは
+        2 段で確認する:
+
+        1. ``state == "active"`` の instance が selector に一致する
+        2. その instance に軽い read-only コマンドを投げて応答が返る
+           （= GUI スレッドが空いている）
+
+        2 の往復は GUI が塞がっていれば空くまで返らないので、それ自体が
+        readiness の観測になる。重いプロジェクトでは ``timeout_s``（fixture
+        経由なら ini の ``qgis_startup_timeout``）を伸ばすこと。
+
+        Args:
+            selector: ``launch_token`` / ``@label`` / ``label`` / ``instance_id`` /
+                プロジェクト名。None なら active の先頭（単一 Worker 想定で、
+                `wait_for_worker` と同じ挙動）。
+            require_project: プロジェクトの読み込み完了（``project`` が入る）まで
+                待つ。レイヤを触るテスト向け。プロジェクトを開かない QGIS では
+                永久に満たされないので付けないこと。
+            probe_command: 往復に使う read-only コマンド。
+
+        Raises:
+            TimeoutError: ``timeout_s`` 以内に使える状態にならなかった。
+        """
+        client, loop = self._require_connected()
+        deadline = time.monotonic() + timeout_s
+        seen: list[InstanceInfo] = []
+        while True:
+            seen = self.list_instances()
+            candidates = [i for i in seen if i.state == "active"]
+            if require_project:
+                candidates = [i for i in candidates if i.project]
+            if selector is None:
+                candidate = candidates[0] if candidates else None
+            else:
+                matched = select_by_selector(selector, candidates)
+                candidate = matched[0] if len(matched) == 1 else None
+
+            if candidate is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    loop.run_until_complete(
+                        client.call(
+                            probe_command,
+                            {},
+                            instance=candidate.instance_id,
+                            timeout_ms=max(1, int(remaining * 1000)),
+                        )
+                    )
+                    routed = True
+                except RequestError as e:
+                    # Worker が応答したなら（コマンド不明でも）経路は通っている。
+                    # 経路そのものの失敗だけ「まだ」とみなして待ち直す。
+                    routed = e.code not in _NOT_ROUTED_YET
+                except (TimeoutError, asyncio.TimeoutError):
+                    break
+                if routed:
+                    logger.info(
+                        "Worker ready: instance_id=%s (label=%s, project=%r)",
+                        candidate.instance_id,
+                        candidate.label,
+                        candidate.project,
+                    )
+                    return candidate.instance_id
+
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(poll_interval_s)
+
+        raise TimeoutError(
+            f"No QGIS Worker became usable within {timeout_s}s (url={self._url}"
+            + (f", selector={selector!r}" if selector is not None else "")
+            + (", require_project=True" if require_project else "")
+            + "); last seen: "
+            + repr([(i.label, i.state, i.project) for i in seen])
+        )
 
     def execute_python(self, code: str, *, instance: str | None = None) -> Any:
         """`qgis_execute_python` を呼び、コードが捕捉した **値** を返す。

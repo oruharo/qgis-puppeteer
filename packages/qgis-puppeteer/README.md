@@ -71,7 +71,7 @@ async with AutomationClient() as client:
 | UI | `qgis_snapshot_ui`, `qgis_click_widget`, `qgis_set_widget_value`, `qgis_check_actionability` |
 | Capture | `qgis_screenshot` |
 | Code | `qgis_execute_python`, `qgis_execute_with_permission`, `qgis_get_whitelist`, `qgis_clear_session_permissions` |
-| Discovery | `qgis_list_instances`, `qgis_use_instance` |
+| Discovery | `qgis_list_instances`, `qgis_use_instance`, `qgis_wait_ready` |
 
 For full schemas and examples, see [Architecture document](https://github.com/oruharo/qgis-puppeteer/blob/main/docs/architecture/0001-qgis-puppeteer-architecture.md).
 

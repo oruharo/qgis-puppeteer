@@ -140,6 +140,7 @@ class QgisPuppetPlugin:
         self._worker: Worker | None = None
         self._instance_id: str | None = None
         self._about_to_quit_hooked: bool = False
+        self._project_signal_hooked: bool = False
 
     # ------------------------------------------------------------
     # QGIS ライフサイクル hook
@@ -228,6 +229,7 @@ class QgisPuppetPlugin:
         self._worker.hub_startup_failed.connect(self._on_hub_startup_failed)
 
         self._hook_about_to_quit()
+        self._hook_project_signal()
         self._worker.connect_to_hub()
 
         # ADR-0002 Roadmap "Dialog handler": 想定外モーダルへの auto-respond
@@ -413,6 +415,57 @@ class QgisPuppetPlugin:
         filename = DEFAULT_LOCK_FILENAME_TEMPLATE.format(port=port)
         return Path(tempfile.gettempdir()) / filename
 
+    def _hook_project_signal(self) -> None:
+        """プロジェクトの読み込み・クリア・名前変更を Worker の project に反映する。
+
+        register は initGui 時の 1 回きりなので、ランチャー経由で起動して
+        あとからプロジェクトを開く流れでは、これが無いと Hub 上の ``project``
+        が永久に None のまま（selector の project tier も効かない）。
+
+        繋ぐシグナルは 3 つ:
+
+        - ``iface.projectRead``: 読み込み **完了後** に発火。``QgsProject.readProject``
+          はレイヤ生成前に飛ぶので、こちらを使う
+        - ``QgsProject.cleared``: 閉じた / 新規プロジェクト → None に戻す
+        - ``QgsProject.fileNameChanged``: Save As で名前が変わる経路。
+          **プロジェクトを開いたときには発火しない**（実機で確認済み）ので、
+          これだけでは足りない
+        """
+        if self._project_signal_hooked:
+            return
+        try:
+            from qgis.core import (  # type: ignore[import-not-found]
+                QgsProject,
+            )
+        except ImportError:  # pragma: no cover - QGIS 外
+            return
+        self.iface.projectRead.connect(self._on_project_file_changed)
+        project = QgsProject.instance()
+        project.cleared.connect(self._on_project_file_changed)
+        project.fileNameChanged.connect(self._on_project_file_changed)
+        self._project_signal_hooked = True
+
+    def _unhook_project_signal(self) -> None:
+        if not self._project_signal_hooked:
+            return
+        try:
+            from qgis.core import (  # type: ignore[import-not-found]
+                QgsProject,
+            )
+
+            self.iface.projectRead.disconnect(self._on_project_file_changed)
+            project = QgsProject.instance()
+            project.cleared.disconnect(self._on_project_file_changed)
+            project.fileNameChanged.disconnect(self._on_project_file_changed)
+        except Exception:  # pragma: no cover - 既に切れている等
+            logger.debug("project signal disconnect failed", exc_info=True)
+        self._project_signal_hooked = False
+
+    def _on_project_file_changed(self, *_args: object) -> None:
+        if self._worker is None:
+            return
+        self._worker.update_project(self._current_project_path())
+
     def _current_project_path(self) -> str | None:
         """現在開いている QGIS プロジェクトのファイルパスを取得する。"""
         try:
@@ -449,6 +502,7 @@ class QgisPuppetPlugin:
         """Worker を明示切断してインスタンス参照を解放する。"""
         if self._worker is None:
             return
+        self._unhook_project_signal()
         try:
             self._worker.disconnect_from_hub(send_bye=True)
         except Exception:  # pragma: no cover - 防御的
