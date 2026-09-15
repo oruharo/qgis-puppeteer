@@ -26,6 +26,12 @@ You also need:
 
 ## Usage with Claude Desktop
 
+Install the MCP extra first — it pulls in the MCP SDK the gateway imports:
+
+```bash
+pip install "qgis-puppeteer[mcp]"
+```
+
 Edit `claude_desktop_config.json`:
 
 ```json

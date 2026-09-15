@@ -77,8 +77,11 @@ qgis-puppeteer は QGIS を **WebSocket 経由で外部から操作する** 基�
 Claude Desktop 起動側の Python に MCP gateway を入れる:
 
 ```bash
-pip install qgis-puppeteer
+pip install "qgis-puppeteer[mcp]"
 ```
+
+`[mcp]` extra が MCP SDK を連れてくる。付けずに入れると
+`python -m qgis_puppeteer.gateways.mcp` が ImportError で起動しない。
 
 ### pytest E2E 作者向け
 
@@ -89,10 +92,10 @@ pip install pytest-qgis-puppeteer
 
 ### Pre-release（dev ブランチ）から入れる場合
 
-PyPI への公開前は GitHub から直接:
+PyPI への公開前は GitHub から直接（Claude Desktop 用には `[mcp]` を付ける）:
 
 ```bash
-pip install "qgis-puppeteer @ git+https://github.com/oruharo/qgis-puppeteer.git@dev#subdirectory=packages/qgis-puppeteer"
+pip install "qgis-puppeteer[mcp] @ git+https://github.com/oruharo/qgis-puppeteer.git@dev#subdirectory=packages/qgis-puppeteer"
 pip install "pytest-qgis-puppeteer @ git+https://github.com/oruharo/qgis-puppeteer.git@dev#subdirectory=packages/pytest-qgis-puppeteer"
 ```
 

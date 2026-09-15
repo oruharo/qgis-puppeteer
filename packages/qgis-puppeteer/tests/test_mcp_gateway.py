@@ -3,6 +3,15 @@
 FakeHub + FakeWorker（`test_client.py` を流用）に対して in-memory の
 MCP セッションを張り、ツール呼び出しが Hub → Worker へ正しくルーティング
 されることを end-to-end で検証する。
+
+in-memory 接続には mcp 2.x の `mcp.Client` を使い、`build_gateway()` が返す
+`MCPServer` を直接渡してプロセス内で繋ぐ（接続時の握手も `Client` が行う）。
+`raise_exceptions=True` は、サーバ側の例外を汎用メッセージに丸めずに
+表へ出すテスト用の設定。
+
+既定の `mode="auto"` はサーバと DirectDispatcher で直結し、JSON-RPC の
+直列化も initialize 握手も通らない。stdio 本番と同じ経路（`Server.run`）は
+`TestMcpGatewayLegacyHandshake` が `mode="legacy"` で押さえる。
 """
 
 from __future__ import annotations
@@ -16,19 +25,18 @@ from typing import Any
 import pytest
 from qgis_puppeteer.client import AutomationClient
 
-try:
-    from mcp import ClientSession
-    from mcp.shared.memory import (
-        create_connected_server_and_client_session,
-    )
-    from mcp.types import CallToolResult
-    from qgis_puppeteer.gateways.mcp import (
-        DEFAULT_ORIGIN,
-        GatewayContext,
-        build_gateway,
-    )
-except ImportError:
-    pytest.skip("qgis_puppeteer[mcp] extras not installed", allow_module_level=True)
+# skip するのは mcp extra が入っていない環境だけ。gateway 側の import 失敗
+# （mcp のメジャー不一致など）まで skip に巻き込むと、テストが 1 本も
+# 実行されないまま緑に見えるので、ここでは `mcp` パッケージの有無だけを見る。
+pytest.importorskip("mcp", reason="qgis_puppeteer[mcp] extras not installed")
+
+from mcp import Client
+from mcp.types import CallToolResult
+from qgis_puppeteer.gateways.mcp import (
+    DEFAULT_ORIGIN,
+    GatewayContext,
+    build_gateway,
+)
 
 from tests.test_client import _FakeWorker, fake_hub_server
 
@@ -82,9 +90,8 @@ class TestMcpGatewayListInstances:
                 await worker.ready.wait()
 
                 gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
-                async with create_connected_server_and_client_session(gateway) as session:
-                    await session.initialize()
-                    result = await session.call_tool("qgis_list_instances", {})
+                async with Client(gateway, raise_exceptions=True) as client:
+                    result = await client.call_tool("qgis_list_instances", {})
                     return json.loads(_extract_text(result))
 
         instances = _run(run())
@@ -117,9 +124,8 @@ class TestMcpGatewayToolDispatch:
                 await worker.ready.wait()
 
                 gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
-                async with create_connected_server_and_client_session(gateway) as session:
-                    await session.initialize()
-                    result = await session.call_tool("qgis_list_layers", {})
+                async with Client(gateway, raise_exceptions=True) as client:
+                    result = await client.call_tool("qgis_list_layers", {})
                     text = _extract_text(result)
                     return text, json.loads(text)
 
@@ -150,9 +156,8 @@ class TestMcpGatewayToolDispatch:
                 await worker.ready.wait()
 
                 gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
-                async with create_connected_server_and_client_session(gateway) as session:
-                    await session.initialize()
-                    result = await session.call_tool("qgis_execute_python", {"code": "1/0"})
+                async with Client(gateway, raise_exceptions=True) as client:
+                    result = await client.call_tool("qgis_execute_python", {"code": "1/0"})
                     return json.loads(_extract_text(result))
 
         payload = _run(run())
@@ -189,15 +194,13 @@ class TestMcpGatewayStickyInstance:
                 await w_b.ready.wait()
 
                 gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
-                async with create_connected_server_and_client_session(gateway) as session:
-                    await session.initialize()
-
+                async with Client(gateway, raise_exceptions=True) as client:
                     # sticky を b に設定
-                    use_res = await session.call_tool("qgis_use_instance", {"selector": "b"})
+                    use_res = await client.call_tool("qgis_use_instance", {"selector": "b"})
                     assert "ok" in _extract_text(use_res)
 
                     # 引数 instance を省略すると sticky の b が選ばれる
-                    result = await session.call_tool("qgis_list_layers", {})
+                    result = await client.call_tool("qgis_list_layers", {})
                     return json.loads(_extract_text(result))
 
         payload = _run(run())
@@ -228,11 +231,10 @@ class TestMcpGatewayStickyInstance:
                 await w_b.ready.wait()
 
                 gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
-                async with create_connected_server_and_client_session(gateway) as session:
-                    await session.initialize()
-                    await session.call_tool("qgis_use_instance", {"selector": "b"})
+                async with Client(gateway, raise_exceptions=True) as client:
+                    await client.call_tool("qgis_use_instance", {"selector": "b"})
                     # instance= で明示指定すると sticky を上書き
-                    result = await session.call_tool("qgis_list_layers", {"instance": "a"})
+                    result = await client.call_tool("qgis_list_layers", {"instance": "a"})
                     return json.loads(_extract_text(result))
 
         payload = _run(run())
@@ -246,9 +248,8 @@ class TestMcpGatewayStickyInstance:
                 await w.ready.wait()
 
                 gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
-                async with create_connected_server_and_client_session(gateway) as session:
-                    await session.initialize()
-                    result = await session.call_tool(
+                async with Client(gateway, raise_exceptions=True) as client:
+                    result = await client.call_tool(
                         "qgis_use_instance", {"selector": "does-not-exist"}
                     )
                     return json.loads(_extract_text(result))
@@ -269,9 +270,8 @@ class TestMcpGatewayToolInventory:
                 await w.ready.wait()
 
                 gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
-                async with create_connected_server_and_client_session(gateway) as session:
-                    await session.initialize()
-                    listed = await session.list_tools()
+                async with Client(gateway, raise_exceptions=True) as client:
+                    listed = await client.list_tools()
                     return [t.name for t in listed.tools]
 
         names = _run(run())
@@ -320,9 +320,8 @@ class TestMcpGatewayHubUnreachable:
 
         async def run() -> dict[str, Any]:
             gateway = build_gateway(lifespan=_lifespan_no_hub)
-            async with create_connected_server_and_client_session(gateway) as session:
-                await session.initialize()
-                result = await session.call_tool("qgis_list_instances", {})
+            async with Client(gateway, raise_exceptions=True) as client:
+                result = await client.call_tool("qgis_list_instances", {})
                 return json.loads(_extract_text(result))
 
         payload = _run(run())
@@ -340,9 +339,8 @@ class TestMcpGatewayHubUnreachable:
 
         async def run() -> dict[str, Any]:
             gateway = build_gateway(lifespan=_lifespan_no_hub)
-            async with create_connected_server_and_client_session(gateway) as session:
-                await session.initialize()
-                result = await session.call_tool("qgis_list_layers", {})
+            async with Client(gateway, raise_exceptions=True) as client:
+                result = await client.call_tool("qgis_list_layers", {})
                 return json.loads(_extract_text(result))
 
         payload = _run(run())
@@ -372,9 +370,8 @@ class TestMcpGatewayHubUnreachable:
 
         async def run() -> dict[str, Any]:
             gateway = build_gateway(lifespan=_lifespan_timeout)
-            async with create_connected_server_and_client_session(gateway) as session:
-                await session.initialize()
-                result = await session.call_tool("qgis_list_instances", {})
+            async with Client(gateway, raise_exceptions=True) as client:
+                result = await client.call_tool("qgis_list_instances", {})
                 return json.loads(_extract_text(result))
 
         payload = _run(run())
@@ -383,11 +380,64 @@ class TestMcpGatewayHubUnreachable:
         assert "Timeout" in payload["error"]["details"]["type"]
 
 
+class TestMcpGatewayLegacyHandshake:
+    """`mode="legacy"`（initialize 握手＋JSON-RPC）でも同じように動くこと。
+
+    既定の `mode="auto"` は DirectDispatcher で直結するので、stdio 本番
+    （Claude Code / Claude Desktop）と同じ `Server.run` の経路を通らない。
+    ここで握手・ツール一覧・リクエストをまたぐ sticky の保持までを 1 本で押さえる。
+    """
+
+    def test_handshake_then_sticky_routing_over_jsonrpc(self) -> None:
+        async def run() -> tuple[str | None, list[str], dict[str, Any]]:
+            async with fake_hub_server() as (_hub, hub_url):
+                w_a = _FakeWorker(hub_url, label="a", pid=1)
+                w_b = _FakeWorker(hub_url, label="b", pid=2)
+
+                def make_responder(marker: str):
+                    def responder(req: dict[str, Any]) -> dict[str, Any]:
+                        return {
+                            "type": "response",
+                            "id": req["id"],
+                            "ok": True,
+                            "result": {"from": marker},
+                        }
+
+                    return responder
+
+                w_a.responder = make_responder("A")
+                w_b.responder = make_responder("B")
+                await w_a.start()
+                await w_b.start()
+                await w_a.ready.wait()
+                await w_b.ready.wait()
+
+                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                # 公式の Testing ガイドに従い、legacy では raise_exceptions を付けない
+                async with Client(gateway, mode="legacy") as client:
+                    server_info = client.server_info
+                    listed = await client.list_tools()
+                    use_res = await client.call_tool("qgis_use_instance", {"selector": "b"})
+                    assert "ok" in _extract_text(use_res)
+                    result = await client.call_tool("qgis_list_layers", {})
+                    return (
+                        server_info.name if server_info is not None else None,
+                        [t.name for t in listed.tools],
+                        json.loads(_extract_text(result)),
+                    )
+
+        server_name, names, payload = _run(run())
+        assert server_name == "qgis-puppeteer"
+        assert {"qgis_use_instance", "qgis_list_layers"} <= set(names)
+        # 別リクエストで設定した sticky が次のリクエストに効いている
+        assert payload["from"] == "B"
+
+
 # ============================================================
-# ClientSession と ClientSession（sanity check）
+# mcp.Client（sanity check）
 # ============================================================
 
 
-def test_client_session_type_is_mcp_type() -> None:
+def test_client_type_is_mcp_type() -> None:
     """import が破綻していないことの静的チェック。"""
-    assert ClientSession is not None
+    assert Client is not None
