@@ -222,6 +222,8 @@ class TestHubClientIntegration:
                             "command": "qgis_ping",
                             "params": {"foo": "bar"},
                             "worker_label": "solo",
+                            # ADR-0001 §12.7: Hub が呼び出し元 role を付与する
+                            "caller_role": "automation_client",
                         }
                 finally:
                     await worker.stop()

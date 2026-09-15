@@ -171,7 +171,9 @@ class TestWorkerIntegration:
                 worker.connect_to_hub()
                 ok = _spin_until(app, lambda: worker.is_registered, timeout=5.0)
                 assert ok, "Worker failed to register"
-                assert worker.instance_id == "worker-e2e-reg-9001"
+                # ADR-0005 D1: instance_id は pid 非依存の不透明 nonce
+                assert worker.instance_id is not None
+                assert worker.instance_id.startswith("w-")
             finally:
                 worker.disconnect_from_hub()
                 # disconnected まで drain
