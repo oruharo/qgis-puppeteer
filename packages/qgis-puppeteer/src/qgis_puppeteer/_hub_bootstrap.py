@@ -13,7 +13,7 @@
 
 ## 環境変数で sys.path を引き継ぐ仕組み
 
-ホストアプリケーション (qgis_puppet プラグインを組み込むホスト) が独自に
+ホストアプリケーション (QGIS Puppeteer プラグインを組み込むホスト) が独自に
 ベンダ同梱したライブラリ等を Hub から参照させたいことがある。`PYTHONPATH`
 経由は上記の通り消去されるため、`qgis_puppeteer` 中立の独自 env として
 
@@ -39,10 +39,8 @@ import sys
 # さらに親 = `<src>`  ← ここを sys.path へ
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _PARENT = os.path.dirname(_THIS_DIR)
-if _PARENT not in sys.path:
-    sys.path.insert(0, _PARENT)
 
-# ホストアプリ (qgis_puppet 側 _build_hub_spawn_env) が親の sys.path を
+# プラグイン (qgis_plugin.plugin_helpers._build_hub_spawn_env) が親の sys.path を
 # `QPUPPETEER_HUB_EXTRA_SYSPATH` 経由で渡してくる。`PYTHONPATH` は
 # QGIS の python-qgis-ltr.bat (etc/ini/python3.bat) が消去するため、
 # 中立な独自 env を経由する必要がある。
@@ -50,6 +48,13 @@ _ENV_EXTRA_SYSPATH = "QPUPPETEER_HUB_EXTRA_SYSPATH"
 for _path in os.environ.get(_ENV_EXTRA_SYSPATH, "").split(os.pathsep):
     if _path and _path not in sys.path:
         sys.path.insert(0, _path)
+
+# 自分の親は引き継いだパスより前に置く。親の sys.path に別の `qgis_puppeteer`
+# （ホストアプリの vendor 等）があっても、Hub は spawn したプラグインと同じ
+# コピーで動く。
+if _PARENT in sys.path:
+    sys.path.remove(_PARENT)
+sys.path.insert(0, _PARENT)
 
 from qgis_puppeteer.hub import main  # noqa: E402
 

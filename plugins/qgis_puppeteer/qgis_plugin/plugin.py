@@ -1,11 +1,12 @@
-"""QgisPuppetPlugin — `qgis_puppeteer.Worker` の QGIS ラッパ。
+"""QgisPuppeteerPlugin — `qgis_puppeteer.Worker` の QGIS ラッパ。
 
 ADR-0001 §4 "Worker 側" に従って、プラグインロード時に `Worker` を生成し
 Hub へ逆向き接続する。QGIS 終了時は `aboutToQuit` + close 待機で
 `bye` フレームを確実に送る（graceful close）。
 
 ## 依存
-- `qgis_puppeteer`（リポジトリルート直下）を sys.path に追加して import
+- `qgis_puppeteer` 本体。このモジュール自身がその中（`qgis_puppeteer/qgis_plugin/`）
+  にあるので、QGIS がプラグインフォルダの親を sys.path に入れた時点で解決する
 - PyQt5（QGIS 付属）
 
 ## 設定（環境変数、全て任意）
@@ -31,34 +32,16 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-# ==============================================================
-# sys.path 調整：qgis_puppeteer は本プラグインの外で配布される別パッケージ
-#
-# plugin_helpers は PyQt5 / qgis_puppeteer 本体に非依存なので先に import できる。
-# `_QGIS_PUPPETEER_ROOT` は `qgis_puppeteer` パッケージの実体ディレクトリを指す
-# （pip install 後の site-packages、ホストアプリの vendor 配下、または OSS
-# workspace のフォールバック）。その親を sys.path に積めば
-# `import qgis_puppeteer` が通る。
-#
-# 解決の詳細は plugin_helpers._resolve_qgis_puppeteer_root を参照。
-# 既に sys.path 経由で見えている場合は重複追加しない。
-# ==============================================================
-from .plugin_helpers import _QGIS_PUPPETEER_ROOT  # noqa: E402
-
-if _QGIS_PUPPETEER_ROOT is not None:
-    _parent_str = str(_QGIS_PUPPETEER_ROOT.parent)
-    if _parent_str not in sys.path:
-        sys.path.insert(0, _parent_str)
-
 # `Worker` は PyQt5 依存のため top-level `qgis_puppeteer` からは export されない。
 # サブモジュール経由で import する（プラグイン実行時は QGIS 付属の PyQt5 が利用可）。
-from PyQt5.QtCore import (  # noqa: E402  type: ignore[import-not-found]
+from PyQt5.QtCore import (  # type: ignore[import-not-found]
     QEventLoop,
     QTimer,
 )
-from qgis_puppeteer.worker import Worker  # noqa: E402
 
-from .plugin_helpers import (  # noqa: E402
+from qgis_puppeteer.worker import Worker
+
+from .plugin_helpers import (
     ENV_HUB_HOST,
     ENV_HUB_PORT,
     ENV_HUB_PYTHON,
@@ -72,7 +55,7 @@ from .plugin_helpers import (  # noqa: E402
     discover_extensions,
 )
 
-logger = logging.getLogger("qgis_puppet.plugin")
+logger = logging.getLogger(__name__)
 
 # ==============================================================
 # 環境変数キー
@@ -89,7 +72,7 @@ ENV_WORKER_TAKEOVER = "QPUPPETEER_WORKER_TAKEOVER"
 ENV_WORKER_LABEL_SUFFIX = "QPUPPETEER_WORKER_LABEL_SUFFIX"
 ENV_HUB_LOCK_PATH = "QPUPPETEER_HUB_LOCK_PATH"
 
-DEFAULT_LOCK_FILENAME_TEMPLATE = "qgis_puppet-hub-{port}.lock"
+DEFAULT_LOCK_FILENAME_TEMPLATE = "qgis_puppeteer-hub-{port}.lock"
 
 
 def _resolve_conflict_policy() -> str | None:
@@ -128,7 +111,7 @@ def _is_external_owner_mode() -> bool:
 # ==============================================================
 
 
-class QgisPuppetPlugin:
+class QgisPuppeteerPlugin:
     """QGIS プラグインのライフサイクルを `Worker` に橋渡しする。
 
     QGIS が `initGui` を呼ぶと Hub に接続、`unload` を呼ぶと bye で明示切断。
@@ -166,7 +149,7 @@ class QgisPuppetPlugin:
 
         # subprocess の stdout/stderr を常にファイルに残す（DEVNULL にはしない）。
         # `hub.py` 側の Python logger が回り始める前のエラー（import 失敗、Qt fatal 等）は
-        # ここでしか拾えない。デフォルトは `<TEMP>\qgis_puppet.spawn.log`。
+        # ここでしか拾えない。デフォルトは `<TEMP>\qgis_puppeteer.spawn.log`。
         log_file = _resolve_hub_log_file()
         logger.info("Hub subprocess log file: %s", log_file)
 
@@ -241,7 +224,7 @@ class QgisPuppetPlugin:
         """Core `qgis_*` を登録後、外部プラグインから Tier 2/3 ハンドラを discover する。
 
         ADR-0001 §12.3 に従い、Worker 側は「各プラグインの `puppeteer_api` モジュール
-        を qgis_puppet が pull する」方式で拡張ハンドラを収集する。
+        を qgis_puppeteer が pull する」方式で拡張ハンドラを収集する。
 
         discover は以下の 2 段階で実行することで、プラグインロード順に起因する
         取り逃がしを防ぐ:
@@ -541,19 +524,19 @@ class QgisPuppetPlugin:
 
     def _on_registered(self, instance_id: str) -> None:
         self._instance_id = instance_id
-        logger.info("QGIS Puppet registered as %s", instance_id)
-        self._show_message(f"QGIS Puppet: {instance_id}")
+        logger.info("QGIS Puppeteer registered as %s", instance_id)
+        self._show_message(f"QGIS Puppeteer: {instance_id}")
 
     def _on_unregistered(self) -> None:
-        logger.info("QGIS Puppet disconnected from Hub")
+        logger.info("QGIS Puppeteer disconnected from Hub")
 
     def _on_register_failed(self, reason: str) -> None:
-        logger.warning("QGIS Puppet register failed: %s", reason)
-        self._show_message(f"QGIS Puppet: register failed ({reason})", warning=True)
+        logger.warning("QGIS Puppeteer register failed: %s", reason)
+        self._show_message(f"QGIS Puppeteer: register failed ({reason})", warning=True)
 
     def _on_hub_startup_failed(self, detail: str) -> None:
         logger.warning("QGIS Puppeteer Hub startup failed: %s", detail)
-        self._show_message(f"QGIS Puppet: Hub startup failed ({detail})", warning=True)
+        self._show_message(f"QGIS Puppeteer: Hub startup failed ({detail})", warning=True)
 
     def _show_message(self, text: str, *, warning: bool = False) -> None:
         """QGIS のメッセージバーに通知する（iface が利用可能な場合のみ）。"""
@@ -564,6 +547,6 @@ class QgisPuppetPlugin:
             mbar = getattr(self.iface, "messageBar", None)
             if mbar is None:
                 return
-            mbar().pushMessage("QGIS Puppet", text, level=level, duration=5)
+            mbar().pushMessage("QGIS Puppeteer", text, level=level, duration=5)
         except Exception:  # pragma: no cover - ランタイム環境差
             logger.debug("Could not show message bar", exc_info=True)

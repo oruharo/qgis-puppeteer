@@ -31,7 +31,7 @@ from typing import Any
 # 循環依存を避けるためここでは自前定義。
 Handler = Callable[[dict[str, Any]], Any]
 
-logger = logging.getLogger("qgis_puppet.handlers")
+logger = logging.getLogger(__name__)
 
 
 # ==============================================================

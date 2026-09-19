@@ -48,8 +48,9 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # QGIS plugin entry points: classFactory / initGui / unload は QGIS 側 API の
 # 名前なので変更不可。N802 (function-name) を該当ファイルでだけ無視。
-"plugins/qgis_puppet/__init__.py" = ["N802"]
-"plugins/qgis_puppet/plugin.py" = ["N802"]
+"packages/qgis-puppeteer/src/qgis_puppeteer/__init__.py" = ["N802"]
+"plugins/qgis_puppeteer/__init__.py" = ["N802"]
+"plugins/qgis_puppeteer/qgis_plugin/plugin.py" = ["N802"]
 # Bench script は数学的慣習で大文字 1 文字変数を使う
 "packages/qgis-puppeteer/scripts/bench_rtt.py" = ["N806"]
 # Tests: pytest.raises(Exception) を許容（broad ok。具体例外型は別 lint で見る）

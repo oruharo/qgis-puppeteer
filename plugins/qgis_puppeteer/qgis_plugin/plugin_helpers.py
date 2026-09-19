@@ -7,8 +7,8 @@ Python interpreter の解決、Hub subprocess 用 command/env の構築、URL pa
 ## 分離の理由
 
 `plugin.py` は `from qgis_puppeteer.worker import Worker` を top-level で
-import するため、`PyQt5` を必要とする。テストを
-`plugins/qgis_puppet/tests/` 側で動かすとき、毎回 PyQt5 を準備
+import するため、`PyQt5` を必要とする。テスト
+（`plugins/tests/`）で毎回 PyQt5 を準備
 するのは手間なので、ロジックだけこのモジュールに切り出している。
 """
 
@@ -26,58 +26,18 @@ from urllib.parse import urlparse
 
 from qgis_puppeteer.qgis_env import find_qgis_python_launcher
 
-logger = logging.getLogger("qgis_puppet.plugin_helpers")
+logger = logging.getLogger(__name__)
 
 # ==============================================================
 # パス定数（plugin.py と共有）
 # ==============================================================
 
-_HELPERS_FILE = Path(__file__).resolve()
-_PLUGIN_DIR = _HELPERS_FILE.parent
-# plugins/qgis_puppet → plugins → repo root（OSS workspace fallback でのみ使用）
-_REPO_ROOT = _PLUGIN_DIR.parent.parent
+# このファイル = `<plugins>/qgis_puppeteer/qgis_plugin/plugin_helpers.py`。
+# プラグインは `qgis_puppeteer` パッケージそのものなので、パッケージの場所を
+# 探しに行く必要はない。すぐ上のディレクトリがその実体。
+_PLUGIN_DIR = Path(__file__).resolve().parent
+_QGIS_PUPPETEER_ROOT = _PLUGIN_DIR.parent
 
-
-def _resolve_qgis_puppeteer_root() -> Path | None:
-    """`qgis_puppeteer` パッケージのディレクトリを解決する。
-
-    返り値は `qgis_puppeteer` パッケージの実体ディレクトリ（`__init__.py` が
-    入っているディレクトリ）。`_hub_bootstrap.py` の探索基点として使う。
-
-    ## 解決順
-
-    1. `import qgis_puppeteer` を試行 → 成功なら `Path(__file__).parent`
-       を返す。pip install 済み / ホストアプリが事前に sys.path を整えて
-       いる / OSS workspace 開発で uv sync 済み 等に該当。
-    2. OSS workspace 直接開発時のフォールバック:
-       `<repo>/packages/qgis-puppeteer/src/qgis_puppeteer/`
-       - 例: qgis-puppeteer リポを直接 cd して plugin_helpers.py を import
-         した時点でまだ `qgis_puppeteer` が sys.path にないケース
-    3. いずれも該当しなければ `None`。auto-spawn は無効化される。
-
-    ## 中立性
-
-    物理パスを決め打ちしない。ホストアプリ（例: 別リポジトリの vendor 配下）が
-    plugin と Python ライブラリを別場所に配置しても、`import` が通れば
-    site-packages 等から自動解決される。
-    """
-    try:
-        import qgis_puppeteer
-    except ImportError:
-        pass
-    else:
-        file_attr = getattr(qgis_puppeteer, "__file__", None)
-        if file_attr:
-            return Path(file_attr).resolve().parent
-
-    fallback = _REPO_ROOT / "packages" / "qgis-puppeteer" / "src" / "qgis_puppeteer"
-    if fallback.is_dir():
-        return fallback.resolve()
-    return None
-
-
-# 解決結果。None になり得る点に注意（その場合 auto-spawn は無効）。
-_QGIS_PUPPETEER_ROOT: Path | None = _resolve_qgis_puppeteer_root()
 
 # ==============================================================
 # 環境変数キー・既定値
@@ -106,7 +66,7 @@ DEFAULT_HUB_HOST = "127.0.0.1"
 # `hub.py` 側の運用ログ（`%APPDATA%\qgis_puppeteer\hub.log`）とは別レイヤ：
 # こちらは Python logger 以前の出力（import エラー、Qt の fatal、
 # 未捕捉例外の traceback）を拾うためのもの。
-DEFAULT_SPAWN_LOG_FILENAME = "qgis_puppet.spawn.log"
+DEFAULT_SPAWN_LOG_FILENAME = "qgis_puppeteer.spawn.log"
 
 # QGIS 同梱の Python launcher (`python-qgis-ltr.bat`) 探索ロジックは
 # `qgis_puppeteer.find_qgis_python_launcher()` に集約済み（OSS 公開 API）。
@@ -207,11 +167,9 @@ def _resolve_hub_python() -> Path | None:
 # ==============================================================
 
 
-# `_hub_bootstrap.py` の絶対パス。`_QGIS_PUPPETEER_ROOT` が None の場合は
-# bootstrap も解決できない（spawn 不可）。
-_HUB_BOOTSTRAP: Path | None = (
-    _QGIS_PUPPETEER_ROOT / "_hub_bootstrap.py" if _QGIS_PUPPETEER_ROOT is not None else None
-)
+# `_hub_bootstrap.py` の絶対パス。プラグインと同じ `qgis_puppeteer` の中にある
+# ので、Hub はプラグインと同じコピーで動く。
+_HUB_BOOTSTRAP = _QGIS_PUPPETEER_ROOT / "_hub_bootstrap.py"
 
 
 def _build_hub_spawn_command(python: Path, port: int) -> list[str]:
@@ -223,17 +181,7 @@ def _build_hub_spawn_command(python: Path, port: int) -> list[str]:
     `-m` 方式では `ModuleNotFoundError: No module named 'qgis_puppeteer'` で
     即死する。bootstrap が自分自身の位置から sys.path を組み立て直し、
     さらに `QPUPPETEER_HUB_EXTRA_SYSPATH` env から追加パスを引き継ぐ。
-
-    `_HUB_BOOTSTRAP` が解決できなかった場合（`qgis_puppeteer` が import できず
-    OSS workspace fallback も使えない場合）は `RuntimeError` を上げる。
     """
-    if _HUB_BOOTSTRAP is None:
-        raise RuntimeError(
-            "qgis_puppeteer is not importable and no OSS workspace fallback was "
-            "found; cannot locate _hub_bootstrap.py. Install qgis-puppeteer "
-            "(e.g. `pip install qgis-puppeteer`) or expose its location via "
-            "sys.path before loading qgis_puppet."
-        )
     return [str(python), str(_HUB_BOOTSTRAP), "--port", str(port)]
 
 
@@ -317,7 +265,7 @@ def _resolve_hub_log_file() -> Path:
 
     優先順：
         1. `QPUPPETEER_HUB_LOG_FILE` 環境変数（ユーザ明示指定）
-        2. `<TEMP>/qgis_puppet.spawn.log` （既定）
+        2. `<TEMP>/qgis_puppeteer.spawn.log` （既定）
     """
     override = os.environ.get(ENV_HUB_LOG_FILE)
     if override:
@@ -346,7 +294,7 @@ def discover_extensions(
     iface: Any,
     register: RegisterFn,
     *,
-    skip: str = "qgis_puppet",
+    skip: str = "qgis_puppeteer",
 ) -> list[tuple[str, str]]:
     """各 QGIS プラグインの `puppeteer_api` モジュールを discover して登録する。
 

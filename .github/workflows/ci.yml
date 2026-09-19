@@ -45,15 +45,39 @@ jobs:
         run: uv sync --all-packages --all-extras --dev
 
       # Tests are split per package so failure attribution is clear in CI logs.
-      # All three suites are 100% mocked — no real QGIS process required.
+      # No real QGIS process is required.
       - name: Test qgis-puppeteer (core)
         run: uv run pytest packages/qgis-puppeteer/tests -q
 
       - name: Test pytest-qgis-puppeteer
         run: uv run pytest packages/pytest-qgis-puppeteer/tests -q
 
-      - name: Test qgis_puppet plugin
-        run: uv run pytest plugins/qgis_puppet/tests -q
+      - name: Plugin folder mirrors the library
+        # plugins/qgis_puppeteer/ is the ready-to-copy QGIS plugin folder: the
+        # plugin-owned files plus a committed copy of the library. The copy is
+        # made by scripts/sync_plugin.py and must not drift.
+        run: uv run python scripts/sync_plugin.py --check
+
+      - name: Test QGIS Puppeteer plugin
+        run: uv run pytest plugins/tests -q
+
+      - name: Wheel leaves the QGIS plugin out
+        # qgis_plugin/ is GPL-3.0-or-later and lives in plugins/qgis_puppeteer/.
+        # The Apache-2.0 wheel must not carry it, and classFactory relies on
+        # its absence to detect a pip copy that hides the plugin folder.
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: |
+          uv build --package qgis-puppeteer --wheel --sdist -o build-check
+          uv run python - <<'PY'
+          import glob, tarfile, zipfile
+          [whl] = glob.glob("build-check/*.whl")
+          [sdist] = glob.glob("build-check/*.tar.gz")
+          names = zipfile.ZipFile(whl).namelist() + tarfile.open(sdist).getnames()
+          leaked = [n for n in names if "qgis_plugin" in n or n.endswith(("metadata.txt", "icon.png"))]
+          assert not leaked, leaked
+          assert any(n.endswith("qgis_puppeteer/hub.py") for n in names)
+          print(f"ok: {whl}, {sdist}")
+          PY
 
   lint:
     name: lint (ruff)
@@ -77,8 +101,8 @@ jobs:
         run: uv sync --all-packages --all-extras --dev
 
       - name: ruff check
-        run: uv run ruff check packages plugins
+        run: uv run ruff check packages plugins scripts
 
       - name: ruff format --check
         # ruff format baseline applied repo-wide; this is now a hard gate.
-        run: uv run ruff format --check packages plugins
+        run: uv run ruff format --check packages plugins scripts

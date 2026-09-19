@@ -70,7 +70,7 @@ On Windows `cmd`: use `set VAR=value`; on PowerShell: `$env:VAR="value"`.
 - **Import-time fidelity.** A profile/`.pth` hook runs *earlier* than QGIS
   plugins load, so it captures module-load (top-level) lines of your code. A
   hook that started only when a plugin loads would miss those — that's why this
-  is not built into the `qgis_puppet` plugin.
+  is not built into the QGIS Puppeteer plugin.
 - **`source` / `[paths]`.** Point `source` at your package, not at
   qgis-puppeteer. If the path seen inside QGIS differs from the runner's view,
   add a `[paths]` mapping so `coverage combine` merges them.

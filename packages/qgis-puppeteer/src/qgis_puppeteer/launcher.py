@@ -31,7 +31,7 @@ import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 
-# ADR-0005 D6: plugin が読む env キー（plugins/qgis_puppet/plugin.py と一致）。
+# ADR-0005 D6: plugin が読む env キー（qgis_plugin/plugin.py と一致）。
 ENV_LAUNCH_TOKEN = "QPUPPETEER_LAUNCH_TOKEN"
 ENV_WORKER_LABEL = "QPUPPETEER_WORKER_LABEL"
 

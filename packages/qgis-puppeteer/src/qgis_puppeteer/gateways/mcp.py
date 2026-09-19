@@ -335,7 +335,7 @@ def _format_unreachable(gateway: GatewayContext, exc: BaseException) -> CallTool
                 "code": "hub_unreachable",
                 "message": (
                     f"QGIS Puppeteer Hub ({gateway.url}) に接続できません。QGIS が起動し、"
-                    "QGIS Puppet プラグインが有効になっているか確認してください。"
+                    "QGIS Puppeteer プラグインが有効になっているか確認してください。"
                 ),
                 "details": {
                     "type": type(exc).__name__,
@@ -560,7 +560,7 @@ def build_gateway(
         title=MCP_SERVER_TITLE,
         version=_server_version(),
         website_url=MCP_SERVER_URL,
-        description="Control a running QGIS from Claude via the qgis_puppet plugin.",
+        description="Control a running QGIS from Claude via the QGIS Puppeteer plugin.",
         instructions=(
             "QGIS automation gateway.\n"
             "- Several QGIS processes can be connected: qgis_list_instances lists them, "
@@ -581,7 +581,7 @@ def build_gateway(
             "assigns to `_result`.\n"
             "- A failed call comes back with isError and a JSON body "
             '{"error": {"code", "message", ...}}; code=hub_unreachable means QGIS, or the '
-            "qgis_puppet plugin inside it, is not running yet."
+            "QGIS Puppeteer plugin inside it, is not running yet."
         ),
         lifespan=lifespan or _default_lifespan,
     )
@@ -767,7 +767,7 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
                             "code": "not_ready",
                             "message": (
                                 f"Hub ({gateway.url}) did not start listening within "
-                                f"{timeout_s}s; QGIS, or the qgis_puppet plugin inside it, "
+                                f"{timeout_s}s; QGIS, or the QGIS Puppeteer plugin inside it, "
                                 "is probably not running yet"
                             ),
                             "details": {

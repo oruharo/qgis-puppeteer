@@ -160,7 +160,7 @@ class Worker(QObject):
     ) -> None:
         """Core（Tier 1 `qgis_*`）ハンドラを登録する。
 
-        本パッケージ内部（`qgis_tools.*` → `plugins/qgis_puppet/handlers.py`
+        本パッケージ内部（`qgis_tools.*` → `qgis_plugin/handlers.py`
         経由）専用。外部 Plugin / Test からは `register_handler` を使う。
         """
         self._state.register_core_handler(command, handler, allow_overwrite=allow_overwrite)

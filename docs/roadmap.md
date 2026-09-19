@@ -12,7 +12,7 @@
 初回公開リリース。実装済の主機能は [CHANGELOG.md](../CHANGELOG.md) を参照。
 要約すると以下が揃っています:
 
-- Hub / Worker / MCP gateway / `qgis_puppet` プラグイン
+- Hub / Worker / MCP gateway / QGIS Puppeteer プラグイン（`qgis_puppeteer`）
 - QGIS tools 一式（layer / python executor / screenshot / UI / dialog handler / signal spy / exception recorder）
 - pytest プラグイン: Locator + web-first assertions + 拡張 selector
 - Test environments（ADR-0003 ほぼ全機能 ※ env 並列のみ未実装）

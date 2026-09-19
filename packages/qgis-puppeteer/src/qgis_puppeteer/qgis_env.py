@@ -1,7 +1,7 @@
 """QGIS 環境探索ヘルパ（Qt 非依存）。
 
 QGIS インストールに付随する Python ランチャーや関連パスを発見するための
-ユーティリティを提供する。pytest-qgis-puppeteer / qgis_puppet どちらからでも
+ユーティリティを提供する。pytest-qgis-puppeteer / QGIS プラグイン（qgis_plugin）どちらからでも
 使える "中立" レイヤ。
 
 ## 公開 API

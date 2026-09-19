@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 
 import pytest
-from qgis_puppet import plugin_helpers as ph
+from qgis_puppeteer.qgis_plugin import plugin_helpers as ph
 
 # ==============================================================
 # _is_python_executable
@@ -197,64 +197,20 @@ class TestResolveHubPython:
 
 
 # ==============================================================
-# _resolve_qgis_puppeteer_root
+# パッケージの場所
 # ==============================================================
 
 
-class TestResolveQgisPuppeteerRoot:
-    """import 解決と OSS workspace fallback の両経路を検証する。"""
+class TestPackageRoot:
+    """プラグインフォルダは `qgis_puppeteer` パッケージそのもの。探索はしない。"""
 
-    def test_returns_package_dir_when_import_succeeds(self) -> None:
-        # 通常実行時（uv workspace で qgis_puppeteer が import 可能）。
-        # `__init__.py` の親ディレクトリ = パッケージ実体ディレクトリを返す。
-        import qgis_puppeteer
-
-        resolved = ph._resolve_qgis_puppeteer_root()
-        assert resolved is not None
-        assert resolved == Path(qgis_puppeteer.__file__).resolve().parent
-
-    def test_falls_back_to_workspace_when_import_fails(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # import を強制的に失敗させる。OSS workspace に実体ディレクトリが
-        # ある前提（このテストは qgis-puppeteer リポ内で走る）。
-        import builtins
-
-        real_import = builtins.__import__
-
-        def _fake_import(name: str, *args: object, **kwargs: object) -> object:
-            if name == "qgis_puppeteer" or name.startswith("qgis_puppeteer."):
-                raise ImportError(name)
-            return real_import(name, *args, **kwargs)
-
-        monkeypatch.setattr(builtins, "__import__", _fake_import)
-
-        resolved = ph._resolve_qgis_puppeteer_root()
-        # OSS workspace 配下の `packages/qgis-puppeteer/src/qgis_puppeteer/`
-        assert resolved is not None
-        expected = (
-            ph._REPO_ROOT / "packages" / "qgis-puppeteer" / "src" / "qgis_puppeteer"
-        ).resolve()
-        assert resolved == expected
-
-    def test_returns_none_when_import_fails_and_no_fallback(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        # import 失敗 + fallback も存在しない条件。`_REPO_ROOT` をテンポラリに
-        # 差し替えて fallback を「存在しないパス」へ向ける。
-        import builtins
-
-        real_import = builtins.__import__
-
-        def _fake_import(name: str, *args: object, **kwargs: object) -> object:
-            if name == "qgis_puppeteer" or name.startswith("qgis_puppeteer."):
-                raise ImportError(name)
-            return real_import(name, *args, **kwargs)
-
-        monkeypatch.setattr(builtins, "__import__", _fake_import)
-        monkeypatch.setattr(ph, "_REPO_ROOT", tmp_path)
-
-        assert ph._resolve_qgis_puppeteer_root() is None
+    def test_root_is_the_plugin_folder(self) -> None:
+        root = ph._QGIS_PUPPETEER_ROOT
+        assert root == Path(ph.__file__).resolve().parent.parent
+        # QGIS が読む入口と、Hub の bootstrap が同じフォルダにある
+        assert (root / "metadata.txt").is_file()
+        assert (root / "__init__.py").is_file()
+        assert (root / "_hub_bootstrap.py").is_file()
 
 
 # ==============================================================
@@ -274,25 +230,16 @@ class TestBuildHubSpawnCommand:
 
     def test_bootstrap_path_exists(self) -> None:
         # 実ファイルとして存在していないと subprocess が即死する
-        assert ph._HUB_BOOTSTRAP is not None
         assert ph._HUB_BOOTSTRAP.is_file()
 
     def test_bootstrap_lives_inside_qgis_puppeteer_package(self) -> None:
         # `_hub_bootstrap.py` は qgis_puppeteer パッケージ内に同梱される
-        assert ph._QGIS_PUPPETEER_ROOT is not None
         assert ph._HUB_BOOTSTRAP == ph._QGIS_PUPPETEER_ROOT / "_hub_bootstrap.py"
 
     def test_port_is_converted_to_string(self) -> None:
         cmd = ph._build_hub_spawn_command(Path("py"), 12345)
         assert "12345" in cmd
         assert all(isinstance(x, str) for x in cmd)
-
-    def test_raises_when_bootstrap_unresolved(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # qgis_puppeteer が import できず fallback も無い極端ケース。
-        # 静かに壊れた command を返さず、明示的に RuntimeError を上げる。
-        monkeypatch.setattr(ph, "_HUB_BOOTSTRAP", None)
-        with pytest.raises(RuntimeError, match="qgis_puppeteer is not importable"):
-            ph._build_hub_spawn_command(Path("py"), 9876)
 
 
 # ==============================================================
@@ -420,11 +367,11 @@ class TestDiscoverExtensions:
             called.append("built")
             return {"sample.x": lambda p: None}
 
-        mock_importer["qgis_puppet.puppeteer_api"] = _FakeModule(build_handlers)
+        mock_importer["qgis_puppeteer.puppeteer_api"] = _FakeModule(build_handlers)
 
         register_calls: list[tuple[str, object]] = []
         result = ph.discover_extensions(
-            plugin_names=["qgis_puppet"],
+            plugin_names=["qgis_puppeteer"],
             iface=object(),
             register=lambda cmd, h: register_calls.append((cmd, h)),
         )

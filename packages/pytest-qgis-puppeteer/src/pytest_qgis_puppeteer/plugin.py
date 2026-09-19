@@ -2,7 +2,7 @@
 
 ADR-0002 に従い、pytest session が **Hub subprocess を所有** し、QGIS を
 `qgis_bin` で指定された実行ファイル経由で spawn する構成。QGIS 内の
-`qgis_puppet` プラグインが `QPUPPETEER_HUB_PORT` env を見て外部所有者モードに
+QGIS Puppeteer プラグインが `QPUPPETEER_HUB_PORT` env を見て外部所有者モードに
 入るので、自前で Hub を spawn しない（ADR-0001 §6）。
 
 ## 設定の優先順位
@@ -1356,7 +1356,7 @@ def qgis_process(
 ) -> Iterator[None]:
     """`qgis_bin` で指定された QGIS 実行ファイルを spawn する。
 
-    QGIS 内の `qgis_puppet` プラグインが `QPUPPETEER_HUB_PORT` env を見て
+    QGIS 内の QGIS Puppeteer プラグインが `QPUPPETEER_HUB_PORT` env を見て
     外部所有者モードに入り、自前で Hub を spawn しない。teardown では Hub に
     register された Worker の pid を `list_instances` で拾って kill。
 

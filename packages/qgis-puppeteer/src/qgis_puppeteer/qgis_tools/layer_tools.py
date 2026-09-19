@@ -1,7 +1,7 @@
 """QGIS レイヤー操作ツール群。
 
 `QgsProject` / `QgsVectorLayer` に対する問い合わせ・選択・属性取得を
-`qgis_puppet` の handler として公開する。戻り値はプロトコル層
+QGIS プラグインの handler として公開する。戻り値はプロトコル層
 (`_coerce_leaf`) が QVariant / QDate 等を JSON 化直前に coerce する。
 """
 
