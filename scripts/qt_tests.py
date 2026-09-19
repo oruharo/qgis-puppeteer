@@ -14,7 +14,9 @@ usage (repo root):
 
 環境変数 QGIS_ROOT でインストール先を上書きできる（既定は Program Files 配下の
 最新 "QGIS 3.*"）。pytest 等は初回に QGIS の pip で ``.qgis-site/`` に入れる
-（gitignore 済み）。
+（gitignore 済み）。websockets もここに入れる: テストのクライアント側
+（AutomationClient）が使う。QGIS の Python 自体には入っていない前提で、
+プラグイン（Worker / Hub）は websockets 無しで動く。
 
 CI（Linux）には PyQt5 の wheel が入るので同じテストが uv 経由で走る。
 Windows でこのスクリプトを回すのは、push 前に「実際の Qt で」確認するため。
@@ -29,6 +31,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 SITE = REPO / ".qgis-site"
+# .qgis-site に入れるもの（import 名）。欠けていたら入れ直す。
+SITE_PACKAGES = ("pytest", "pytest_asyncio", "websockets")
 QT_TEST_FILES = [
     "packages/qgis-puppeteer/tests/test_worker_integration.py",
     "packages/qgis-puppeteer/tests/test_integration_hub_client.py",
@@ -63,8 +67,8 @@ def _launcher(root: Path) -> Path:
 def _outer() -> int:
     """通常の Python から呼ばれた側: QGIS の launcher で自分自身を再実行する。"""
     launcher = _launcher(_find_qgis_root())
-    if not (SITE / "pytest").exists():
-        print(f"[qt_tests] installing pytest into {SITE} with {launcher.name}")
+    if not all((SITE / name / "__init__.py").exists() for name in SITE_PACKAGES):
+        print(f"[qt_tests] installing {', '.join(SITE_PACKAGES)} into {SITE} with {launcher.name}")
         subprocess.run(
             [
                 str(launcher),
@@ -72,10 +76,12 @@ def _outer() -> int:
                 "pip",
                 "install",
                 "--quiet",
+                "--upgrade",
                 "--target",
                 str(SITE),
                 "pytest",
                 "pytest-asyncio",
+                "websockets",
             ],
             check=True,
         )

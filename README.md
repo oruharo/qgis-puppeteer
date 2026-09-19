@@ -27,7 +27,7 @@ See [docs/architecture/0001-qgis-puppeteer-architecture.md](docs/architecture/00
 |---|---|---|---|
 | [qgis-puppeteer](packages/qgis-puppeteer/) | PyPI | Core: Hub / Worker / Client / MCP gateway | Apache-2.0 |
 | [pytest-qgis-puppeteer](packages/pytest-qgis-puppeteer/) | PyPI | Pytest plugin for E2E testing QGIS | Apache-2.0 |
-| [qgis_puppet](plugins/qgis_puppet/) | QGIS Plugin Repo | QGIS plugin (Worker) | GPL-3.0-or-later |
+| [QGIS Puppeteer plugin](plugins/qgis_puppeteer/) | QGIS Plugin Repo | QGIS plugin (Worker). The folder is self-contained: it carries a copy of the `qgis_puppeteer` library | GPL-3.0-or-later |
 
 ## Quick start
 
@@ -49,9 +49,13 @@ pip install "qgis-puppeteer[mcp]"
 The `[mcp]` extra installs the MCP SDK the gateway imports; without it
 `python -m qgis_puppeteer.gateways.mcp` fails with an ImportError.
 
-Then install the `qgis_puppet` plugin into QGIS by copying `plugins/qgis_puppet/`
-into your QGIS plugin directory (the QGIS Plugin Repository entry will be added
-once the project is tagged).
+Then install the QGIS Puppeteer plugin: copy `plugins/qgis_puppeteer/`
+into your QGIS plugin directory, keeping the folder name `qgis_puppeteer`, and enable
+"QGIS Puppeteer" in the Plugin Manager (the QGIS Plugin Repository entry will be added
+once the project is tagged). The plugin folder contains the whole `qgis_puppeteer` library, so
+QGIS needs nothing else installed — do not also `pip install qgis-puppeteer` into QGIS's
+Python: if anything imports that copy before QGIS loads the plugin, it hides the plugin
+(the plugin then refuses to load and says where the other copy is).
 
 In `claude_desktop_config.json`:
 ```json
@@ -116,7 +120,8 @@ Forward-looking items are tracked in the ADRs:
 ## License
 
 - Core (`qgis-puppeteer`) and pytest plugin (`pytest-qgis-puppeteer`): **Apache-2.0**
-- QGIS plugin (`qgis_puppet`): **GPL-3.0-or-later**
+- QGIS plugin (`plugins/qgis_puppeteer/`): **GPL-3.0-or-later**. Its own code is
+  `qgis_plugin/`; the rest of the folder is a copy of the Apache-2.0 core
 
 See individual package `LICENSE` files for details.
 

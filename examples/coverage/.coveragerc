@@ -10,7 +10,7 @@
 # `coverage combine`.
 parallel = true
 
-# The qgis_puppet Worker runs its asyncio loop in a background thread, so
+# The QGIS Puppeteer Worker runs its asyncio loop in a background thread, so
 # declare thread concurrency to track lines executed off the main thread.
 concurrency = thread
 

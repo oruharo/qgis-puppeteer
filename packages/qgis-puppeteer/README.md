@@ -22,7 +22,11 @@ pip install qgis-puppeteer
 
 You also need:
 - QGIS 3.34+
-- The `qgis_puppet` plugin (install via QGIS Plugin Manager, or download from [QGIS Plugin Repo](https://plugins.qgis.org/))
+- The QGIS Puppeteer plugin (install via QGIS Plugin Manager, or download from [QGIS Plugin Repo](https://plugins.qgis.org/)).
+  The plugin folder (`plugins/qgis_puppeteer/` in the repository) carries a copy of this package
+  plus its own GPL `qgis_plugin/` part, so QGIS needs nothing
+  from pip. Do not `pip install qgis-puppeteer` into QGIS's own Python: that copy would hide
+  the plugin folder
 
 ## Usage with Claude Desktop
 
@@ -82,7 +86,7 @@ For full schemas and examples, see [Architecture document](https://github.com/or
      ↓ WebSocket
 [Hub] ← single port (default 9876, 127.0.0.1)
      ↓ WebSocket (reverse-connect)
-[QGIS + qgis_puppet plugin]
+[QGIS + QGIS Puppeteer plugin]
 ```
 
 - The Hub spawns automatically when QGIS starts; clients connect to it
@@ -115,7 +119,7 @@ def build_handlers(iface):
     }
 ```
 
-`qgis_puppet` discovers and registers it automatically.
+The QGIS Puppeteer plugin discovers and registers it automatically.
 
 ## License
 

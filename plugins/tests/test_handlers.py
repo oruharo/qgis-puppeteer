@@ -144,10 +144,8 @@ def fake_tools() -> dict[str, Any]:
         sys.modules.pop(mod_name, None)
 
 
-# build_handlers は実モジュールから import するため、plugins ディレクトリが
-# sys.path に入っている必要がある（conftest.py で対応）。
 def _import_build_handlers() -> Any:
-    from qgis_puppet.handlers import build_handlers  # type: ignore
+    from qgis_puppeteer.qgis_plugin.handlers import build_handlers
 
     return build_handlers
 

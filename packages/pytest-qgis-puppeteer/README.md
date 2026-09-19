@@ -23,7 +23,7 @@ Pytest plugin for E2E testing QGIS via [qgis-puppeteer](https://github.com/oruha
 pip install pytest-qgis-puppeteer
 ```
 
-You also need the QGIS-side `qgis_puppet` plugin and `qgis-puppeteer` core (auto-installed as dependency).
+You also need the QGIS Puppeteer plugin inside QGIS. `qgis-puppeteer` core is installed as a dependency, in your test environment (not in QGIS).
 
 ## Configuration
 

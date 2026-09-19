@@ -38,16 +38,16 @@ qgis-puppeteer は QGIS を **WebSocket 経由で外部から操作する** 基�
                 ↓ WebSocket
         [qgis-puppeteer Hub]   ← 単一ポート、ルーティング
                 ↓ WebSocket (Worker dial out)
-        [QGIS + qgis_puppet plugin]
+        [QGIS + QGIS Puppeteer plugin]
 ```
 
-3 つのパッケージで構成:
+3 つの配布物で構成:
 
-| パッケージ | 役割 | ライセンス |
+| 配布物 | 役割 | ライセンス |
 |---|---|---|
-| `qgis-puppeteer` | コア（Hub / Worker / AutomationClient / MCP gateway） | Apache-2.0 |
-| `pytest-qgis-puppeteer` | pytest 用ヘルパ（Locator / fixture / 診断バンドル） | Apache-2.0 |
-| `qgis_puppet` (QGIS plugin) | QGIS 内で動く Worker。プラグインとしてインストール | GPL-3.0-or-later |
+| `qgis-puppeteer`（PyPI） | コア（Hub / Worker / AutomationClient / MCP gateway） | Apache-2.0 |
+| `pytest-qgis-puppeteer`（PyPI） | pytest 用ヘルパ（Locator / fixture / 診断バンドル） | Apache-2.0 |
+| QGIS Puppeteer プラグイン（フォルダ名 `qgis_puppeteer`） | QGIS 内で動く Worker。リポジトリの `plugins/qgis_puppeteer/`。コアの写しを含むので単体で動く。プラグイン固有の部分は `qgis_plugin/` | GPL-3.0-or-later（写しの部分は Apache-2.0） |
 
 ペルソナ別の入り口:
 
@@ -61,16 +61,28 @@ qgis-puppeteer は QGIS を **WebSocket 経由で外部から操作する** 基�
 
 ### 共通: QGIS plugin の配置
 
-`qgis_puppet` プラグインを QGIS に組み込む（必須）:
+QGIS Puppeteer プラグインを QGIS に組み込む（必須）:
 
-1. `plugins/qgis_puppet/` 配下を QGIS のプラグインディレクトリにコピー
-   （Windows 既定: `%APPDATA%\QGIS\QGIS3\profiles\default\python\plugins\`）
-2. QGIS を起動し、Plugin Manager で `QGIS Puppet` を有効化
-3. QGIS の OSGeo4W Shell から:
+1. `plugins/qgis_puppeteer/` を、フォルダ名 `qgis_puppeteer`
+   のまま QGIS のプラグインディレクトリにコピーする
+   （Windows 既定: `%APPDATA%\QGIS\QGIS3\profiles\default\python\plugins\`）。
+   チェックアウトから試すならコピーではなくジャンクションでよい:
    ```bat
-   python-qgis-ltr.bat -m pip install qgis-puppeteer
+   mklink /J "%APPDATA%\QGIS\QGIS3\profiles\default\python\plugins\qgis_puppeteer" "<repo>\plugins\qgis_puppeteer"
    ```
-   （`qgis_puppet` プラグインが import 時に `qgis_puppeteer` を要求するため）
+2. QGIS を起動し、Plugin Manager で `QGIS Puppeteer` を有効化
+
+プラグインのフォルダが `qgis_puppeteer` パッケージ一式を含むので、QGIS の
+Python に追加で入れるものは無い（websockets も要らない。websockets を使うのは
+AutomationClient と MCP gateway だけで、どちらも QGIS の外で動く）。
+
+**QGIS の Python に `pip install qgis-puppeteer` しないこと。** QGIS は
+プラグインフォルダを sys.path の先頭に足してから `import qgis_puppeteer` するので、
+普通はプラグインが読まれる。ただし、それより前に別の `qgis_puppeteer`（QGIS の
+site-packages、user site、ホストアプリの vendor 等にあるもの）が import されて
+いると — `PYQGIS_STARTUP` のスクリプトや、先に読まれる別プラグインが import
+した場合 — Python はそちらを使い、プラグインは隠れる。その場合プラグインは
+読み込みを止め、邪魔をしているコピーの場所をエラーに出す。
 
 ### Claude Desktop ユーザー向け
 
@@ -107,8 +119,8 @@ pip install "pytest-qgis-puppeteer @ git+https://github.com/oruharo/qgis-puppete
 | プロセス | コードの出どころ | 新しくなるのは |
 |---|---|---|
 | MCP gateway | `uvx --from ...@dev`（MCP クライアントが起動） | **MCP クライアントのセッションを張り直したとき**。セッション開始時に取得したものに固定される |
-| Hub | `qgis_puppet` プラグインが auto-spawn（ワークツリー / vendor 配下） | Hub プロセスを kill したとき。Worker が数秒で新しい Hub を立て直して再接続する。MCP クライアントが繋がっている間は idle 終了しないので、放っておくと古いまま |
-| Worker（プラグイン） | `QGIS_PLUGINPATH` / vendor 配下 | QGIS を起動し直したとき |
+| Hub | プラグインが auto-spawn。プラグインと同じ `qgis_puppeteer` のコピーで動く | Hub プロセスを kill したとき。Worker が数秒で新しい Hub を立て直して再接続する。MCP クライアントが繋がっている間は idle 終了しないので、放っておくと古いまま |
+| Worker（プラグイン） | QGIS のプラグインフォルダ（`QGIS_PLUGINPATH` 等）の `qgis_puppeteer` | QGIS を起動し直したとき |
 
 手順:
 
@@ -117,7 +129,7 @@ pip install "pytest-qgis-puppeteer @ git+https://github.com/oruharo/qgis-puppete
    Hub を立て直して再接続する。**instance_id は変わる**（grace は Hub の
    メモリ上の状態なので、Hub と一緒に消える。引き継がれるのは Worker 側だけが
    切れて同じ Hub に戻る場合）。`launch_token` / label のセレクタと sticky は
-   そのまま効く。プラグイン側（`plugins/qgis_puppet`）も変えたなら QGIS を
+   そのまま効く。プラグイン側（`qgis_plugin/`、Worker）も変えたなら QGIS を
    起動し直す
 3. **MCP クライアントのセッションを張り直す**（Claude Desktop なら再起動、
    Claude Code なら `/mcp` で reconnect か新セッション）
@@ -193,7 +205,7 @@ Windows: `%APPDATA%\Claude\claude_desktop_config.json`
 
 ### 2. QGIS を起動
 
-QGIS が起動すると `qgis_puppet` プラグインが自動的に Hub を spawn し、
+QGIS が起動すると QGIS Puppeteer プラグインが自動的に Hub を spawn し、
 Worker として登録される。Hub のポートは既定 `9876`（127.0.0.1 のみ）。
 
 ### 3. Claude Desktop を起動して試す
@@ -549,7 +561,7 @@ Claude や pytest を介さず、自動化スクリプトから直接 QGIS を�
 
 ### 1. QGIS を起動
 
-`qgis_puppet` プラグインを有効化した QGIS を起動しておく。Hub は自動 spawn。
+QGIS Puppeteer プラグインを有効化した QGIS を起動しておく。Hub は自動 spawn。
 
 ### 2. スクリプト
 
@@ -1044,7 +1056,7 @@ E2E テストは **2 プロセス**で動く:
   基本 OK（強制 kill は欠落する）。
 - **import-time フィデリティ**: profile/`.pth` フックはプラグイン load より**早い**ので
   モジュールトップレベル行も拾える。プラグイン load 時に起動する方式だとここが漏れる
-  ため、この仕掛けは `qgis_puppet` プラグインには**あえて組み込んでいない**（静かな
+  ため、この仕掛けは QGIS Puppeteer プラグインには**あえて組み込んでいない**（静かな
   過小報告を避ける）。
 - **`source` / `[paths]`**: 対象は自分の package を指定（qgis-puppeteer 自体ではなく）。
   QGIS 内とランナーでパスが違うなら `[paths]` で alias して combine をマージ。
@@ -1319,7 +1331,7 @@ await client.call("qgis_clear_session_permissions")
 | `QPUPPETEER_WORKER_TAKEOVER` | unset | `1` で同時同 label 衝突時に既存 active を奪取（ADR-0005 D4。連続再起動の開発ループ向け） |
 | `QPUPPETEER_WORKER_LABEL_SUFFIX` | unset | `1` で同時同 label 衝突時に `A (2)` 等へ自動 rename |
 | `QPUPPETEER_HUB_PYTHON` | — | Hub spawn 用 Python launcher を明示指定（自動検出失敗時） |
-| `QPUPPETEER_HUB_LOG_FILE` | `<TEMP>/qgis_puppet.spawn.log` | Hub subprocess の stdout/stderr 出力先 |
+| `QPUPPETEER_HUB_LOG_FILE` | `<TEMP>/qgis_puppeteer.spawn.log` | Hub subprocess の stdout/stderr 出力先 |
 | `QPUPPETEER_HUB_LOCK_PATH` | OS 一時ディレクトリ | Hub auto-spawn 用ロックファイル（port 別） |
 | `QPUPPETEER_HUB_EXTRA_SYSPATH` | — | Hub bootstrap が `sys.path` に prepend する追加 path（`PYTHONPATH` の代替、`:` / `;` 区切り） |
 
@@ -1368,7 +1380,7 @@ qgis も無いので、`test_worker_integration` / `test_integration_hub_client`
 `test_hub_spawn_integration` / `test_worker_liveness_integration` /
 `test_ui_tools_snapshot` は skip される（`5 skipped` の正体）。ハートビート・
 再接続・Hub の立て直し・`update_info` のような「現場で壊れた」挙動は全部この層に
-あるので、`hub.py` / `worker.py` / `plugins/qgis_puppet` を触ったら push 前に
+あるので、`hub.py` / `worker.py` / `plugins/qgis_puppeteer/qgis_plugin/` を触ったら push 前に
 QGIS 同梱の Python で回す:
 
 ```bash
@@ -1490,11 +1502,11 @@ client は起動時点で identity を取得できず当て推量に頼ってい
 
 ### Hub spawn 失敗
 
-**症状**: QGIS 起動時に「QGIS Puppet: Hub startup failed」のメッセージバー
+**症状**: QGIS 起動時に「QGIS Puppeteer: Hub startup failed」のメッセージバー
 
 **原因の切り分け**:
 
-1. `<TEMP>/qgis_puppet.spawn.log` を確認（Python 起動前の fatal がここに出る）
+1. `<TEMP>/qgis_puppeteer.spawn.log` を確認（Python 起動前の fatal がここに出る）
 2. `<TEMP>/qgis_puppeteer/hub.log` を確認（Python 側の logger 出力）
 3. ポート衝突: 既に何かが `127.0.0.1:9876` を使ってないか
 4. `QPUPPETEER_HUB_PYTHON` 未設定で `python-qgis-ltr.bat` が見つからない

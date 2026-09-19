@@ -17,12 +17,36 @@ made via issue discussion before code is written.
 |---|---|---|
 | `packages/qgis-puppeteer/` | PyPI (`qgis-puppeteer`) | Apache-2.0 |
 | `packages/pytest-qgis-puppeteer/` | PyPI (`pytest-qgis-puppeteer`) | Apache-2.0 |
-| `plugins/qgis_puppet/` | QGIS Plugin Repository | GPL-3.0-or-later |
+| `plugins/qgis_puppeteer/` | QGIS Plugin Repository. The ready-to-copy plugin folder: `qgis_plugin/`, `metadata.txt`, `icon.png`, `LICENSE` are its own; everything else is a generated copy of the library | GPL-3.0-or-later (own files); the copied library files stay Apache-2.0 |
+| `plugins/tests/` | — (tests for the plugin) | GPL-3.0-or-later |
 | `docs/architecture/` | — | Project docs (ADRs) |
 | `examples/` | — | Sample scripts and tests |
 
-The two PyPI packages and the QGIS plugin share the same git repository
-but have separate version numbers, classifiers, and license headers.
+The two PyPI packages and the QGIS plugin share the same git repository.
+
+QGIS imports a plugin by its folder name, so the plugin folder has to *be*
+the `qgis_puppeteer` package. `plugins/qgis_puppeteer/` is therefore committed
+as a complete, ready-to-copy folder: the plugin's own files (`qgis_plugin/`,
+`metadata.txt`, `icon.png`, `LICENSE`) plus a copy of the library from
+`packages/qgis-puppeteer/src/qgis_puppeteer/`. The library under `packages/`
+is the source of truth — **never edit the copy by hand**. After changing the
+library, refresh the copy and commit both together:
+
+```bash
+uv run python scripts/sync_plugin.py          # refresh plugins/qgis_puppeteer/
+uv run python scripts/sync_plugin.py --check  # what CI runs
+```
+
+The library must not contain `qgis_plugin/` or `metadata.txt` (the sync script
+refuses, and CI checks the wheel): their absence is how `classFactory` notices
+that QGIS was handed a pip-installed copy instead of the plugin.
+
+To try the plugin from a checkout, link the folder into a QGIS profile
+instead of copying it (Windows, from the repo root):
+
+```bat
+mklink /J "%APPDATA%\QGIS\QGIS3\profiles\default\python\plugins\qgis_puppeteer" "plugins\qgis_puppeteer"
+```
 
 ## Development setup
 
@@ -35,14 +59,14 @@ cd qgis-puppeteer
 uv sync --all-extras --dev
 ```
 
-Run tests per package (the three suites are kept separate so failure
-attribution is clear; running all three at once from the workspace root
+Run tests per package (the suites are kept separate so failure
+attribution is clear; running them at once from the workspace root
 hits a `tests/__init__.py` module-name collision):
 
 ```bash
 uv run pytest packages/qgis-puppeteer/tests
 uv run pytest packages/pytest-qgis-puppeteer/tests
-uv run pytest plugins/qgis_puppet/tests
+uv run pytest plugins/tests
 ```
 
 All tests are mocked — you do **not** need a running QGIS to run the test
@@ -113,7 +137,7 @@ The maintainer cuts releases. Process:
 
 1. Bump version in all three places: `packages/qgis-puppeteer/pyproject.toml`,
    `packages/pytest-qgis-puppeteer/pyproject.toml`,
-   `plugins/qgis_puppet/metadata.txt`.
+   `plugins/qgis_puppeteer/metadata.txt`.
 2. Move `[Unreleased]` notes under a new `[X.Y.Z]` section in `CHANGELOG.md`.
 3. Tag `vX.Y.Z` on `main` after merging from `dev`.
 4. PyPI publish workflow (TBD) runs on tag.
@@ -125,7 +149,10 @@ license of the package you are touching:
 
 - `packages/qgis-puppeteer/` and `packages/pytest-qgis-puppeteer/`:
   Apache-2.0
-- `plugins/qgis_puppet/`: GPL-3.0-or-later
+- `plugins/qgis_puppeteer/qgis_plugin/`, `plugins/qgis_puppeteer/metadata.txt`
+  / `icon.png`, and `plugins/tests/`: GPL-3.0-or-later (the rest of
+  `plugins/qgis_puppeteer/` is a copy of the Apache-2.0 library; change it
+  under `packages/`)
 
 This dual-license setup exists because the QGIS plugin links against
 QGIS at runtime (which is GPL); the standalone Python packages do not.

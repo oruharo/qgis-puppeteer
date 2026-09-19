@@ -135,6 +135,34 @@ test_e2e/helpers/
     automation_client.py                 ← AutomationClient の pytest 向けラッパ（ADR-0002）
 ```
 
+> **2026-09-19 注（実装済み）**: QGIS プラグインは `plugins/qgis_puppet/` から
+> `plugins/qgis_puppeteer/` になった（表示名 "QGIS Puppeteer"）。QGIS はフォルダ名を
+> import するので、フォルダは `qgis_puppeteer` パッケージそのもの:
+>
+> ```
+> plugins/qgis_puppeteer/          ← そのままコピーできる QGIS のプラグインフォルダ
+>     metadata.txt / icon.png / LICENSE   ← プラグイン側が正（GPL-3.0-or-later）
+>     qgis_plugin/     ← 同上。旧 plugin.py / plugin_helpers.py / handlers.py
+>     __init__.py      ← 以下はライブラリの写し（scripts/sync_plugin.py が作り、CI が
+>     hub.py / worker.py / ...    ずれを検査）。__init__.py に classFactory がある
+> packages/qgis-puppeteer/src/qgis_puppeteer/   ← ライブラリの正（qgis_plugin/ は無い）
+> ```
+>
+> 写しを commit しておくのは、`plugins/` を見ればプラグインがあり、フォルダを
+> コピーするだけで入る、という分かりやすさのため（ビルド手順を要求しない）。
+>
+> 理由: 旧構成ではプラグインが別配布の `qgis_puppeteer` を QGIS の Python に
+> 要求し、その解決に sys.path の探索とフォールバックを持っていた。ホストアプリは
+> 「プラグインの配置」と「ライブラリの pip install」の 2 つを揃える必要があり、
+> 版ずれも起きえた。プラグインフォルダ = パッケージにすると、QGIS がプラグイン
+> フォルダの親を sys.path に入れるだけで解決し、Hub も同じコピーで動く。
+> QGIS はプラグインフォルダを sys.path の先頭に足してから import するので、
+> vendor 等に別の `qgis_puppeteer` があっても普通はプラグインが勝つ。ただし
+> プラグインの読み込みより前に誰か（`PYQGIS_STARTUP`、先に読まれるプラグイン）が
+> そのコピーを import していると、そちらが使われる。`classFactory` は
+> `qgis_plugin/` の有無でそれを検出し、場所を名指しして止まる（実 QGIS で確認）。
+> 下の discover 例の `if name == "qgis_puppet"` も `"qgis_puppeteer"` になった。
+
 ドメイン拡張時のレイアウト想定（§12.4 パターン A に沿う）:
 
 ```

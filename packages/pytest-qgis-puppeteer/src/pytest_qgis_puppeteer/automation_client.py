@@ -961,7 +961,7 @@ class E2EAutomationClient:
     ) -> dict[str, Any]:
         """プロジェクトが読み込まれて layer が取得可能になるまで待つ。
 
-        QGIS を `--project <path>` で起動した場合、qgis_puppet の register
+        QGIS を `--project <path>` で起動した場合、QGIS Puppeteer プラグインの register
         完了（= `wait_for_worker` が返ったタイミング）は QGIS メインウィンドウ
         表示直後で、プロジェクト読み込みは async で後から走る。そのため
         register 直後に `qgis_list_layers` を呼ぶと空で返ることがある（smoke
