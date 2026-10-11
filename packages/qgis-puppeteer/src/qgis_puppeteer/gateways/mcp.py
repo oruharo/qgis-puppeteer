@@ -35,6 +35,7 @@ import logging.handlers
 import os
 import sys
 import tempfile
+import time
 import traceback
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -50,6 +51,7 @@ from qgis_puppeteer.client import (
     NotConnectedError,
     RequestError,
 )
+from qgis_puppeteer.gateways.recording import ENV_RECORD, McpRecorder
 from qgis_puppeteer.hub_state import select_by_selector
 from qgis_puppeteer.protocol import Role
 
@@ -143,6 +145,11 @@ _MUTATE_WIDGET_VALUE = ToolAnnotations(
 )
 """値の設定自体は冪等だが、signal 経由で任意の処理が走りうる。"""
 
+_RECORDING = ToolAnnotations(
+    read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False
+)
+"""gateway 側の操作記録を始める・区切る・止める。QGIS には触らない。"""
+
 _MUTATE_STANDING_RULE = ToolAnnotations(
     read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False
 )
@@ -220,12 +227,15 @@ class GatewayContext:
       **selector**（ADR-0005 D3: instance_id を凍結せず、label 等の安定キーを
       保持して dispatch ごとに Hub が再解決する。worker 再起動を跨いで
       「現在 live なそのロール」へ追従する）。`instance` 引数省略時の既定値。
+    - `recorder` はツール呼び出しの操作記録（#8、`gateways.recording`）。
+      `qgis_record_start` か `QPUPPETEER_MCP_RECORD=1` で始まる。
     """
 
     client: AutomationClient | None = None
     url: str | None = None
     origin: str = DEFAULT_ORIGIN
     current_instance: str | None = field(default=None)
+    recorder: McpRecorder = field(default_factory=McpRecorder)
     _owns_client: bool = field(default=False, init=False)
 
     async def get_client(self) -> AutomationClient:
@@ -282,9 +292,18 @@ async def _default_lifespan(
     url = os.environ.get(ENV_HUB_URL, DEFAULT_HUB_URL)
     origin = os.environ.get(ENV_ORIGIN, DEFAULT_ORIGIN)
     ctx = GatewayContext(url=url, origin=origin)
+    if os.environ.get(ENV_RECORD) == "1":
+        # 記録先が書けなくても gateway は立てる（記録無しで動く方がまし）
+        try:
+            ctx.recorder.start("session")
+        except OSError:
+            logger.warning(
+                "Could not start the MCP recording; continuing without it", exc_info=True
+            )
     try:
         yield ctx
     finally:
+        ctx.recorder.stop()
         await ctx.close()
 
 
@@ -480,22 +499,57 @@ def _internal_error_result(exc: BaseException) -> CallToolResult:
 
 
 def _guard_tool(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
-    """tool 関数の最後の砦。
+    """tool 関数の最後の砦。操作記録もここで取る。
 
     `_with_client` の外（引数解決や lifespan 取得）で例外が出ると、MCP SDK は
     それを「クラッシュ」として本文の無い ``Error executing tool <name>`` にし、
     型もメッセージも呼び出し側には渡さない。tool 本体をここで包んで、どこで
     出た例外でも `gateway_internal_error` の JSON に落とす。
+
+    全ツールがここを通るので、操作記録（#8）もここで 1 か所で取る。
+    `qgis_list_instances` のように Worker を呼ばないツールも漏れない。
     """
+    name = fn.__name__
 
     @functools.wraps(fn)
     async def guarded(*args: Any, **kwargs: Any) -> Any:
+        started = time.perf_counter()
         try:
-            return await fn(*args, **kwargs)
+            result = await fn(*args, **kwargs)
         except Exception as e:  # noqa: BLE001 - 最後の砦
-            return _internal_error_result(e)
+            result = _internal_error_result(e)
+        _record_call(name, args, kwargs, result, (time.perf_counter() - started) * 1000.0)
+        return result
 
     return guarded
+
+
+def _record_call(
+    name: str, args: tuple[Any, ...], kwargs: dict[str, Any], result: Any, duration_ms: float
+) -> None:
+    """操作記録に 1 行足す。記録していなければ何もしない。記録の失敗は握る。"""
+    if name.startswith("qgis_record_"):
+        return
+    ctx = next((v for v in (*args, *kwargs.values()) if isinstance(v, Context)), None)
+    if ctx is None:
+        return
+    try:
+        gateway: GatewayContext = ctx.request_context.lifespan_context
+        recorder = gateway.recorder
+        if not recorder.active:
+            return
+        params = {k: v for k, v in kwargs.items() if not isinstance(v, Context)}
+        explicit = params.get("instance")
+        recorder.record(
+            command=name,
+            params=params,
+            result=result,
+            is_error=bool(getattr(result, "is_error", False)),
+            instance=explicit if isinstance(explicit, str) else gateway.current_instance,
+            duration_ms=duration_ms,
+        )
+    except Exception:  # noqa: BLE001 - 記録の失敗でツールの結果を変えない
+        logger.exception("Could not record the MCP call %s", name)
 
 
 def _gateway_log_path() -> Path:
@@ -621,6 +675,9 @@ def build_gateway(
             "- UI tools take a selector dict; build it from qgis_snapshot_ui output.\n"
             "- qgis_execute_python runs code inside QGIS and returns whatever that code "
             "assigns to `_result`.\n"
+            "- To keep a record of an exploration (to turn it into a pytest later), call "
+            "qgis_record_start, mark phases with qgis_record_step, and qgis_record_stop; "
+            "the result says where the JSONL file is.\n"
             "- Failures that never reach the screen: qgis_get_recent_exceptions (uncaught "
             "Python exceptions) and qgis_get_recent_messages (the QGIS message log, "
             "including message bar text; min_level='critical' for errors). Pass the "
@@ -1220,6 +1277,54 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
     ) -> str | CallToolResult:
         """登録済みのダイアログ自動処理をすべて解除する（teardown 用）。"""
         return await _call(ctx, "qgis_clear_dialog_handlers", {}, instance=instance)
+
+    # ------------------------------------------------------------
+    # 操作記録（#8）
+    # ------------------------------------------------------------
+
+    @mcp.tool(title="操作の記録を始める", annotations=_RECORDING, structured_output=False)
+    async def qgis_record_start(
+        ctx: Context,
+        name: Annotated[
+            str,
+            Field(
+                description=(
+                    "記録の名前（ファイル名に入る。英数・'-'・'_' 以外は '_' になる）。"
+                    "保存先はこちらでは選べない。"
+                )
+            ),
+        ],
+    ) -> str | CallToolResult:
+        """これ以降のツール呼び出しを JSONL に記録し始める。
+
+        探索した手順を pytest の E2E テストに書き起こすときの元資料にする。形式は
+        pytest の診断バンドルの actions.jsonl と同じ（command / params / result /
+        error / instance / duration_ms / step_path）。結果の path が保存先。
+        記録中に呼ぶと、前の記録を閉じて新しく始める。
+        """
+        gateway: GatewayContext = ctx.request_context.lifespan_context
+        try:
+            return _format_result(gateway.recorder.start(name))
+        except OSError as e:
+            return _error_result({"error": {"code": "record_failed", "message": str(e)}})
+
+    @mcp.tool(title="記録に区切りを付ける", annotations=_RECORDING, structured_output=False)
+    async def qgis_record_step(
+        ctx: Context,
+        name: Annotated[
+            str,
+            Field(description="これ以降の記録に付けるステップ名（step_path）。空文字で解除。"),
+        ],
+    ) -> str | CallToolResult:
+        """これ以降の記録をステップ name に属させる（例: 'レイヤを開く'）。"""
+        gateway: GatewayContext = ctx.request_context.lifespan_context
+        return _format_result(gateway.recorder.step(name))
+
+    @mcp.tool(title="操作の記録を止める", annotations=_RECORDING, structured_output=False)
+    async def qgis_record_stop(ctx: Context) -> str | CallToolResult:
+        """記録を止め、保存先の path と記録した件数（actions）を返す。"""
+        gateway: GatewayContext = ctx.request_context.lifespan_context
+        return _format_result(gateway.recorder.stop())
 
     # ------------------------------------------------------------
     # 操作の裏で起きたこと（未捕捉例外・QgsMessageLog）

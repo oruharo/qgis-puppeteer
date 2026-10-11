@@ -42,62 +42,20 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+# 1 行の形と直列化は MCP gateway の操作記録と共有する（qgis_puppeteer.action_log）
+from qgis_puppeteer.action_log import ActionRecord
+from qgis_puppeteer.action_log import format_error as _format_error
+from qgis_puppeteer.action_log import now_iso as _now_iso
+from qgis_puppeteer.action_log import safe_jsonify as _safe_jsonify
 
 logger = logging.getLogger("pytest_qgis_puppeteer._action_recorder")
 
 # 既定の max_actions。1 テストの想定 actions は 50〜200 程度なので、5000 あれば
 # step 系 / poll 系（wait_for_*）込みでもまず溢れない。溢れた場合は drop-oldest。
 DEFAULT_MAX_ACTIONS = 5000
-
-
-@dataclass(frozen=True)
-class ActionRecord:
-    """1 つの action 記録（`actions.jsonl` の 1 行）。
-
-    Schema version 2（ADR-0002 §13.x、Phase B5a + B5b）:
-
-    - ``ts``: ISO-8601 timestamp（秒精度 + microsecond）
-    - ``duration_ms``: call の所要時間（ms、負値はあり得ない）
-    - ``command``: Worker handler 名（``qgis_*``）
-    - ``params``: 呼び出しパラメータ（serialise 不能は ``<unrepresentable>``）
-    - ``result``: 成功時の戻り値（同上）
-    - ``error``: 失敗時の ``{"type", "message"}``、成功時は None
-    - ``instance``: routing 先 instance_id、Hub 既定なら None
-    - ``step_path``: ``step()`` context のネストを表す list of str
-    - ``screenshot_path``: action 後の screenshot ファイルパス（B5b、未設定なら None）
-    - ``schema_version``: 互換性追跡用（B5a=1 / B5b=2）
-
-    Schema 2 は schema 1 に ``screenshot_path`` を追加しただけの非破壊変更。
-    schema 1 reader は未知フィールドを無視すれば 2 を読める。
-    """
-
-    ts: str
-    duration_ms: float
-    command: str
-    params: Any
-    result: Any
-    error: dict[str, str] | None
-    instance: str | None
-    step_path: tuple[str, ...]
-    screenshot_path: str | None = None
-    schema_version: int = 2
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "schema_version": self.schema_version,
-            "ts": self.ts,
-            "duration_ms": self.duration_ms,
-            "command": self.command,
-            "params": self.params,
-            "result": self.result,
-            "error": self.error,
-            "instance": self.instance,
-            "step_path": list(self.step_path),
-            "screenshot_path": self.screenshot_path,
-        }
 
 
 class ActionRecorder:
@@ -291,45 +249,6 @@ class ActionRecorder:
 # ============================================================
 # 内部 helper
 # ============================================================
-
-
-def _now_iso() -> str:
-    """秒 + microsecond 精度の ISO-8601。タイムゾーン情報は付けない（local clock）。
-
-    ADR-0002 §13 の meta.json と整合: ``YYYY-MM-DDTHH:MM:SS.ffffff``。
-    """
-    # time.strftime で microsecond は出ないので datetime を使う
-    from datetime import datetime  # 局所 import で起動コスト回避
-
-    return datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")
-
-
-def _safe_jsonify(value: Any) -> Any:
-    """``json.dumps`` 可能な形に best-effort で変換する。
-
-    成功なら原値を返す（dict/list/scalar）。失敗（循環 / 不能型）なら
-    ``"<unrepresentable>"`` を返す。``json.dumps(default=str)`` で多くの型
-    （Path / datetime / Enum 等）はカバーされる前提。
-    """
-    if value is None:
-        return None
-    try:
-        # round-trip で「json で書ける形」に変換。default=str で複雑な型を救う。
-        return json.loads(json.dumps(value, default=str, ensure_ascii=False))
-    except (TypeError, ValueError, RecursionError):
-        return "<unrepresentable>"
-
-
-def _format_error(exc: BaseException) -> dict[str, str]:
-    """例外を ``{"type", "message"}`` の dict に整形する。"""
-    try:
-        message = str(exc)
-    except Exception:  # noqa: BLE001 - __str__ が壊れた exception でも record は通す
-        message = "<unrepresentable>"
-    return {
-        "type": type(exc).__name__,
-        "message": message,
-    }
 
 
 def _ensure_recorder_attached(client: Any, recorder: ActionRecorder) -> None:

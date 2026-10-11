@@ -897,6 +897,13 @@ Claude が自然にテストを書けるようにするには、**QGIS 側の UI
 
 これらは Claude と実際にテスト作成を試行しながら、不足を順次追加する方針。
 
+> **2026-10-11 注（#8）**: エージェントが MCP で探索した手順を pytest に書き起こす
+> 使い方が出てきたので、MCP gateway に操作記録（`qgis_record_start` / `step` /
+> `stop`、`QPUPPETEER_MCP_RECORD=1`）を入れた。形式は §13 の `actions.jsonl` と同じ
+> （1 行の型は `qgis_puppeteer.action_log` に移して pytest 側と共有）。これは
+> Codegen ではない：テストコードは生成せず、記録は人やエージェントが書き起こす
+> ときの材料にとどめる。本節の方針（Claude がテストを書く）は変わらない。
+
 ### 17. Flaky テスト対策
 
 auto-wait（§8.3）と web-first assertions（§12）で多くの揺らぎは構造的に吸収されるが、それでも残る flaky 要因に対する方針を定める。

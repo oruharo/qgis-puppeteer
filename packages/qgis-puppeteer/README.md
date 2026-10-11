@@ -77,6 +77,7 @@ async with AutomationClient() as client:
 | Code | `qgis_execute_python`, `qgis_execute_with_permission`, `qgis_get_whitelist`, `qgis_clear_session_permissions` |
 | Discovery | `qgis_list_instances`, `qgis_use_instance`, `qgis_wait_ready` |
 | Behind the screen | `qgis_get_recent_exceptions`, `qgis_get_recent_messages` (QgsMessageLog, incl. message bar), and their `qgis_clear_*` |
+| Recording (MCP only) | `qgis_record_start`, `qgis_record_step`, `qgis_record_stop` — the calls go to a JSONL file in the `actions.jsonl` shape |
 
 For full schemas and examples, see [Architecture document](https://github.com/oruharo/qgis-puppeteer/blob/main/docs/architecture/0001-qgis-puppeteer-architecture.md).
 
