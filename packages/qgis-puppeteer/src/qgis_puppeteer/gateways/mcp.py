@@ -986,9 +986,13 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
         height: int | None = None,
         instance: InstanceArg = None,
     ) -> str | CallToolResult:
-        """QGIS キャンバスのスクリーンショットを撮り、保存先のパスを返す。
+        """マップキャンバスに今映っている画像を保存し、保存先のパスを返す。
 
-        output_path を省略すると一時ファイルに保存する。
+        写るのはキャンバスだけ（メインウィンドウやダイアログは写らない）。サイズは
+        キャンバス次第で、width / height はキャンバスの無い headless のときだけ効く。
+        結果の width / height は保存した画像の実サイズ。範囲・サイズ・DPI を固定
+        したいときは qgis_render_map を使う。output_path を省略すると一時ファイルに
+        保存する。
         """
         params: dict[str, Any] = {}
         if output_path is not None:

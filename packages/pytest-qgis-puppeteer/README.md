@@ -235,7 +235,7 @@ On test failure, the plugin writes a diagnostic bundle to
 `outputs/diagnostics/{test_name}_{timestamp}/`:
 
 ```
-screenshot.png         - QGIS main window screenshot
+screenshot.png         - image of the map canvas (not the main window or dialogs)
 snapshot_ui.json       - qgis_snapshot_ui output (UI tree)
 list_instances.json    - registered Worker instances at failure time
 ```

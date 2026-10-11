@@ -632,7 +632,13 @@ class E2EAutomationClient:
         height: int | None = None,
         instance: str | None = None,
     ) -> dict[str, Any]:
-        """`qgis_screenshot` を呼ぶ。`None` の引数は省略して送る。"""
+        """`qgis_screenshot` を呼ぶ：マップキャンバスに今映っている画像を保存する。
+
+        写るのはキャンバスだけ。サイズはキャンバス次第で、`width` / `height` は
+        キャンバスの無い headless のときだけ効く。戻り値の ``width`` /
+        ``height`` は保存した画像の実サイズ。画像を比べるなら `render_map()`
+        を使う。`None` の引数は省略して送る。
+        """
         params: dict[str, Any] = {}
         if output_path is not None:
             params["output_path"] = output_path

@@ -220,6 +220,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`qgis_screenshot` saved a transparent image headless, and reported sizes it
+  did not use** (#7). Without a canvas it started a render job but saved the
+  empty image it had prepared instead of the job's result; it now renders with
+  `qgis_render_map`'s renderer, over the layers shown in the layer tree (it
+  used to take every project layer, hidden ones too). With a canvas,
+  `QgsMapCanvas.saveAsImage` ignores `width` / `height`, yet the result echoed
+  them back; it now returns the size of the saved file, and says so when
+  nothing was written. The
+  diagnostic bundle's `screenshot.png` was described as the main window; it is
+  the map canvas only, and the docs now say so.
+
 - **`spawn_qgis()` could return an instance that cannot answer.** Its
   launch_token wait matched on the token alone, and `list_instances` now also
   returns instances whose heartbeat has stopped, so a QGIS still busy loading
