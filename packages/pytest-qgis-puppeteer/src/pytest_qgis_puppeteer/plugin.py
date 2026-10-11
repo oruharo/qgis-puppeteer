@@ -1739,7 +1739,8 @@ def _dump_diagnostic_bundle(
 
     出力ファイル（ADR-0002 §13）:
 
-    - ``screenshot.png``: QGIS メインウィンドウ
+    - ``screenshot.png``: マップキャンバスの画像（``qgis_screenshot``）。
+      メインウィンドウやダイアログは写らない
     - ``snapshot_ui.json``: ``qgis_snapshot_ui`` の出力
     - ``list_instances.json``: Hub に register 中の Worker 一覧
     - ``meta.json``: nodeid / env / qgis_bin / exception / instances 等

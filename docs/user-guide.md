@@ -306,7 +306,7 @@ async def test_open_login_dialog(qgis):
 
 | ファイル | 内容 |
 |---|---|
-| `screenshot.png` | QGIS のスクショ |
+| `screenshot.png` | マップキャンバスの画像（`qgis_screenshot`）。メインウィンドウやダイアログは写らない |
 | `snapshot_ui.json` | UI ツリー（`include_main_window=True`、深さ 12） |
 | `list_instances.json` | Hub に register されている Worker 一覧 |
 | `meta.json` | `nodeid` / 解決済 `qgis_bin` / `qgis_args` / `qgis_command` / 例外 type+message / env name / instances サマリ |
