@@ -642,6 +642,51 @@ class E2EAutomationClient:
             params["height"] = height
         return self.call("qgis_screenshot", params, instance=instance)
 
+    def render_map(
+        self,
+        *,
+        output_path: str | None = None,
+        extent: tuple[float, float, float, float] | list[float] | None = None,
+        crs: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        dpi: float | None = None,
+        layers: list[str] | None = None,
+        background_color: str | None = None,
+        antialiasing: bool = True,
+        draw_labels: bool = True,
+        draw_selection: bool = True,
+        instance: str | None = None,
+    ) -> dict[str, Any]:
+        """`qgis_render_map` を呼ぶ：条件を固定して地図を PNG に描画する。
+
+        `screenshot()` と違い、キャンバスの大きさや画面の表示スケールに左右され
+        ないので、画像スナップショットの比較に使える。`extent` は `crs` の座標で
+        ``(xmin, ymin, xmax, ymax)``。出力の縦横比に合わせて広げられ、実際に描いた
+        範囲は戻り値の ``extent`` に入る。`None` の引数は送らない（Worker 側の
+        既定：キャンバスの範囲・CRS・表示中レイヤ、800 x 600、96 dpi）。
+
+        戻り値の ``render_errors`` にはレイヤごとの描画エラーが入る。画像だけ
+        比べていると見逃すので、空であることも確かめるとよい。
+        """
+        params: dict[str, Any] = {
+            "antialiasing": antialiasing,
+            "draw_labels": draw_labels,
+            "draw_selection": draw_selection,
+        }
+        optional = {
+            "output_path": output_path,
+            "extent": list(extent) if extent is not None else None,
+            "crs": crs,
+            "width": width,
+            "height": height,
+            "dpi": dpi,
+            "layers": layers,
+            "background_color": background_color,
+        }
+        params.update({k: v for k, v in optional.items() if v is not None})
+        return self.call("qgis_render_map", params, instance=instance)
+
     def get_canvas_extent(self, *, instance: str | None = None) -> dict[str, Any]:
         """`qgis_get_canvas_extent` を呼ぶ。"""
         return self.call("qgis_get_canvas_extent", {}, instance=instance)

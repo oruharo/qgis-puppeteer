@@ -8,7 +8,8 @@ QGIS プラグイン（`qgis_plugin`）から `Worker` に登録される handle
 
 - `layer_tools`       : `QgsProject` / `QgsVectorLayer` 操作
 - `python_executor`   : ホワイトリスト + 確認付きの Python コード実行
-- `screenshot_tools`  : キャンバス / メインウィンドウのスクリーンショット
+- `screenshot_tools`  : マップキャンバスに今映っている画像の保存
+- `render_tools`      : 範囲・サイズ・DPI を固定した地図の描画（スナップショット比較用）
 - `ui_tools`          : Qt ウィジェット snapshot / click / set value
 - `code_analyzer`     : `python_executor` が使うコード静的解析
 - `permission_manager`: `python_executor` が使う whitelist 永続化

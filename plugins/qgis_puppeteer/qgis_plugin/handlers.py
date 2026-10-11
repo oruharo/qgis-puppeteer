@@ -54,6 +54,7 @@ def build_handlers(iface: Any | None = None) -> dict[str, Handler]:
             exception_recorder,
             layer_tools,
             python_executor,
+            render_tools,
             screenshot_tools,
             ui_tools,
         )
@@ -123,6 +124,21 @@ def build_handlers(iface: Any | None = None) -> dict[str, Handler]:
         params.get("width"),
         params.get("height"),
         iface,
+    )
+
+    handlers["qgis_render_map"] = lambda params: render_tools.render_map(
+        params.get("output_path"),
+        extent=params.get("extent"),
+        crs=params.get("crs"),
+        width=params.get("width"),
+        height=params.get("height"),
+        dpi=params.get("dpi"),
+        layers=params.get("layers"),
+        background_color=params.get("background_color"),
+        antialiasing=params.get("antialiasing", True),
+        draw_labels=params.get("draw_labels", True),
+        draw_selection=params.get("draw_selection", True),
+        iface=iface,
     )
 
     handlers["qgis_get_canvas_extent"] = lambda _params: screenshot_tools.get_canvas_extent(iface)

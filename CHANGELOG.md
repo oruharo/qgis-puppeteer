@@ -8,6 +8,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`qgis_render_map`: draw the map at a fixed extent, CRS, size and DPI** (#6).
+  `qgis_screenshot` saves whatever the canvas currently shows, so the image
+  changes with the window size and the display scale and cannot serve as an
+  image-snapshot baseline. The new Worker command renders with
+  `QgsMapSettings` taken from the canvas (or the project when there is none),
+  overrides extent / CRS / size / DPI / layers / background / drawing flags,
+  pins the device pixel ratio to 1 and draws with the sequential renderer.
+  Two renders with the same input give a byte-identical PNG (checked in real
+  QGIS). The result carries the extent actually drawn (widened to the image
+  aspect) and per-layer `render_errors`. Exposed as
+  `E2EAutomationClient.render_map()` and the MCP tool `qgis_render_map`, which
+  attaches the PNG to the result as an image (`include_image=false` to skip).
+  The user guide lists what still makes images differ (unstyled layers get a
+  random colour, network layers, time-dependent expressions, other machines).
+
 - **`E2EAutomationClient.wait_for_ready()`, and the E2E fixtures use it.** The
   liveness work went into the shared Hub/Worker/client layers, so pytest E2E
   already benefited — a long `qgis_execute_python` no longer demotes its own

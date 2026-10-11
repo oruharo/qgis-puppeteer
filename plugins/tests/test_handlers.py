@@ -80,6 +80,9 @@ def _install_fake_tools() -> dict[str, Any]:
     screenshot_tools.get_canvas_extent = _CallRecorder({"xmin": 0.0})
     screenshot_tools.set_canvas_extent = _CallRecorder({"success": True})
 
+    render_tools = types.ModuleType("qgis_puppeteer.qgis_tools.render_tools")
+    render_tools.render_map = _CallRecorder({"success": True, "path": "/tmp/r.png"})
+
     ui_tools = types.ModuleType("qgis_puppeteer.qgis_tools.ui_tools")
     ui_tools.snapshot_ui = _CallRecorder({"active_modal": None})
     ui_tools.click_widget = _CallRecorder({"success": True})
@@ -104,6 +107,7 @@ def _install_fake_tools() -> dict[str, Any]:
     qgis_tools_pkg.layer_tools = layer_tools
     qgis_tools_pkg.python_executor = python_executor
     qgis_tools_pkg.screenshot_tools = screenshot_tools
+    qgis_tools_pkg.render_tools = render_tools
     qgis_tools_pkg.ui_tools = ui_tools
     qgis_tools_pkg.dialog_handler_tools = dialog_handler_tools
     qgis_tools_pkg.exception_recorder = exception_recorder
@@ -112,6 +116,7 @@ def _install_fake_tools() -> dict[str, Any]:
     sys.modules["qgis_puppeteer.qgis_tools.layer_tools"] = layer_tools
     sys.modules["qgis_puppeteer.qgis_tools.python_executor"] = python_executor
     sys.modules["qgis_puppeteer.qgis_tools.screenshot_tools"] = screenshot_tools
+    sys.modules["qgis_puppeteer.qgis_tools.render_tools"] = render_tools
     sys.modules["qgis_puppeteer.qgis_tools.ui_tools"] = ui_tools
     sys.modules["qgis_puppeteer.qgis_tools.dialog_handler_tools"] = dialog_handler_tools
     sys.modules["qgis_puppeteer.qgis_tools.exception_recorder"] = exception_recorder
@@ -121,6 +126,7 @@ def _install_fake_tools() -> dict[str, Any]:
         "py": python_executor,
         "pm": fake_pm,
         "shot": screenshot_tools,
+        "render": render_tools,
         "ui": ui_tools,
         "dialog": dialog_handler_tools,
         "exc": exception_recorder,
@@ -136,6 +142,7 @@ def fake_tools() -> dict[str, Any]:
         "qgis_puppeteer.qgis_tools.layer_tools",
         "qgis_puppeteer.qgis_tools.python_executor",
         "qgis_puppeteer.qgis_tools.screenshot_tools",
+        "qgis_puppeteer.qgis_tools.render_tools",
         "qgis_puppeteer.qgis_tools.ui_tools",
         "qgis_puppeteer.qgis_tools.dialog_handler_tools",
         "qgis_puppeteer.qgis_tools.exception_recorder",
@@ -256,6 +263,29 @@ class TestScreenshotHandlers:
         handlers["qgis_screenshot"]({})
         args, _ = fake_tools["shot"].take_screenshot.calls[0]
         assert args == (None, None, None, None)
+
+    def test_render_map_forwards_params_as_keywords(self, fake_tools: dict[str, Any]) -> None:
+        build_handlers = _import_build_handlers()
+        iface = object()
+        handlers = build_handlers(iface)
+        handlers["qgis_render_map"](
+            {"output_path": "/tmp/r.png", "extent": [0, 0, 1, 1], "dpi": 300, "draw_labels": False}
+        )
+        args, kwargs = fake_tools["render"].render_map.calls[0]
+        assert args == ("/tmp/r.png",)
+        assert kwargs == {
+            "extent": [0, 0, 1, 1],
+            "crs": None,
+            "width": None,
+            "height": None,
+            "dpi": 300,
+            "layers": None,
+            "background_color": None,
+            "antialiasing": True,
+            "draw_labels": False,
+            "draw_selection": True,
+            "iface": iface,
+        }
 
     def test_get_canvas_extent_passes_only_iface(self, fake_tools: dict[str, Any]) -> None:
         build_handlers = _import_build_handlers()
@@ -395,6 +425,7 @@ class TestHandlerInventory:
             "qgis_clear_session_permissions",
             # screenshot / canvas
             "qgis_screenshot",
+            "qgis_render_map",
             "qgis_get_canvas_extent",
             "qgis_set_canvas_extent",
             # ui
