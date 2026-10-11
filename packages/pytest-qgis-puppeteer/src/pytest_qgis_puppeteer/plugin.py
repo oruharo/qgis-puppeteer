@@ -62,6 +62,7 @@ from urllib.parse import urlparse
 
 import pytest
 
+from pytest_qgis_puppeteer import _message_check
 from pytest_qgis_puppeteer._action_recorder import ActionRecorder
 from pytest_qgis_puppeteer._environments import (
     EnvironmentsConfig,
@@ -264,6 +265,24 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "otherwise be swallowed. Default: 'true'.",
         default="true",
     )
+    # #5 / ロードマップ B5c: QgsMessageLog に流れたメッセージで落とす（opt-in）。
+    # 例外を捕まえてログに流すプラグインの失敗は excepthook を通らないので、
+    # 上の uncaught exception の仕組みでは拾えない。
+    parser.addini(
+        "qgis_fail_on_message_level",
+        "Fail the test if the Worker logged a QgsMessageLog message at this level "
+        "or above during the call phase: info, warning or critical. Includes "
+        "message bar messages. Default: '' (off).",
+        default="",
+    )
+    parser.addini(
+        "qgis_message_allowlist",
+        "Messages ignored by qgis_fail_on_message_level, one per line: a regex "
+        "searched in the message, or '<tag>::<regex>'. Lines starting with # are "
+        "comments.",
+        type="linelist",
+        default=[],
+    )
 
 
 # ==============================================================
@@ -319,6 +338,19 @@ def pytest_configure(config: pytest.Config) -> None:
         "test, the fresh worker is killed and routing is restored. See ADR-0002 "
         "§10.4 and ADR-0003 §fresh_qgis composition rules.",
     )
+    config.addinivalue_line(
+        "markers",
+        "qgis_allow_message(pattern=None, *, tag=None, source=None): ignore matching "
+        "QgsMessageLog messages for qgis_fail_on_message_level in this test. "
+        "pattern is a regex searched in the message; source is 'log' or "
+        "'message_bar'.",
+    )
+    # 綴りを誤った ini で黙って判定が無効になるのを避け、起動時に止める
+    try:
+        _message_check.parse_fail_level(config.getini("qgis_fail_on_message_level"))
+        _message_check.rules_from_ini(config.getini("qgis_message_allowlist"))
+    except ValueError as exc:
+        raise pytest.UsageError(str(exc)) from exc
 
     rootpath = Path(str(config.rootpath))
     toml_path = find_environments_toml(rootpath)
@@ -1624,6 +1656,20 @@ def _resolve_fail_on_uncaught_exception(config: pytest.Config) -> bool:
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _resolve_fail_on_message_level(config: pytest.Config) -> str | None:
+    """``qgis_fail_on_message_level`` を解釈する（既定 None = 無効）。"""
+    return _message_check.parse_fail_level(config.getini("qgis_fail_on_message_level"))
+
+
+def _unexpected_messages(item: pytest.Item, client: Any, level: str) -> list[dict[str, Any]]:
+    """call 中に記録された ``level`` 以上のメッセージから、許可リスト分を除く。"""
+    messages = client.get_recent_messages(min_level=level)
+    rules = _message_check.rules_from_ini(
+        item.config.getini("qgis_message_allowlist")
+    ) + _message_check.rules_from_markers(item)
+    return _message_check.unexpected(messages, rules)
+
+
 def _format_uncaught_exceptions(excs: list[dict[str, Any]]) -> str:
     """Worker 由来の例外レコード列を pytest の longrepr 用テキストに整形する。"""
     lines = [f"Worker recorded {len(excs)} uncaught exception(s) during the call phase:"]
@@ -1746,6 +1792,7 @@ def _dump_diagnostic_bundle(
     - ``meta.json``: nodeid / env / qgis_bin / exception / instances 等
     - ``traceback.txt``: pytest report.longrepr のテキスト形
     - ``hub_stdout.log`` / ``hub_stderr.log``: Hub プロセスの直近出力
+    - ``qgis_messages.jsonl``: #5。Worker が記録した QgsMessageLog のメッセージ
     - ``actions.jsonl``: B5a 追加。test 中の各 Worker call の timeline
       （schema_version=1。``ts`` / ``command`` / ``params`` / ``result`` /
       ``error`` / ``duration_ms`` / ``step_path`` / ``instance``）
@@ -1824,6 +1871,18 @@ def _dump_diagnostic_bundle(
             )
     except Exception:  # noqa: BLE001
         logger.warning("get_recent_exceptions() failed during diagnostic dump", exc_info=True)
+
+    # qgis_messages.jsonl（#5 / ロードマップ B5c）。判定を有効にしていなくても出す。
+    # 判定が有効なら call 直前に消去しているので call 中のもの、無効なら QGIS の
+    # 起動（プラグインの読み込み）以降の直近の分（リングバッファ）。
+    try:
+        messages = client.get_recent_messages()
+        (bundle_dir / "qgis_messages.jsonl").write_text(
+            "".join(json.dumps(m, ensure_ascii=False) + "\n" for m in messages),
+            encoding="utf-8",
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("get_recent_messages() failed during diagnostic dump", exc_info=True)
 
     # meta.json
     try:
@@ -1936,17 +1995,32 @@ def pytest_runtest_call(item: pytest.Item) -> Iterator[None]:  # type: ignore[mi
     オーバーされ、setup は通常 pytest が直接握る）。call phase の責任 boundary を
     クリーンに切るためにここで clear する。
     """
-    if _resolve_fail_on_uncaught_exception(item.config) and not _is_dev_mode():
-        client = _try_get_automation_client(item)
+    if not _is_dev_mode():
+        clear_exceptions = _resolve_fail_on_uncaught_exception(item.config)
+        clear_messages = _resolve_fail_on_message_level(item.config) is not None
+        client = _try_get_automation_client(item) if clear_exceptions or clear_messages else None
         if client is not None:
-            try:
-                client.clear_recent_exceptions()
-            except Exception:  # noqa: BLE001 - 通信失敗で test を落とすのは過剰
-                logger.debug(
-                    "clear_recent_exceptions() failed before %s call",
-                    item.nodeid,
-                    exc_info=True,
-                )
+            if clear_exceptions:
+                try:
+                    client.clear_recent_exceptions()
+                except Exception:  # noqa: BLE001 - 通信失敗で test を落とすのは過剰
+                    logger.debug(
+                        "clear_recent_exceptions() failed before %s call",
+                        item.nodeid,
+                        exc_info=True,
+                    )
+            if clear_messages:
+                try:
+                    client.clear_recent_messages()
+                except Exception:  # noqa: BLE001
+                    # 頼まれて有効にした判定なので、黙らない。消せていないと前の
+                    # テストのメッセージで落ちうる
+                    logger.warning(
+                        "clear_recent_messages() failed before %s call; messages from "
+                        "earlier tests may be counted",
+                        item.nodeid,
+                        exc_info=True,
+                    )
     yield
 
 
@@ -1997,6 +2071,39 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo) -> Itera
                     # 既に failed → section に追加（pytest 標準の "Captured stderr" 並び）
                     report.sections.append(("Worker uncaught exceptions", msg))
 
+    # #5: QgsMessageLog のメッセージで落とす（opt-in）。流れは例外と同じ。
+    message_level = _resolve_fail_on_message_level(item.config)
+    if message_level is not None and not _is_dev_mode():
+        client = _try_get_automation_client(item)
+        if client is not None:
+            try:
+                bad = _unexpected_messages(item, client, message_level)
+            except Exception as exc:  # noqa: BLE001 - 取得失敗でテストは落とさない
+                # ただし黙って素通りにもしない。Worker が古くてコマンドを持たない等で
+                # 判定が毎回できていないのに、緑に見え続けるのを避ける
+                bad = []
+                logger.warning(
+                    "qgis_fail_on_message_level: could not check %s: %s",
+                    item.nodeid,
+                    exc,
+                    exc_info=True,
+                )
+                report.sections.append(
+                    (
+                        "Worker log messages",
+                        f"qgis_fail_on_message_level is set but the check could not run: "
+                        f"{type(exc).__name__}: {exc}",
+                    )
+                )
+            if bad:
+                msg = _message_check.format_messages(bad, message_level)
+                if report.passed:
+                    report.outcome = "failed"
+                    report.longrepr = msg
+                    promoted_to_failed = True
+                else:
+                    report.sections.append(("Worker log messages", msg))
+
     if report.failed:
         _dump_diagnostic_bundle(item, report=report, call=call)
         # ADR-0002 §17.5: 失敗連鎖防止の自動 fresh_qgis を opt-in なら flag を立てる。
@@ -2007,7 +2114,7 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo) -> Itera
     # promoted_to_failed は将来 telemetry に使う想定（現状は info ログのみ）
     if promoted_to_failed:
         logger.info(
-            "Test %s promoted pass→fail by uncaught Qt/Python exception (ADR-0002 §17)",
+            "Test %s promoted pass→fail by uncaught exceptions or logged messages",
             item.nodeid,
         )
 
@@ -2024,6 +2131,10 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
     永続 fresh にするのは avoiding side-effect）。
     """
     config = item.config
+    # qgis_allow_message の正規表現の誤りは、判定時（makereport）ではなく
+    # ここで test の setup エラーとして出す
+    if _resolve_fail_on_message_level(config) is not None:
+        _message_check.rules_from_markers(item)
     if not getattr(config, _CONFIG_ATTR_PRIOR_TEST_FAILED, False):
         return
     setattr(config, _CONFIG_ATTR_PRIOR_TEST_FAILED, False)

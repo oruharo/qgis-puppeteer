@@ -1289,3 +1289,30 @@ class TestRaiseForExecuteResultHelper:
     def test_success_false_raises_worker_code_error(self) -> None:
         with pytest.raises(WorkerCodeError):
             _raise_for_execute_result({"success": False, "error": "boom"})
+
+
+# ============================================================
+# QgsMessageLog（#5）
+# ============================================================
+
+
+class TestRecentMessages:
+    def test_get_sends_only_given_filters_and_returns_the_list(self) -> None:
+        msgs = [{"seq": 4, "level": "critical", "message": "boom"}]
+        e2e, inner = _make_client(call_results=[{"messages": msgs, "last_seq": 4}])
+        assert e2e.get_recent_messages(min_level="critical", after_seq=3) == msgs
+        inner.call.assert_awaited_once_with(
+            "qgis_get_recent_messages",
+            {"min_level": "critical", "after_seq": 3},
+            instance=None,
+        )
+
+    def test_worker_rejection_is_a_value_error(self) -> None:
+        e2e, _ = _make_client(call_results=[{"success": False, "error": "min_level must be"}])
+        with pytest.raises(ValueError, match="min_level must be"):
+            e2e.get_recent_messages(min_level="error")
+
+    def test_clear(self) -> None:
+        e2e, inner = _make_client()
+        e2e.clear_recent_messages()
+        inner.call.assert_awaited_once_with("qgis_clear_recent_messages", {}, instance=None)

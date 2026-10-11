@@ -621,6 +621,10 @@ def build_gateway(
             "- UI tools take a selector dict; build it from qgis_snapshot_ui output.\n"
             "- qgis_execute_python runs code inside QGIS and returns whatever that code "
             "assigns to `_result`.\n"
+            "- Failures that never reach the screen: qgis_get_recent_exceptions (uncaught "
+            "Python exceptions) and qgis_get_recent_messages (the QGIS message log, "
+            "including message bar text; min_level='critical' for errors). Pass the "
+            "previous result's last_seq as after_seq to see only new messages.\n"
             "- A failed call comes back with isError and a JSON body "
             '{"error": {"code", "message", ...}}; code=hub_unreachable means QGIS, or the '
             "QGIS Puppeteer plugin inside it, is not running yet."
@@ -1216,6 +1220,82 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
     ) -> str | CallToolResult:
         """登録済みのダイアログ自動処理をすべて解除する（teardown 用）。"""
         return await _call(ctx, "qgis_clear_dialog_handlers", {}, instance=instance)
+
+    # ------------------------------------------------------------
+    # 操作の裏で起きたこと（未捕捉例外・QgsMessageLog）
+    # ------------------------------------------------------------
+
+    @mcp.tool(title="未捕捉の例外を取得", annotations=_QUERY, structured_output=False)
+    async def qgis_get_recent_exceptions(
+        ctx: Context,
+        limit: Annotated[int | None, Field(description="末尾 N 件だけ返す。")] = None,
+        instance: InstanceArg = None,
+    ) -> str | CallToolResult:
+        """QGIS 内で誰にも捕まらなかった Python 例外（Qt の slot 内のもの等）を古い順に返す。
+
+        画面には出ず stderr に流れるだけの失敗。操作の後に確かめる。各要素は
+        ts / type / message / traceback / thread。
+        """
+        params: dict[str, Any] = {} if limit is None else {"limit": limit}
+        return await _call(ctx, "qgis_get_recent_exceptions", params, instance=instance)
+
+    @mcp.tool(title="未捕捉の例外の記録を消去", annotations=_MUTATE_SAFE, structured_output=False)
+    async def qgis_clear_recent_exceptions(
+        ctx: Context, instance: InstanceArg = None
+    ) -> str | CallToolResult:
+        """未捕捉の例外の記録を空にする。確かめたい操作の前に呼ぶ。"""
+        return await _call(ctx, "qgis_clear_recent_exceptions", {}, instance=instance)
+
+    @mcp.tool(title="ログメッセージを取得", annotations=_QUERY, structured_output=False)
+    async def qgis_get_recent_messages(
+        ctx: Context,
+        min_level: Annotated[
+            Literal["info", "warning", "critical"] | None,
+            Field(description="これ以上の重さだけ。裏のエラーを見るなら 'critical'。"),
+        ] = None,
+        tags: Annotated[
+            list[str] | None, Field(description="このタグ（ログのタブ名）のどれかに一致するもの。")
+        ] = None,
+        sources: Annotated[
+            list[Literal["log", "message_bar"]] | None,
+            Field(description="'message_bar' でメッセージバーに出たものだけに絞る。"),
+        ] = None,
+        after_seq: Annotated[
+            int | None,
+            Field(
+                description=(
+                    "この通し番号より後のものだけ。前回の結果の last_seq を渡すと、"
+                    "それ以降に増えた分だけが返る。"
+                )
+            ),
+        ] = None,
+        limit: Annotated[int | None, Field(description="絞り込んだ後の末尾 N 件。")] = None,
+        instance: InstanceArg = None,
+    ) -> str | CallToolResult:
+        """QGIS の QgsMessageLog（ログメッセージパネル）に流れたメッセージを古い順に返す。
+
+        例外を捕まえてログに書くプラグインの失敗は、画面にも例外にも出ずここにだけ
+        残る。メッセージバーに出たものも source='message_bar' で入る。各要素は
+        seq / ts / level / tag / message / source / thread、結果の last_seq は
+        最後の通し番号。QGIS の起動直後、このプラグインより先に読まれた
+        プラグインの初期化中のメッセージは入らない。
+        """
+        optional = {
+            "min_level": min_level,
+            "tags": tags,
+            "sources": sources,
+            "after_seq": after_seq,
+            "limit": limit,
+        }
+        params = {k: v for k, v in optional.items() if v is not None}
+        return await _call(ctx, "qgis_get_recent_messages", params, instance=instance)
+
+    @mcp.tool(title="ログメッセージの記録を消去", annotations=_MUTATE_SAFE, structured_output=False)
+    async def qgis_clear_recent_messages(
+        ctx: Context, instance: InstanceArg = None
+    ) -> str | CallToolResult:
+        """ログメッセージの記録を空にする（通し番号は戻らない）。"""
+        return await _call(ctx, "qgis_clear_recent_messages", {}, instance=instance)
 
 
 # ============================================================

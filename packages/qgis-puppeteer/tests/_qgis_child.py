@@ -23,7 +23,7 @@ _PRELUDE = """
 import json, os, sys
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from qgis.core import QgsApplication
-_app = QgsApplication([], False)
+_app = QgsApplication([], {gui})
 _app.initQgis()
 RESULT = None
 """
@@ -36,9 +36,13 @@ os._exit(0)
 """
 
 
-def run_in_qgis(body: str, *, timeout: float = 120.0) -> Any:
-    """``body`` を QGIS 初期化済みの子プロセスで実行し、``RESULT`` を返す。"""
-    code = _PRELUDE + textwrap.dedent(body) + _EPILOGUE
+def run_in_qgis(body: str, *, gui: bool = False, timeout: float = 120.0) -> Any:
+    """``body`` を QGIS 初期化済みの子プロセスで実行し、``RESULT`` を返す。
+
+    ``gui=True`` ならウィジェットを作れる QgsApplication にする（画面は
+    offscreen なので出ない）。
+    """
+    code = _PRELUDE.format(gui=bool(gui)) + textwrap.dedent(body) + _EPILOGUE
     proc = subprocess.run(
         [sys.executable, "-c", code],
         capture_output=True,

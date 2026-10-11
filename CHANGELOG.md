@@ -8,6 +8,31 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The Worker records QgsMessageLog, and tests can fail on it** (#5, roadmap
+  B5c). Plugins often catch an exception and log it with
+  `QgsMessageLog.logMessage(..., Qgis.Critical)`; that never reaches
+  `sys.excepthook`, so the uncaught-exception check could not see it. The
+  Worker now subscribes to `messageReceived` and keeps the last 1000 messages
+  (`seq`, `ts`, `level`, `tag`, `message`, `source`, `thread`). Message bar
+  text is included, because `QgsMessageBar` logs what it shows; it is marked
+  `source: "message_bar"` (its tag is translated, so filter by source).
+  Severity is ranked info = success < warning < critical — QGIS's numbers put
+  Success above Critical. New Worker commands `qgis_get_recent_messages`
+  (`min_level`, `tags`, `sources`, `after_seq`, `limit`) and
+  `qgis_clear_recent_messages`; client methods `get_recent_messages()` /
+  `clear_recent_messages()`. Opt-in ini `qgis_fail_on_message_level`
+  (info / warning / critical) clears before the call phase and turns a pass
+  into a failure, with `qgis_message_allowlist` (`regex` or `tag::regex`) and
+  `@pytest.mark.qgis_allow_message(pattern, tag=, source=)` to ignore known
+  noise. Failure bundles always carry `qgis_messages.jsonl`. Messages logged
+  before the QGIS Puppeteer plugin loads (plugins earlier in name order) are
+  not recorded.
+- **MCP tools for failures that never reach the screen** (#5, #8):
+  `qgis_get_recent_exceptions`, `qgis_clear_recent_exceptions`,
+  `qgis_get_recent_messages`, `qgis_clear_recent_messages`. The Worker
+  commands for exceptions existed, but an agent exploring through MCP could
+  not ask whether its last action had failed behind the scenes.
+
 - **`qgis_render_map`: draw the map at a fixed extent, CRS, size and DPI** (#6).
   `qgis_screenshot` saves whatever the canvas currently shows, so the image
   changes with the window size and the display scale and cannot serve as an

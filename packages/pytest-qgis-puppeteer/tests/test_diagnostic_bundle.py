@@ -746,3 +746,34 @@ class TestSpawnLogsInBundle:
         assert (bundle / "spawn_stdout.log").read_text(encoding="utf-8") == ""
         assert (bundle / "spawn_stderr.log").exists()
         assert (bundle / "spawn_stderr.log").read_text(encoding="utf-8") == ""
+
+
+class TestBundleQgisMessages:
+    """#5: Worker が記録した QgsMessageLog を qgis_messages.jsonl に出す。"""
+
+    def test_messages_are_written_as_jsonl(self, tmp_path: Path) -> None:
+        class _Client(_FakeAutomationClient):
+            def get_recent_messages(self) -> list[dict[str, Any]]:
+                return [
+                    {"seq": 1, "level": "critical", "tag": "P", "message": "boom"},
+                    {"seq": 2, "level": "info", "tag": "Messages", "message": "日本語"},
+                ]
+
+        config = _FakeConfig(ini={"qgis_diag_dir": str(tmp_path / "diag")})
+        item = _FakeItem(nodeid="tests/test_x.py::test_y", config=config, client=_Client())
+        _dump_diagnostic_bundle(item, report=_FakeReport())  # type: ignore[arg-type]
+
+        [bundle] = list((tmp_path / "diag").iterdir())
+        lines = (bundle / "qgis_messages.jsonl").read_text(encoding="utf-8").splitlines()
+        assert [json.loads(line)["seq"] for line in lines] == [1, 2]
+        assert json.loads(lines[1])["message"] == "日本語"
+
+    def test_missing_method_does_not_break_the_bundle(self, tmp_path: Path) -> None:
+        config = _FakeConfig(ini={"qgis_diag_dir": str(tmp_path / "diag")})
+        item = _FakeItem(
+            nodeid="tests/test_x.py::test_y", config=config, client=_FakeAutomationClient()
+        )
+        _dump_diagnostic_bundle(item, report=_FakeReport())  # type: ignore[arg-type]
+        [bundle] = list((tmp_path / "diag").iterdir())
+        assert (bundle / "meta.json").exists()
+        assert not (bundle / "qgis_messages.jsonl").exists()

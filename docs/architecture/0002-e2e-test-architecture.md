@@ -761,6 +761,13 @@ outputs/diagnostics/test_login_20260430-093000/
 - **B5c 未実装**: `qgis_message.log`（QGIS 側 `QgsMessageLog.messageReceived` の tail）は
   Worker 側に subscriber + tail buffer + Worker tool が必要なため別フェーズに繰り延べ。
 
+> **2026-10-11 注（実装済み、#5）**: B5c は push event を待たずに入れた。Worker は
+> `messageReceived` を購読してリングバッファ（1000 件）に溜め、`qgis_get_recent_messages`
+> で返す（poll で足りる）。bundle には `qgis_messages.jsonl`（JSONL、上の
+> `qgis_message.log` の予定名から変更）として常に出す。加えて、uncaught exception
+> と同じ流れでテストを落とせる（`qgis_fail_on_message_level`、opt-in）。メッセージ
+> バーの表示も QgsMessageBar 自身がログに書くので同じ経路で入る。
+
 #### 13.2 スクショ方式（動画ではない理由）
 
 | 方式 | 容量 | 実装 | 失敗解析適性 |

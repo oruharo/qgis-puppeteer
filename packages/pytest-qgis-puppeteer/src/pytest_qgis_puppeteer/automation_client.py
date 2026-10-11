@@ -848,6 +848,54 @@ class E2EAutomationClient:
         excs = result.get("exceptions") if isinstance(result, dict) else None
         return list(excs) if isinstance(excs, list) else []
 
+    def get_recent_messages(
+        self,
+        *,
+        min_level: str | None = None,
+        tags: list[str] | None = None,
+        sources: list[str] | None = None,
+        after_seq: int | None = None,
+        limit: int | None = None,
+        instance: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Worker が記録した QgsMessageLog のメッセージを古い順に取る（#5）。
+
+        例外を捕まえてログに流すプラグインの失敗は ``get_recent_exceptions()`` に
+        出ない。こちらで拾う。メッセージバーに出たものも ``source="message_bar"``
+        で入る。
+
+        Args:
+            min_level: ``"info"`` / ``"warning"`` / ``"critical"``。これ以上の重さだけ。
+            tags: このタグのどれかに一致するものだけ。
+            sources: ``["log"]`` / ``["message_bar"]`` で絞る。
+            after_seq: この通し番号より後だけ（各レコードの ``seq``）。
+            limit: 絞り込んだ後の末尾 N 件。
+
+        Returns:
+            各レコードは ``seq`` / ``ts`` / ``level`` / ``tag`` / ``message`` /
+            ``source`` / ``thread``。
+
+        Raises:
+            ValueError: 引数を Worker が受け付けなかった（不明な ``min_level`` 等）。
+        """
+        optional = {
+            "min_level": min_level,
+            "tags": tags,
+            "sources": sources,
+            "after_seq": after_seq,
+            "limit": limit,
+        }
+        params = {k: v for k, v in optional.items() if v is not None}
+        result = self.call("qgis_get_recent_messages", params, instance=instance)
+        if isinstance(result, dict) and result.get("success") is False:
+            raise ValueError(str(result.get("error")))
+        messages = result.get("messages") if isinstance(result, dict) else None
+        return list(messages) if isinstance(messages, list) else []
+
+    def clear_recent_messages(self, *, instance: str | None = None) -> None:
+        """Worker のメッセージ記録を空にする（通し番号は戻らない）。"""
+        self.call("qgis_clear_recent_messages", {}, instance=instance)
+
     def clear_recent_exceptions(self, *, instance: str | None = None) -> None:
         """Worker 側 例外バッファをクリアする（test setup でリセット用）。"""
         self.call("qgis_clear_recent_exceptions", {}, instance=instance)
