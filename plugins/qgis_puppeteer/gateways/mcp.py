@@ -26,6 +26,7 @@ ADR-0001 §5, §7 に基づき、MCP プロトコル層を自動化層の内部�
 from __future__ import annotations
 
 import asyncio
+import base64
 import functools
 import importlib.metadata
 import json
@@ -54,7 +55,7 @@ from qgis_puppeteer.protocol import Role
 
 try:
     from mcp.server.mcpserver import Context, MCPServer
-    from mcp.types import CallToolResult, TextContent, ToolAnnotations
+    from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
     from pydantic import Field
 except ImportError as e:  # pragma: no cover - optional deps
     raise ImportError(
@@ -509,12 +510,18 @@ def _gateway_log_path() -> Path:
 
 
 async def _call(
-    ctx: Context, command: str, params: dict[str, Any], *, instance: str | None
+    ctx: Context,
+    command: str,
+    params: dict[str, Any],
+    *,
+    instance: str | None,
+    present: Callable[[Any], str | CallToolResult] = _format_result,
 ) -> str | CallToolResult:
     """AutomationClient.call(...) を呼び、結果を文字列で返す。
 
     `RequestError` は worker 側の business error で、例外は投げず `isError` を
     立てた tool error として返す。接続まわりは `_with_client` 参照。
+    ``present`` は成功時の結果の見せ方（既定は JSON テキスト 1 本）。
     """
     gateway: GatewayContext = ctx.request_context.lifespan_context
     target = _resolve_target(gateway, instance)
@@ -532,9 +539,44 @@ async def _call(
                     }
                 }
             )
-        return _format_result(result)
+        return present(result)
 
     return await _with_client(gateway, op)
+
+
+# 画像を本文に添える上限。これを超える PNG はパスだけ返す（会話の文脈を食い潰さない）。
+MAX_INLINE_IMAGE_BYTES = 4 * 1024 * 1024
+
+
+def _present_with_image(result: Any) -> str | CallToolResult:
+    """``{"success": True, "path": ...}`` の画像を ImageContent として添える。
+
+    gateway は QGIS と同じ機械で動くので、Worker が保存したファイルをそのまま
+    読める。``success: False`` は tool error にする。
+    """
+    if not isinstance(result, dict):
+        return _format_result(result)
+    if result.get("success") is False:
+        return _error_result({"error": {"code": "render_failed", "message": result.get("error")}})
+    path = result.get("path")
+    if not isinstance(path, str):
+        return _format_result(result)
+    try:
+        data = Path(path).read_bytes()
+    except OSError as e:
+        return _format_result({**result, "inline_image": f"not attached: {e}"})
+    if len(data) > MAX_INLINE_IMAGE_BYTES:
+        return _format_result(
+            {**result, "inline_image": f"not attached: {len(data)} bytes is over the limit"}
+        )
+    return CallToolResult(
+        content=[
+            TextContent(type="text", text=_format_result(result)),
+            ImageContent(
+                type="image", data=base64.b64encode(data).decode("ascii"), mime_type="image/png"
+            ),
+        ]
+    )
 
 
 # ============================================================
@@ -956,6 +998,75 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
         if height is not None:
             params["height"] = height
         return await _call(ctx, "qgis_screenshot", params, instance=instance)
+
+    @mcp.tool(title="地図を画像に描画", annotations=_MUTATE_SAFE, structured_output=False)
+    async def qgis_render_map(
+        ctx: Context,
+        output_path: str | None = None,
+        extent: Annotated[
+            list[float] | None,
+            Field(
+                description=(
+                    "[xmin, ymin, xmax, ymax]（crs の座標）。省略時は今のキャンバスの範囲。"
+                    "出力の縦横比に合わせて広げられ、実際に描いた範囲が結果の extent に入る。"
+                )
+            ),
+        ] = None,
+        crs: Annotated[
+            str | None, Field(description="出力 CRS（例 'EPSG:3857'）。省略時はキャンバスの CRS。")
+        ] = None,
+        width: int | None = None,
+        height: int | None = None,
+        dpi: float | None = None,
+        layers: Annotated[
+            list[str] | None,
+            Field(
+                description=(
+                    "描画するレイヤ ID（先頭が最前面）。省略時はキャンバスに表示中のレイヤ。"
+                    "ID は qgis_list_layers で分かる。"
+                )
+            ),
+        ] = None,
+        background_color: Annotated[
+            str | None, Field(description="'#RRGGBB' / '#AARRGGBB' / 色名。")
+        ] = None,
+        antialiasing: bool = True,
+        draw_labels: bool = True,
+        draw_selection: bool = True,
+        include_image: Annotated[
+            bool, Field(description="描画した PNG を結果に画像として添える。")
+        ] = True,
+        instance: InstanceArg = None,
+    ) -> str | CallToolResult:
+        """範囲・CRS・サイズ・DPI・レイヤを指定して地図を PNG に描画する。
+
+        qgis_screenshot と違い、キャンバスの大きさや画面の表示スケールに左右され
+        ない。省略時は 800 x 600、96 dpi、今のキャンバスの範囲・CRS・表示中レイヤ。
+        結果の render_errors はレイヤごとの描画エラー（画像には出ない失敗）。
+        """
+        params: dict[str, Any] = {
+            "antialiasing": antialiasing,
+            "draw_labels": draw_labels,
+            "draw_selection": draw_selection,
+        }
+        optional = {
+            "output_path": output_path,
+            "extent": extent,
+            "crs": crs,
+            "width": width,
+            "height": height,
+            "dpi": dpi,
+            "layers": layers,
+            "background_color": background_color,
+        }
+        params.update({k: v for k, v in optional.items() if v is not None})
+        return await _call(
+            ctx,
+            "qgis_render_map",
+            params,
+            instance=instance,
+            present=_present_with_image if include_image else _format_result,
+        )
 
     @mcp.tool(title="キャンバス範囲を取得", annotations=_QUERY, structured_output=False)
     async def qgis_get_canvas_extent(

@@ -195,6 +195,23 @@ class TestCommandWiring:
         e2e.screenshot()
         inner.call.assert_awaited_once_with("qgis_screenshot", {}, instance=None)
 
+    def test_render_map_sends_only_given_params_and_the_flags(self) -> None:
+        e2e, inner = _make_client()
+        e2e.render_map(extent=(0, 1, 2, 3), width=320, height=240, layers=["L1"])
+        inner.call.assert_awaited_once_with(
+            "qgis_render_map",
+            {
+                "antialiasing": True,
+                "draw_labels": True,
+                "draw_selection": True,
+                "extent": [0, 1, 2, 3],
+                "width": 320,
+                "height": 240,
+                "layers": ["L1"],
+            },
+            instance=None,
+        )
+
     def test_screenshot_full_args(self) -> None:
         e2e, inner = _make_client()
         e2e.screenshot(output_path="C:/tmp/x.png", width=800, height=600)

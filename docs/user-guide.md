@@ -20,12 +20,13 @@ selector・Locator・dialog handler 等の機能リファレンスをまとめ�
 6. [Dialog handler（想定外モーダルの自動応答）](#dialog-handler)
 7. [Signal spy / wait_for_signal](#signal-spy--wait_for_signal)
 8. [E2E カバレッジ計測](#e2e-カバレッジ計測)
-9. [Uncaught Qt/Python 例外と test fail linkage](#uncaught-exceptions)
-10. [複数 QGIS（multi-instance）](#multi-instance)
-11. [Permissions / 信頼モード](#permissions)
-12. [環境変数リファレンス](#環境変数リファレンス)
-13. [Troubleshooting](#troubleshooting)
-14. [Roadmap](#roadmap)
+9. [地図の画像スナップショット（`qgis_render_map`）](#map-image-snapshot)
+10. [Uncaught Qt/Python 例外と test fail linkage](#uncaught-exceptions)
+11. [複数 QGIS（multi-instance）](#multi-instance)
+12. [Permissions / 信頼モード](#permissions)
+13. [環境変数リファレンス](#環境変数リファレンス)
+14. [Troubleshooting](#troubleshooting)
+15. [Roadmap](#roadmap)
 
 ---
 
@@ -1065,6 +1066,80 @@ E2E テストは **2 プロセス**で動く:
   `COVERAGE_PROCESS_START`（と `COVERAGE_FILE`）付きで起動するか、wrapper で forward する。
 
 詳細手順とテンプレ本体は [`examples/coverage/README.md`](../examples/coverage/README.md)。
+---
+
+<a id="map-image-snapshot"></a>
+
+## 地図の画像スナップショット（`qgis_render_map`）
+
+キャンバスの描画を画像で比べたいときに使う。`qgis_screenshot` はキャンバスに
+**今映っているもの**を保存するので、ウィンドウの大きさや画面の表示スケールが
+変わるだけで画像が変わり、比較の基準にならない。`qgis_render_map` はキャンバスの
+見た目に依存せず、範囲・CRS・ピクセルサイズ・DPI・レイヤを指定して描画する。
+
+| | `qgis_screenshot` | `qgis_render_map` |
+|---|---|---|
+| 写るもの | キャンバスに今映っている画像 | 指定した条件で描き直した地図 |
+| サイズ | キャンバスの大きさ（表示スケール込み）。指定できない | `width` / `height` / `dpi` で固定 |
+| 範囲・CRS | キャンバスのまま | `extent` / `crs` で指定（省略時はキャンバス） |
+| 用途 | 失敗時の様子見、診断バンドル | 画像スナップショットの比較 |
+
+```python
+def test_parcels_style(automation_client, tmp_path):
+    out = tmp_path / "parcels.png"
+    res = automation_client.render_map(
+        output_path=str(out),
+        extent=(139.70, 35.65, 139.72, 35.67),
+        crs="EPSG:4326",
+        width=800,
+        height=600,
+        dpi=96,
+        layers=[parcels_layer_id],
+        background_color="#ffffff",
+    )
+    assert res["render_errors"] == []   # 画像には出ない描画失敗
+    # 同じ環境ならバイト単位で一致する。許容誤差つきで比べたいなら
+    # pytest-image-snapshot などの比較ツールに out を渡す
+    assert out.read_bytes() == Path("snapshots/parcels.png").read_bytes()
+```
+
+パラメータ（すべて省略可）:
+
+| 名前 | 既定 | 説明 |
+|---|---|---|
+| `extent` | キャンバスの範囲 | `[xmin, ymin, xmax, ymax]`（`crs` の座標）。出力の縦横比に合わせて**広げられる**（地図は歪めない）。実際に描いた範囲は戻り値の `extent`。キャンバスが無いときは `layers` の範囲（無ければ表示中のレイヤの範囲）。範囲が空なら `success: false` |
+| `crs` | キャンバスの CRS | `"EPSG:3857"` など。`extent` を省いて `crs` だけ変えると、元の範囲をその CRS に変換して使う |
+| `width` / `height` | 800 / 600 | ピクセル。両方指定するか両方省く。1 辺 10000 まで |
+| `dpi` | 96 | シンボルやラベルの大きさに効く。PNG の DPI メタデータにも書く |
+| `layers` | キャンバスに表示中のレイヤ | レイヤ ID のリスト（先頭が最前面） |
+| `background_color` | キャンバスの背景色 | `"#RRGGBB"` / `"#AARRGGBB"` / 色名 |
+| `antialiasing` / `draw_labels` / `draw_selection` | すべて true | 描画フラグ。編集中レイヤの頂点マーカーは常に描かない |
+
+戻り値: `path` / `width` / `height` / `dpi` / `crs` / `extent` / `layers` /
+`render_ms` / `render_errors`（レイヤごとの描画エラー）。引数が不正なときは
+`success: false` と `error`（MCP では tool error）。
+
+MCP の `qgis_render_map` は、描画した PNG を結果に**画像として添える**
+（`include_image=false` でパスだけ）。エージェントがその場で描画結果を見られる。
+
+### 同じ画像にするための注意
+
+同じ入力・同じ環境なら毎回同じ PNG になる（バイト単位で一致することを
+`test_render_tools_integration.py` で確かめている）。そのために、レイヤを 1 つずつ
+順に描く逐次の描画ジョブを使い、画面の表示スケール（devicePixelRatio）を 1 に
+固定している。それでも次のものがあると画像は変わる:
+
+- **スタイルを固定していないレイヤ。** QGIS は新しく作ったベクタレイヤに
+  毎回ランダムな色を付ける。テストで作るレイヤには色を明示するか、`.qml` /
+  プロジェクトでスタイルを与える
+- **ネットワーク越しのレイヤ**（XYZ / WMS など）。タイルの取得結果が変わる
+- `now()` など時刻に依存する式、シード無しのランダム配置
+- **別の機械。** フォントやアンチエイリアスの実装差で一致しない。基準画像は
+  環境（CI のイメージ等）ごとに持つ
+
+描画が終わるまで Worker の GUI スレッドは待って止まる。重い描画の間は Hub への
+応答が止まるので、一覧で一時的に `unresponsive` と出ることがある（描画が終われば
+戻る）。
 
 ---
 

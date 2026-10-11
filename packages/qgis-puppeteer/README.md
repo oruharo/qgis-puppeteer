@@ -73,7 +73,7 @@ async with AutomationClient() as client:
 | Canvas | `qgis_get_canvas_extent`, `qgis_set_canvas_extent` |
 | Selection | `qgis_select_features`, `qgis_get_selected_features` |
 | UI | `qgis_snapshot_ui`, `qgis_click_widget`, `qgis_set_widget_value`, `qgis_check_actionability` |
-| Capture | `qgis_screenshot` |
+| Capture | `qgis_screenshot` (what the canvas shows), `qgis_render_map` (fixed extent / size / DPI, for image snapshots) |
 | Code | `qgis_execute_python`, `qgis_execute_with_permission`, `qgis_get_whitelist`, `qgis_clear_session_permissions` |
 | Discovery | `qgis_list_instances`, `qgis_use_instance`, `qgis_wait_ready` |
 

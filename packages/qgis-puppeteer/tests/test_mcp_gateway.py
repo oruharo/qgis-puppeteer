@@ -580,6 +580,7 @@ class TestMcpGatewayToolInventory:
             "qgis_clear_session_permissions",
             # canvas / screenshot
             "qgis_screenshot",
+            "qgis_render_map",
             "qgis_get_canvas_extent",
             "qgis_set_canvas_extent",
             # ui
@@ -593,6 +594,64 @@ class TestMcpGatewayToolInventory:
             "qgis_clear_dialog_handlers",
         }
         assert expected.issubset(set(names)), f"missing tools: {expected - set(names)}"
+
+
+class TestMcpGatewayRenderMap:
+    """`qgis_render_map`：描画した PNG を画像として添える（#6）。"""
+
+    @staticmethod
+    def _call(result: dict[str, Any], **args: Any) -> tuple[CallToolResult, dict[str, Any]]:
+        seen: dict[str, Any] = {}
+
+        async def run() -> CallToolResult:
+            async with fake_hub_server() as (_hub, hub_url):
+                worker = _FakeWorker(hub_url, label="a", pid=1)
+
+                def responder(req: dict[str, Any]) -> dict[str, Any]:
+                    seen.update(req["params"])
+                    return {"type": "response", "id": req["id"], "ok": True, "result": result}
+
+                worker.responder = responder
+                await worker.start()
+                await worker.ready.wait()
+                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                async with Client(gateway, raise_exceptions=True) as client:
+                    return await client.call_tool("qgis_render_map", args)
+
+        return _run(run()), seen
+
+    def test_png_is_attached_as_an_image(self, tmp_path: Any) -> None:
+        png = tmp_path / "r.png"
+        png.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+        result, seen = self._call(
+            {"success": True, "path": str(png), "width": 2, "height": 1},
+            width=2,
+            height=1,
+        )
+        assert not result.is_error
+        assert seen == {
+            "antialiasing": True,
+            "draw_labels": True,
+            "draw_selection": True,
+            "width": 2,
+            "height": 1,
+        }
+        assert json.loads(_extract_text(result))["path"] == str(png)
+        image = result.content[1]
+        assert image.type == "image"
+        assert image.mime_type == "image/png"
+
+    def test_include_image_false_returns_text_only(self, tmp_path: Any) -> None:
+        png = tmp_path / "r.png"
+        png.write_bytes(b"x")
+        result, seen = self._call({"success": True, "path": str(png)}, include_image=False)
+        assert [c.type for c in result.content] == ["text"]
+        assert "include_image" not in seen
+
+    def test_worker_side_failure_is_a_tool_error(self) -> None:
+        result, _ = self._call({"success": False, "error": "unknown crs: 'EPSG:1'"})
+        assert result.is_error
+        assert "unknown crs" in _extract_text(result)
 
 
 class TestMcpGatewayHubUnreachable:
