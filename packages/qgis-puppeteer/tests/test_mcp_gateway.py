@@ -597,6 +597,10 @@ class TestMcpGatewayToolInventory:
             "qgis_clear_recent_exceptions",
             "qgis_get_recent_messages",
             "qgis_clear_recent_messages",
+            # 操作記録（#8）
+            "qgis_record_start",
+            "qgis_record_step",
+            "qgis_record_stop",
         }
         assert expected.issubset(set(names)), f"missing tools: {expected - set(names)}"
 
@@ -702,6 +706,93 @@ class TestMcpGatewayWorkerRecords:
     @pytest.mark.parametrize("tool", ["qgis_clear_recent_messages", "qgis_clear_recent_exceptions"])
     def test_clear_tools(self, tool: str) -> None:
         assert self._call(tool, {}) == (tool, {})
+
+
+class TestMcpGatewayRecording:
+    """操作記録（#8）：全ツールが actions.jsonl と同じ形で記録されること。"""
+
+    def test_exploration_is_recorded_in_actions_jsonl_shape(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from pytest_qgis_puppeteer._action_recorder import ActionRecord as PytestRecord
+
+        monkeypatch.setenv("QPUPPETEER_MCP_RECORD_DIR", str(tmp_path))
+
+        async def run() -> tuple[dict[str, Any], dict[str, Any]]:
+            async with fake_hub_server() as (_hub, hub_url):
+                worker = _FakeWorker(hub_url, label="a", pid=1)
+
+                def responder(req: dict[str, Any]) -> dict[str, Any]:
+                    if req["command"] == "qgis_get_layer_info":
+                        return {
+                            "type": "response",
+                            "id": req["id"],
+                            "ok": False,
+                            "error": {"code": "worker_execution_error", "message": "no such layer"},
+                        }
+                    return {"type": "response", "id": req["id"], "ok": True, "result": {"n": 1}}
+
+                worker.responder = responder
+                await worker.start()
+                await worker.ready.wait()
+                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                async with Client(gateway, raise_exceptions=True) as client:
+                    await client.call_tool("qgis_list_layers", {})  # 記録前：残らない
+                    started = json.loads(
+                        _extract_text(await client.call_tool("qgis_record_start", {"name": "t1"}))
+                    )
+                    await client.call_tool("qgis_list_instances", {})
+                    await client.call_tool("qgis_record_step", {"name": "レイヤを見る"})
+                    await client.call_tool("qgis_list_layers", {"instance": "a"})
+                    await client.call_tool("qgis_get_layer_info", {"layer_name": "nope"})
+                    stopped = json.loads(
+                        _extract_text(await client.call_tool("qgis_record_stop", {}))
+                    )
+                    await client.call_tool("qgis_list_layers", {})  # 停止後：残らない
+                    return started, stopped
+
+        started, stopped = _run(run())
+        assert stopped == {"recording": False, "path": started["path"], "actions": 3}
+        with open(started["path"], encoding="utf-8") as fh:
+            lines = [json.loads(line) for line in fh.read().splitlines()]
+        assert [line["command"] for line in lines] == [
+            "qgis_list_instances",
+            "qgis_list_layers",
+            "qgis_get_layer_info",
+        ]
+        listed, layers, failed = lines
+        assert listed["step_path"] == []
+        assert layers["step_path"] == ["レイヤを見る"]
+        assert layers["instance"] == "a"
+        assert layers["params"] == {"instance": "a"}
+        assert layers["result"] == {"n": 1}
+        assert failed["result"] is None
+        assert "no such layer" in failed["error"]["message"]
+        assert all(line["source"] == "mcp" for line in lines)
+        # pytest の actions.jsonl と同じ項目（+ source）
+        pytest_keys = set(
+            PytestRecord(
+                ts="",
+                duration_ms=0,
+                command="",
+                params=None,
+                result=None,
+                error=None,
+                instance=None,
+                step_path=(),
+            ).to_dict()
+        )
+        assert set(listed) == pytest_keys | {"source"}
+
+    def test_recording_tools_are_not_read_only(self) -> None:
+        """記録はファイルを書く。並列に投げられる read-only 扱いにしない。"""
+        tools = {t.name: t for t in TestMcpGatewayToolDescriptors()._list_tools()}
+        for name in ("qgis_record_start", "qgis_record_step", "qgis_record_stop"):
+            assert tools[name].annotations.read_only_hint is False
+        assert (
+            "選べない"
+            in tools["qgis_record_start"].input_schema["properties"]["name"]["description"]
+        )
 
 
 class TestMcpGatewayHubUnreachable:

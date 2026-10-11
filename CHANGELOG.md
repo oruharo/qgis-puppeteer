@@ -8,6 +8,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The MCP gateway can record what an agent does** (#8). For exploring a
+  task through MCP and then writing it up as a pytest E2E test, the gateway
+  appends every tool call to a JSONL file in the same shape as the pytest
+  diagnostic bundle's `actions.jsonl` (`command`, `params`, `result`, `error`,
+  `instance`, `duration_ms`, `step_path`, plus `source: "mcp"`). New tools
+  `qgis_record_start(name)`, `qgis_record_step(name)`, `qgis_record_stop()`;
+  `QPUPPETEER_MCP_RECORD=1` records the whole session. Files go under
+  `QPUPPETEER_MCP_RECORD_DIR` (default `<TEMP>/qgis_puppeteer/recordings`);
+  the agent names a recording but cannot choose the path. Results over 2000
+  characters are truncated, images are noted by size, tool errors are kept
+  whole. The record type moved to `qgis_puppeteer.action_log` so that both
+  writers share it; `pytest_qgis_puppeteer._action_recorder` re-exports it and
+  its output is unchanged. No code generation (ADR-0002 §16).
+
 - **The Worker records QgsMessageLog, and tests can fail on it** (#5, roadmap
   B5c). Plugins often catch an exception and log it with
   `QgsMessageLog.logMessage(..., Qgis.Critical)`; that never reaches

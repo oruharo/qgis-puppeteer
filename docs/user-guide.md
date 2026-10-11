@@ -23,11 +23,12 @@ selector・Locator・dialog handler 等の機能リファレンスをまとめ�
 9. [地図の画像スナップショット（`qgis_render_map`）](#map-image-snapshot)
 10. [Uncaught Qt/Python 例外と test fail linkage](#uncaught-exceptions)
 11. [QgsMessageLog の記録と判定](#message-log)
-12. [複数 QGIS（multi-instance）](#multi-instance)
-13. [Permissions / 信頼モード](#permissions)
-14. [環境変数リファレンス](#環境変数リファレンス)
-15. [Troubleshooting](#troubleshooting)
-16. [Roadmap](#roadmap)
+12. [MCP の操作記録](#mcp-recording)
+13. [複数 QGIS（multi-instance）](#multi-instance)
+14. [Permissions / 信頼モード](#permissions)
+15. [環境変数リファレンス](#環境変数リファレンス)
+16. [Troubleshooting](#troubleshooting)
+17. [Roadmap](#roadmap)
 
 ---
 
@@ -1285,6 +1286,45 @@ MCP からは `qgis_get_recent_messages` / `qgis_clear_recent_messages`。未捕
 
 ---
 
+<a id="mcp-recording"></a>
+
+## MCP の操作記録（探索を pytest に書き起こす元資料）
+
+エージェントが MCP 経由で QGIS を操作して手順を探り、安定した手順を pytest の
+E2E テストに書き起こす、という使い方のために、gateway は呼ばれたツールを
+JSONL に記録できる。形式は pytest の診断バンドルの `actions.jsonl` と同じ
+（`command` / `params` / `result` / `error` / `instance` / `duration_ms` /
+`step_path`、加えて `source: "mcp"`）なので、同じ道具で読める。テストコードの
+自動生成はしない（ADR-0002 §16）。記録は人やエージェントが書き起こすときの
+材料。
+
+```text
+qgis_record_start(name="parcel-edit")      → {"recording": true, "path": ".../20261011-221500_parcel-edit.jsonl"}
+qgis_record_step(name="レイヤを開く")       → 以降の記録の step_path が ["レイヤを開く"]
+...（普段どおりに操作）
+qgis_record_stop()                          → {"recording": false, "path": "...", "actions": 12}
+```
+
+- **全ツールが記録される**（`qgis_list_instances` のように Worker を呼ばない
+  ものも含む）。`qgis_record_*` 自身は記録しない
+- `params` は `None` を除いた引数。`qgis_execute_python` のコードも入る
+- `result` は本文の JSON。2000 文字を超えるもの（UI スナップショット等）は
+  `{"truncated": true, "chars": N, "head": "..."}`。画像は中身を書かず大きさだけ
+- 失敗（tool error）は `error.message` に本文全体
+- `instance` は明示の `instance` 引数、無ければ `qgis_use_instance` で選んだもの
+- 1 行ずつ追記するので、gateway が落ちてもそこまでの記録は残る
+
+**保存先はエージェントには選ばせない。** `QPUPPETEER_MCP_RECORD_DIR`（既定
+`<TEMP>/qgis_puppeteer/recordings`）の下に `<日時>_<name>.jsonl` で作る。名前の
+英数・`-`・`_` 以外は `_` になる。任意のパスを受け付けると、エージェントに
+「どこにでも書ける」道具を渡すことになるため。
+
+エージェントに頼まず、セッション全体を常に記録したいときは、gateway の環境変数
+に `QPUPPETEER_MCP_RECORD=1` を立てる（`.mcp.json` の `env`）。起動時に
+`session` という名前で記録を始め、終了時に閉じる。
+
+---
+
 ## Multi-instance
 
 複数の QGIS プロセスを同時に Hub に接続させて、コマンドを切り替えながら
@@ -1527,6 +1567,14 @@ await client.call("qgis_clear_session_permissions")
 | 変数 | 既定 | 用途 |
 |---|---|---|
 | `QPUPPETEER_LOG_LEVEL` | `INFO` | logger のレベル |
+
+### MCP gateway
+
+| 変数 | 既定 | 用途 |
+|---|---|---|
+| `QPUPPETEER_GATEWAY_LOG` | `<TEMP>/qgis_puppeteer/gateway.log` | gateway のログファイル |
+| `QPUPPETEER_MCP_RECORD` | unset | `1` で起動時から操作を記録する（[MCP の操作記録](#mcp-recording)） |
+| `QPUPPETEER_MCP_RECORD_DIR` | `<TEMP>/qgis_puppeteer/recordings` | 操作記録の保存先 |
 
 ### coverage（標準 coverage.py 変数 — 参考）
 
