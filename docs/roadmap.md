@@ -56,7 +56,6 @@
 
 | タスク | 工数 | カテゴリ | 内容 |
 |--------|------|----------|------|
-| **B5c**: `qgis_message.log` を diagnostic bundle に同梱 | 1d | 🔍 解析 | `QgsMessageLog` tail を Worker 側 push で bundle に追加 |
 | **Hub/Worker deferred mode** | 3d | 🌐 適用 | プロトコルに `mode: "deferred"` 追加（長時間 slot 対応） |
 | **Hub/Worker push event** | 3d | 🧪 DX / 🛡️ 安定 | Worker → Client の event 機構（poll を消せる） |
 | **Flaky 自動検出** | 3d | 🛡️ 安定 / 📊 可視 | CI 履歴解析で quarantine 候補レポート |
@@ -68,7 +67,7 @@
 
 | カテゴリ | 該当タスク |
 |----------|------------|
-| 🔍 **解析** | B5c, 動画録画 |
+| 🔍 **解析** | 動画録画 |
 | 🛡️ **安定** | push event, Flaky 検出 |
 | 📊 **可視** | Flaky 検出, Summary HTML |
 | 🧪 **DX** | push event |
@@ -83,9 +82,8 @@
 
 1. **PyPI publish workflow** — 0.1.0 を実際に配布するなら最初に必要。tag 駆動の release workflow を整える。
 2. **xdist 実機検証 + env 並列** — 大規模 env 運用に着手したいケースが出てきた時にまとめて。並列の壁（Hub の状態、QGIS の Qt 多重起動）を実機で叩いてから設計判断。
-3. **B5c（qgis_message.log）** — 失敗解析でログが欲しくなったタイミングで。Worker 側 push が必要なため、push event と同時期に着手すると効率が良い。
-4. **push event / deferred mode** — poll ベースで困るユースケース（長時間処理、リアルタイム監視）が具体化してから。プロトコル拡張なので互換性に注意。
-5. **Flaky 検出 / Summary HTML / 動画録画 / remote** — どれも「あれば便利」系。具体的な要望に応じて優先度を上げる。
+3. **push event / deferred mode** — poll ベースで困るユースケース（長時間処理、リアルタイム監視）が具体化してから。プロトコル拡張なので互換性に注意。
+4. **Flaky 検出 / Summary HTML / 動画録画 / remote** — どれも「あれば便利」系。具体的な要望に応じて優先度を上げる。
 
 「使い込んで困った順に詰める」が基本方針です。
 

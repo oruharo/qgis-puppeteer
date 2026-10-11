@@ -103,6 +103,13 @@ def _install_fake_tools() -> dict[str, Any]:
     exception_recorder.size_limit = _CallRecorder(7)
     exception_recorder.clear = _CallRecorder(None)
 
+    message_recorder = types.ModuleType("qgis_puppeteer.qgis_tools.message_recorder")
+    message_recorder.install = _CallRecorder(True)
+    message_recorder.get_recent = _CallRecorder([{"seq": 3, "level": "critical"}])
+    message_recorder.last_seq = _CallRecorder(3)
+    message_recorder.size_limit = _CallRecorder(9)
+    message_recorder.clear = _CallRecorder(None)
+
     # サブモジュール属性としても参照できるようにしておく（`from pkg import x` 相当）
     qgis_tools_pkg.layer_tools = layer_tools
     qgis_tools_pkg.python_executor = python_executor
@@ -111,6 +118,7 @@ def _install_fake_tools() -> dict[str, Any]:
     qgis_tools_pkg.ui_tools = ui_tools
     qgis_tools_pkg.dialog_handler_tools = dialog_handler_tools
     qgis_tools_pkg.exception_recorder = exception_recorder
+    qgis_tools_pkg.message_recorder = message_recorder
 
     sys.modules["qgis_puppeteer.qgis_tools"] = qgis_tools_pkg
     sys.modules["qgis_puppeteer.qgis_tools.layer_tools"] = layer_tools
@@ -120,6 +128,7 @@ def _install_fake_tools() -> dict[str, Any]:
     sys.modules["qgis_puppeteer.qgis_tools.ui_tools"] = ui_tools
     sys.modules["qgis_puppeteer.qgis_tools.dialog_handler_tools"] = dialog_handler_tools
     sys.modules["qgis_puppeteer.qgis_tools.exception_recorder"] = exception_recorder
+    sys.modules["qgis_puppeteer.qgis_tools.message_recorder"] = message_recorder
 
     return {
         "layer": layer_tools,
@@ -130,6 +139,7 @@ def _install_fake_tools() -> dict[str, Any]:
         "ui": ui_tools,
         "dialog": dialog_handler_tools,
         "exc": exception_recorder,
+        "msg": message_recorder,
     }
 
 
@@ -146,6 +156,7 @@ def fake_tools() -> dict[str, Any]:
         "qgis_puppeteer.qgis_tools.ui_tools",
         "qgis_puppeteer.qgis_tools.dialog_handler_tools",
         "qgis_puppeteer.qgis_tools.exception_recorder",
+        "qgis_puppeteer.qgis_tools.message_recorder",
         "qgis_puppeteer.qgis_tools",
     ]:
         sys.modules.pop(mod_name, None)
@@ -404,6 +415,82 @@ class TestExceptionRecorderHandlers:
 
 
 # ==============================================================
+# QgsMessageLog recorder（#5）
+# ==============================================================
+
+
+class TestMessageRecorderHandlers:
+    def test_build_handlers_subscribes_to_the_message_log(self, fake_tools: dict[str, Any]) -> None:
+        build_handlers = _import_build_handlers()
+        build_handlers(None)
+        assert fake_tools["msg"].install.calls == [((), {})]
+
+    def test_subscription_failure_does_not_lose_the_other_handlers(
+        self, fake_tools: dict[str, Any]
+    ) -> None:
+        def broken() -> None:
+            raise RuntimeError("no QgsApplication")
+
+        fake_tools["msg"].install = broken
+        handlers = _import_build_handlers()(None)
+        assert "qgis_list_layers" in handlers
+        assert "qgis_get_recent_messages" in handlers
+
+    def test_get_recent_messages_forwards_filters(self, fake_tools: dict[str, Any]) -> None:
+        handlers = _import_build_handlers()(None)
+        result = handlers["qgis_get_recent_messages"](
+            {
+                "min_level": "critical",
+                "tags": ["MyPlugin"],
+                "sources": ["message_bar"],
+                "after_seq": 2,
+                "limit": 10,
+            }
+        )
+        _, kwargs = fake_tools["msg"].get_recent.calls[0]
+        assert kwargs == {
+            "min_level": "critical",
+            "tags": ["MyPlugin"],
+            "sources": ["message_bar"],
+            "after_seq": 2,
+            "limit": 10,
+        }
+        assert result == {
+            "messages": [{"seq": 3, "level": "critical"}],
+            "last_seq": 3,
+            "max_buffer_size": 9,
+        }
+
+    @pytest.mark.parametrize(
+        "params",
+        [{"tags": "MyPlugin"}, {"sources": "log"}, {"after_seq": "2"}, {"limit": True}],
+    )
+    def test_malformed_filters_are_reported_not_raised(
+        self, fake_tools: dict[str, Any], params: dict[str, Any]
+    ) -> None:
+        handlers = _import_build_handlers()(None)
+        result = handlers["qgis_get_recent_messages"](params)
+        assert result["success"] is False
+        assert fake_tools["msg"].get_recent.calls == []
+
+    def test_unknown_min_level_from_the_recorder_is_reported(
+        self, fake_tools: dict[str, Any]
+    ) -> None:
+        def reject(**_kwargs: Any) -> Any:
+            raise ValueError("min_level must be one of ...")
+
+        fake_tools["msg"].get_recent = reject
+        handlers = _import_build_handlers()(None)
+        result = handlers["qgis_get_recent_messages"]({"min_level": "error"})
+        assert result == {"success": False, "error": "min_level must be one of ..."}
+
+    def test_clear_recent_messages(self, fake_tools: dict[str, Any]) -> None:
+        handlers = _import_build_handlers()(None)
+        assert handlers["qgis_clear_recent_messages"]({}) == {"ok": True, "last_seq": 3}
+        assert fake_tools["msg"].clear.calls == [((), {})]
+
+
+# ==============================================================
 # Inventory / ImportError path
 # ==============================================================
 
@@ -441,6 +528,9 @@ class TestHandlerInventory:
             # uncaught exception recorder
             "qgis_get_recent_exceptions",
             "qgis_clear_recent_exceptions",
+            # QgsMessageLog recorder
+            "qgis_get_recent_messages",
+            "qgis_clear_recent_messages",
         }
         assert set(handlers.keys()) == expected
 

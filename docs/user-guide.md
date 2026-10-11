@@ -22,11 +22,12 @@ selector・Locator・dialog handler 等の機能リファレンスをまとめ�
 8. [E2E カバレッジ計測](#e2e-カバレッジ計測)
 9. [地図の画像スナップショット（`qgis_render_map`）](#map-image-snapshot)
 10. [Uncaught Qt/Python 例外と test fail linkage](#uncaught-exceptions)
-11. [複数 QGIS（multi-instance）](#multi-instance)
-12. [Permissions / 信頼モード](#permissions)
-13. [環境変数リファレンス](#環境変数リファレンス)
-14. [Troubleshooting](#troubleshooting)
-15. [Roadmap](#roadmap)
+11. [QgsMessageLog の記録と判定](#message-log)
+12. [複数 QGIS（multi-instance）](#multi-instance)
+13. [Permissions / 信頼モード](#permissions)
+14. [環境変数リファレンス](#環境変数リファレンス)
+15. [Troubleshooting](#troubleshooting)
+16. [Roadmap](#roadmap)
 
 ---
 
@@ -1189,6 +1190,98 @@ await client.call("qgis_clear_recent_exceptions", {})
 qgis.get_recent_exceptions(limit=50)
 qgis.clear_recent_exceptions()
 ```
+
+MCP からも `qgis_get_recent_exceptions` / `qgis_clear_recent_exceptions` で呼べる。
+
+---
+
+<a id="message-log"></a>
+
+## QgsMessageLog の記録と判定
+
+QGIS プラグインは、例外を捕まえて `QgsMessageLog.logMessage(..., Qgis.Critical)`
+に流す書き方をよくする。これは `sys.excepthook` を通らないので、上の
+[Uncaught exceptions](#uncaught-exceptions) では拾えない。画面は正常に見えるのに
+裏ではエラーがログに出ている、を見逃さないために、Worker は QgsMessageLog
+（QGIS の「ログメッセージ」パネルに出るもの）も記録している。
+
+### 記録されるもの
+
+Worker 側 `qgis_tools.message_recorder` が `QgsApplication.messageLog().messageReceived`
+を購読し、直近 1000 件を次の形で持つ:
+
+```python
+{"seq": 42, "ts": "...", "level": "critical", "tag": "MyPlugin",
+ "message": "failed to load ...", "source": "log", "thread": "MainThread"}
+```
+
+- `level` は `info` / `warning` / `critical` / `success` / `none`。重さの順は
+  info（= success）< warning < critical。QGIS の数値（Success=3）では比べない
+- **メッセージバーに出たもの**も入る。`QgsMessageBar` は表示したメッセージを
+  「タイトル : 本文」でログにも書くので、それを `source: "message_bar"` として
+  記録する（そのタグは翻訳されるので、日本語の QGIS では "Messages" ではない。
+  絞り込みは `source` で）
+- `seq` は通し番号。消去しても戻らないので、「前回以降の分」を `after_seq` で取れる
+- 記録を始められるのは QGIS Puppeteer プラグインが読み込まれてから。名前順で
+  それより前に読まれるプラグインの初期化中のメッセージは入らない
+
+### pytest で落とす（opt-in）
+
+```toml
+[tool.pytest.ini_options]
+qgis_fail_on_message_level = "critical"   # info / warning / critical。既定: 空（無効）
+qgis_message_allowlist = [
+    "Could not load the style",             # 本文に含まれれば除外（re.search）
+    "OGR::^Warning 1: .*",                  # <タグ>::<正規表現>
+]
+```
+
+`pytest.ini` / `tox.ini` なら `qgis_message_allowlist` は 1 行 1 ルールで並べる。
+有効にすると、call の直前に記録を消去し、call の後に指定レベル以上のメッセージが
+あれば **pass → fail** にする（既に fail ならセクションに追記）。流れは
+uncaught exception と同じで、dev モードでは自動で skip される。
+
+最初の `::` がタグの区切りなので、本文の `::`（`QgsVectorLayer::` など）は
+`\:\:` と書く（`pyproject.toml` では `'QgsVectorLayer\:\:load'` のように単引用符の
+文字列で）。`::` の前に正規表現の記号があると、取り違え防止でエラーになる。
+
+レベルは `warning` か `critical` を勧める。`info` にすると、QGIS Puppeteer
+自身がメッセージバーに出す登録の通知（「QGIS Puppeteer: <id>」。call 中に
+再接続したとき）でも落ちる。
+
+判定を有効にしているのに Worker に照会できなかったとき（Worker が古くて
+コマンドを持たない等）は、テストは落とさず、結果に「could not run」の
+セクションを付けて警告を出す。
+
+テスト単位の除外はマーカーで:
+
+```python
+@pytest.mark.qgis_allow_message(r"slow provider", tag="WMS")
+@pytest.mark.qgis_allow_message(source="message_bar")   # メッセージバーのものは無視
+def test_x(qgis): ...
+```
+
+`pattern` / `tag` / `source` を組み合わせ、全部に合うメッセージを除外する。
+レベル名の綴り違いはセッション開始時、マーカーの正規表現の誤りはそのテストの
+setup でエラーになる（黙って判定が無効になることはない）。
+
+失敗時の diagnostic bundle には、判定の有無に関わらず `qgis_messages.jsonl`
+（記録されているメッセージ全部）が入る。
+
+### 手動 API / MCP
+
+```python
+qgis.get_recent_messages(min_level="warning", tags=["MyPlugin"])
+qgis.get_recent_messages(sources=["message_bar"])
+qgis.get_recent_messages(after_seq=last_seen)   # 前回以降の分
+qgis.clear_recent_messages()
+```
+
+MCP からは `qgis_get_recent_messages` / `qgis_clear_recent_messages`。未捕捉の
+例外も `qgis_get_recent_exceptions` / `qgis_clear_recent_exceptions` で見られる。
+エージェントは操作の後にこの 2 つで「画面に出ない失敗」を確かめられる。
+`qgis_get_recent_messages` の結果の `last_seq` を次の呼び出しの `after_seq` に
+渡すと、増えた分だけが返る。
 
 ---
 

@@ -592,6 +592,11 @@ class TestMcpGatewayToolInventory:
             "qgis_unregister_dialog_handler",
             "qgis_list_dialog_handlers",
             "qgis_clear_dialog_handlers",
+            # 操作の裏で起きたこと（#5 / #8）
+            "qgis_get_recent_exceptions",
+            "qgis_clear_recent_exceptions",
+            "qgis_get_recent_messages",
+            "qgis_clear_recent_messages",
         }
         assert expected.issubset(set(names)), f"missing tools: {expected - set(names)}"
 
@@ -652,6 +657,51 @@ class TestMcpGatewayRenderMap:
         result, _ = self._call({"success": False, "error": "unknown crs: 'EPSG:1'"})
         assert result.is_error
         assert "unknown crs" in _extract_text(result)
+
+
+class TestMcpGatewayWorkerRecords:
+    """例外・ログメッセージの照会ツールが Worker のコマンドにそのまま渡ること。"""
+
+    @staticmethod
+    def _call(tool: str, args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        seen: dict[str, Any] = {}
+
+        async def run() -> CallToolResult:
+            async with fake_hub_server() as (_hub, hub_url):
+                worker = _FakeWorker(hub_url, label="a", pid=1)
+
+                def responder(req: dict[str, Any]) -> dict[str, Any]:
+                    seen["command"] = req["command"]
+                    seen["params"] = req["params"]
+                    return {"type": "response", "id": req["id"], "ok": True, "result": {}}
+
+                worker.responder = responder
+                await worker.start()
+                await worker.ready.wait()
+                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                async with Client(gateway, raise_exceptions=True) as client:
+                    return await client.call_tool(tool, args)
+
+        result = _run(run())
+        assert not result.is_error
+        return seen["command"], seen["params"]
+
+    def test_get_recent_messages_sends_only_given_filters(self) -> None:
+        command, params = self._call(
+            "qgis_get_recent_messages", {"min_level": "critical", "after_seq": 7}
+        )
+        assert command == "qgis_get_recent_messages"
+        assert params == {"min_level": "critical", "after_seq": 7}
+
+    def test_get_recent_exceptions_limit(self) -> None:
+        assert self._call("qgis_get_recent_exceptions", {"limit": 3}) == (
+            "qgis_get_recent_exceptions",
+            {"limit": 3},
+        )
+
+    @pytest.mark.parametrize("tool", ["qgis_clear_recent_messages", "qgis_clear_recent_exceptions"])
+    def test_clear_tools(self, tool: str) -> None:
+        assert self._call(tool, {}) == (tool, {})
 
 
 class TestMcpGatewayHubUnreachable:
@@ -915,6 +965,8 @@ class TestMcpGatewayToolDescriptors:
             "qgis_get_canvas_extent",
             "qgis_snapshot_ui",
             "qgis_list_dialog_handlers",
+            "qgis_get_recent_exceptions",
+            "qgis_get_recent_messages",
         }
 
     def test_open_world_hint_marks_the_arbitrary_tools(self) -> None:

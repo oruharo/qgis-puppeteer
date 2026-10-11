@@ -41,6 +41,7 @@ QT_TEST_FILES = [
     "packages/qgis-puppeteer/tests/test_ui_tools_snapshot.py",
     "packages/qgis-puppeteer/tests/test_render_tools_integration.py",
     "packages/qgis-puppeteer/tests/test_screenshot_tools_integration.py",
+    "packages/qgis-puppeteer/tests/test_message_recorder_integration.py",
 ]
 SRC = [
     REPO / "packages" / "qgis-puppeteer" / "src",

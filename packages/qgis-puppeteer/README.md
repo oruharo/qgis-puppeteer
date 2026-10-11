@@ -76,6 +76,7 @@ async with AutomationClient() as client:
 | Capture | `qgis_screenshot` (what the canvas shows), `qgis_render_map` (fixed extent / size / DPI, for image snapshots) |
 | Code | `qgis_execute_python`, `qgis_execute_with_permission`, `qgis_get_whitelist`, `qgis_clear_session_permissions` |
 | Discovery | `qgis_list_instances`, `qgis_use_instance`, `qgis_wait_ready` |
+| Behind the screen | `qgis_get_recent_exceptions`, `qgis_get_recent_messages` (QgsMessageLog, incl. message bar), and their `qgis_clear_*` |
 
 For full schemas and examples, see [Architecture document](https://github.com/oruharo/qgis-puppeteer/blob/main/docs/architecture/0001-qgis-puppeteer-architecture.md).
 

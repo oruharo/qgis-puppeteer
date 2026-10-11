@@ -53,6 +53,7 @@ def build_handlers(iface: Any | None = None) -> dict[str, Handler]:
             dialog_handler_tools,
             exception_recorder,
             layer_tools,
+            message_recorder,
             python_executor,
             render_tools,
             screenshot_tools,
@@ -212,7 +213,59 @@ def build_handlers(iface: Any | None = None) -> dict[str, Handler]:
     handlers["qgis_get_recent_exceptions"] = _get_recent_exceptions
     handlers["qgis_clear_recent_exceptions"] = _clear_recent_exceptions
 
+    # ------------------------------------------------------------
+    # QgsMessageLog recorder（#5 / ロードマップ B5c）
+    # ------------------------------------------------------------
+    # 例外を捕まえてログに流すプラグインの失敗は excepthook を通らない。
+    # 冪等なので再 init でも二重に購読しない。
+
+    try:
+        message_recorder.install()
+    except Exception:  # noqa: BLE001 - 記録できなくても他の handler は使える
+        logger.exception("Could not subscribe to QgsMessageLog")
+
+    def _get_recent_messages(params: dict[str, Any]) -> dict[str, Any]:
+        p = params if isinstance(params, dict) else {}
+        try:
+            messages = message_recorder.get_recent(
+                min_level=p.get("min_level"),
+                tags=_str_list(p.get("tags"), "tags"),
+                sources=_str_list(p.get("sources"), "sources"),
+                after_seq=_opt_int(p.get("after_seq"), "after_seq"),
+                limit=_opt_int(p.get("limit"), "limit"),
+            )
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        return {
+            "messages": messages,
+            "last_seq": message_recorder.last_seq(),
+            "max_buffer_size": message_recorder.size_limit(),
+        }
+
+    def _clear_recent_messages(_params: dict[str, Any]) -> dict[str, Any]:
+        message_recorder.clear()
+        return {"ok": True, "last_seq": message_recorder.last_seq()}
+
+    handlers["qgis_get_recent_messages"] = _get_recent_messages
+    handlers["qgis_clear_recent_messages"] = _clear_recent_messages
+
     return handlers
+
+
+def _str_list(value: Any, name: str) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str) or not isinstance(value, list):
+        raise ValueError(f"{name} must be a list of strings")
+    return [str(v) for v in value]
+
+
+def _opt_int(value: Any, name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer")
+    return value
 
 
 def build_test_handlers(iface: Any | None = None) -> dict[str, Handler]:
