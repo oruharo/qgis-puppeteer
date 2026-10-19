@@ -818,6 +818,28 @@ timeout を超えると `WidgetNotActionableError`。strict mode で複数マッ
 4. `current_index`（QTabWidget）
 5. `text`（その他）
 
+### リスト・表・ツリーの中身
+
+`qgis_snapshot_ui` / `snapshot()` は、リスト・表・ツリーの中身も返す（モデルの表示値）。
+
+| widget | フィールド |
+|---|---|
+| `QListWidget` / `QListView` | `items`（文字列の list）、`current_row`（選択が無ければ `null`） |
+| `QTableWidget` / `QTableView` / `QTreeWidget` / `QTreeView` | `columns`（見出し）、`rows`（セルの 2 次元 list）、`current`（`{"row", "column"}` か `null`） |
+| どれも | `row_count`（全体の行数） |
+
+- 返すのは先頭 **100 行・50 列**まで。超えた分は返さず `"truncated": true` を付ける
+  （表は `column_count` も）。属性テーブルのような大きな表で応答が膨らまないように
+- ツリーは一番上の階層だけ（子の行は返さない）
+- 見出しを隠している表・ツリー（QGIS のレイヤパネルなど）には `columns` が付かない
+- 値は、文字列・数値・真偽値はそのまま、NULL は `null`、日付は ISO 形式（`"2026-10-20"`）、
+  それ以外は文字列
+- 中身は伏せない。パスワード欄（下）と違い、モデルの値には伏せる手がかりが無い
+- QGIS の `QgsAttributeTableView` などは、QGIS が Python に公開しているクラス名
+  （`QTableView` など）で出る。`object_name` で探すとよい
+
+それ以上（子の行、101 行目以降）が要るときは `execute_python` でモデルを読む。
+
 ### パスワード欄は文字を返さない
 
 `echoMode` が `Normal` 以外の `QLineEdit`（`Password` / `PasswordEchoOnEdit` /

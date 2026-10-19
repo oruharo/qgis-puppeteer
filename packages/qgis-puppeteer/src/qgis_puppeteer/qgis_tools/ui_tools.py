@@ -12,8 +12,10 @@ import re
 from collections.abc import Callable, Iterator
 from typing import Any
 
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QAbstractButton,
+    QAbstractItemView,
     QAction,
     QApplication,
     QCheckBox,
@@ -22,6 +24,7 @@ from qgis.PyQt.QtWidgets import (
     QDateTimeEdit,
     QDialog,
     QDoubleSpinBox,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListView,
@@ -51,6 +54,9 @@ _MODAL_STACK_RE = re.compile(r"^modal_stack\[(-?\d+)\]$")
 # Cap recursion to keep the payload bounded.
 _DEFAULT_MAX_DEPTH = 8
 _DEFAULT_MAX_CHILDREN = 200
+# リスト・表の中身の上限（#12）。属性テーブルのように大きな表で応答が膨らまないように
+_MAX_ITEM_ROWS = 100
+_MAX_ITEM_COLUMNS = 50
 
 
 def snapshot_ui(
@@ -1041,6 +1047,7 @@ def _populate_widget_value(widget: QWidget, info: dict) -> None:
         (QPlainTextEdit, _fill_plain_text),
         (QTextEdit, _fill_text_edit),
         (QTabWidget, _fill_tab_widget),
+        (QAbstractItemView, _fill_item_view),
     ]
     for cls, fn in handlers:
         if isinstance(widget, cls):
@@ -1094,6 +1101,104 @@ def _fill_plain_text(widget: QPlainTextEdit, info: dict) -> None:
 
 def _fill_text_edit(widget: QTextEdit, info: dict) -> None:
     info["text"] = widget.toPlainText()
+
+
+def _fill_item_view(widget: QAbstractItemView, info: dict) -> None:
+    """リスト・表・ツリーの中身を、モデルの DisplayRole から読む（#12）。
+
+    - リスト（``QListView`` / ``QListWidget``）：``items``（文字列の list）と ``current_row``
+    - 表・ツリー（``QTableView`` / ``QTableWidget`` / ``QTreeView`` / ``QTreeWidget``）：
+      ``columns``（見出し。見出しを隠していれば無し）、``rows``（セルの 2 次元 list）、
+      ``current``（``{"row", "column"}``）。ツリーは一番上の階層だけ
+    - どちらも ``row_count``（全体の行数）。``_MAX_ITEM_ROWS`` 行 / ``_MAX_ITEM_COLUMNS``
+      列を超えた分は返さず、``truncated: true`` を付ける（表は ``column_count`` も）
+
+    ``QHeaderView`` は表の子として同じモデルを持つので読まない（二重になる）。
+    値は伏せない（モデルにパスワード欄の概念は無い）。
+    """
+    if isinstance(widget, QHeaderView):
+        return
+    model = widget.model()
+    if model is None:
+        return
+    root = widget.rootIndex()
+    is_list = isinstance(widget, QListView)
+    try:
+        total_rows = model.rowCount(root)
+        # QAbstractListModel では columnCount() が private で呼べない（リストは 1 列）
+        total_cols = 1 if is_list else model.columnCount(root)
+    except Exception:  # noqa: BLE001 - 壊れたモデルでも snapshot は止めない
+        return
+    n_rows = min(total_rows, _MAX_ITEM_ROWS)
+    current = widget.currentIndex()
+    info["row_count"] = total_rows
+    truncated = total_rows > n_rows
+    if is_list:
+        column = widget.modelColumn()
+        info["items"] = [_display(model.index(r, column, root)) for r in range(n_rows)]
+        info["current_row"] = current.row() if current.isValid() else None
+    else:
+        n_cols = min(total_cols, _MAX_ITEM_COLUMNS)
+        # 見出しを隠したツリー（レイヤパネルなど）では、モデルの見出しは Qt の既定の
+        # 連番になるだけなので出さない
+        if _header_shown(widget):
+            info["columns"] = [_display_header(model, c) for c in range(n_cols)]
+        info["rows"] = [
+            [_display(model.index(r, c, root)) for c in range(n_cols)] for r in range(n_rows)
+        ]
+        info["current"] = (
+            {"row": current.row(), "column": current.column()} if current.isValid() else None
+        )
+        if total_cols > n_cols:
+            info["column_count"] = total_cols
+            truncated = True
+    if truncated:
+        info["truncated"] = True
+
+
+def _header_shown(widget: Any) -> bool:
+    """表・ツリーの横の見出しが表示される設定か（隠されていなければ True）。"""
+    if isinstance(widget, QTreeView):
+        return not widget.isHeaderHidden()
+    header = getattr(widget, "horizontalHeader", None)
+    if header is None:
+        return True
+    try:
+        return not header().isHidden()
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _display(index: Any) -> Any:
+    """セルの表示値。JSON にできる値（str / 数値 / bool / None）はそのまま、ほかは str。"""
+    try:
+        value = index.data(Qt.ItemDataRole.DisplayRole)
+    except Exception:  # noqa: BLE001
+        return None
+    return _jsonable(value)
+
+
+def _display_header(model: Any, column: int) -> Any:
+    try:
+        value = model.headerData(column, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole)
+    except Exception:  # noqa: BLE001
+        return None
+    return _jsonable(value)
+
+
+def _jsonable(value: Any) -> Any:
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    try:
+        if value.isNull():  # QVariant / QGIS の NULL、空の QDate など
+            return None
+    except Exception:  # noqa: BLE001 - isNull を持たない型
+        pass
+    # QDate / QTime / QDateTime は ISO 形式に。str() だと "PyQt5.QtCore.QDate(...)" になる
+    try:
+        return value.toString(Qt.DateFormat.ISODate)
+    except Exception:  # noqa: BLE001 - toString(format) を持たない型
+        return str(value)
 
 
 def _fill_tab_widget(widget: QTabWidget, info: dict) -> None:

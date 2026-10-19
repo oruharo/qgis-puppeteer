@@ -8,6 +8,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`qgis_snapshot_ui` returns what lists, tables and trees show** (#12). It
+  reported that a `QListWidget` or `QTableWidget` was there but not its
+  contents, so tests read cells through `execute_python`. Item views now carry
+  the model's display values: lists get `items` and `current_row`; tables and
+  trees get `columns` (left out when the header is hidden, as in QGIS's layer
+  panel), `rows` and `current`; all get `row_count`. Trees give their top level
+  only. At most 100 rows and 50 columns are returned, beyond that
+  `truncated: true` (and `column_count`). Values stay JSON: NULL becomes null,
+  dates ISO strings, other types strings. Checked in QGIS 3.34: a 200-feature
+  attribute table came back as 100 rows marked truncated, and the layer panel
+  listed the layer.
+
 - **`qgis_auto_fresh_after_failure = session` restarts the session QGIS after a
   failure** (#11). `true` runs only the next test on a fresh QGIS and then goes
   back to the session QGIS the failed test left dirty (an open dialog, loaded

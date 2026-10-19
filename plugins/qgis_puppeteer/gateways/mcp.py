@@ -1173,6 +1173,8 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
 
         既定ではモーダルと可視ダイアログのみ。QGIS 本体のツリーは巨大なので、
         include_main_window=true のときだけ含む。selector を組み立てる材料にする。
+        リスト・表・ツリーは中身も返す（items / columns / rows、先頭 100 行・50 列まで、
+        超えたら truncated）。パスワード欄は文字を返さない（masked）。
         """
         return await _call(
             ctx,
