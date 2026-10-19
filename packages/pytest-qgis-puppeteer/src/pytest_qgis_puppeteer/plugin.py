@@ -1170,6 +1170,8 @@ def hub_process(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        # posix: qgis_python がシェルスクリプトでも、Hub ごとプロセスグループで止められるように
+        start_new_session=sys.platform != "win32",
     )
 
     # Hub の stderr/stdout を drain thread で吸い上げ session config に貯める。
@@ -1197,11 +1199,7 @@ def hub_process(
     try:
         _wait_port_listen(hub_port, timeout_s=DEFAULT_HUB_LISTEN_TIMEOUT_S)
     except TimeoutError:
-        proc.terminate()
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        _stop_hub(proc, hub_port=hub_port)
         # drain thread が回収済みの stderr を使う（communicate は drain と競合する）
         for t in drain_threads:
             t.join(timeout=1.0)
@@ -1212,15 +1210,113 @@ def hub_process(
     try:
         yield proc
     finally:
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+        _stop_hub(proc, hub_port=hub_port)
         for t in drain_threads:
             t.join(timeout=2.0)
-        logger.info("Hub subprocess terminated (returncode=%s)", proc.returncode)
+
+
+def _stop_hub(proc: subprocess.Popen[bytes], *, hub_port: int) -> None:
+    """pytest が起こした Hub を止める（#14）。
+
+    Hub は ``qgis_python``（Windows の既定は ``python-qgis-ltr.bat``）で起こすので、
+    ``proc`` は ``cmd.exe`` で、Hub の python はその子になる。``proc.terminate()``
+    では ``cmd.exe`` しか止まらず、Hub が残ってポートを握り続けていた。
+
+    - Windows: ``taskkill /T /F`` でプロセスの木ごと止める（Hub は終わり際の
+      後片付けを持たないので、強制終了で困らない）
+    - posix: Hub は自分のプロセスグループで起こしてあるので、グループごと止める
+    - 最後に Hub のポートが閉じたかを確かめる。閉じなければ、Windows では
+      そのポートで待ち受けているプロセスを止め、だめなら警告する
+    """
+    if proc.poll() is None:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                check=False,
+                capture_output=True,
+            )
+        else:
+            import signal as _signal
+
+            try:
+                os.killpg(proc.pid, _signal.SIGTERM)
+            except OSError:
+                logger.debug("killpg(SIGTERM) raised (pid=%d)", proc.pid, exc_info=True)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=2)
+    if _wait_port_closed(hub_port, timeout_s=5.0):
+        logger.info("Hub stopped (returncode=%s, port %d closed)", proc.returncode, hub_port)
+        return
+    # 起動用のプロセスが先に終わっていて、Hub だけが残っている
+    leftover = _listening_pid(hub_port) if sys.platform == "win32" else None
+    if leftover is not None:
+        logger.warning("Hub still listening on port %d (pid=%d); killing it", hub_port, leftover)
+        subprocess.run(
+            ["taskkill", "/PID", str(leftover), "/T", "/F"],
+            check=False,
+            capture_output=True,
+        )
+        if _wait_port_closed(hub_port, timeout_s=5.0):
+            return
+    logger.warning(
+        "Hub port %d is still open after stopping the Hub (returncode=%s)",
+        hub_port,
+        proc.returncode,
+    )
+
+
+def _wait_port_closed(port: int, *, timeout_s: float) -> bool:
+    """127.0.0.1:port で誰も待ち受けなくなるまで待つ。閉じれば True。"""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.2)
+            try:
+                s.connect(("127.0.0.1", port))
+            except OSError:
+                return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+
+
+def _listening_pid(port: int) -> int | None:
+    """Windows: 127.0.0.1:port で LISTENING のプロセスの pid（``netstat -ano``）。"""
+    try:
+        out = subprocess.run(
+            ["netstat", "-ano", "-p", "TCP"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return _parse_listening_pid(out, port)
+
+
+def _parse_listening_pid(netstat_output: str, port: int) -> int | None:
+    """``netstat -ano -p TCP`` の出力から、port で待ち受けているプロセスの pid を探す。
+
+    状態の語（``LISTENING``）は Windows の言語で訳されることがあるので見ない。
+    待ち受けの行は相手側のアドレスが ``0.0.0.0:0`` になる。
+    """
+    for line in netstat_output.splitlines():
+        parts = line.split()
+        # TCP  127.0.0.1:60150  0.0.0.0:0  LISTENING  17700
+        if (
+            len(parts) >= 5
+            and parts[0] == "TCP"
+            and parts[1].endswith(f":{port}")
+            and parts[2] in ("0.0.0.0:0", "[::]:0")
+            and parts[-1].isdigit()
+        ):
+            return int(parts[-1])
+    return None
 
 
 @pytest.fixture(scope="session")

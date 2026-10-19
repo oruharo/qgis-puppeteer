@@ -284,6 +284,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **On Windows the Hub that pytest started stayed behind after the session**
+  (#14). The Hub runs under `qgis_python`, by default `python-qgis-ltr.bat`, so
+  the process pytest held was `cmd.exe` and the Hub's python its child;
+  `terminate()` stopped `cmd.exe` only ("Hub subprocess terminated
+  (returncode=1)" was cmd's exit), and the Hub kept its port for minutes until
+  its idle shutdown. The teardown, and the clean-up after a Hub that never
+  started listening, now stop the whole tree (`taskkill /T /F`; on posix the
+  Hub runs in its own process group, which is signalled), then check that the
+  port closed. If the launcher had already gone, the process still listening
+  on the port is found through `netstat` and stopped; otherwise a warning says
+  the port is still open. Checked on QGIS 3.34: no Hub was left after a
+  session.
+
 - **`fresh_qgis` QGIS were not registered when the test name was long, and stayed
   behind** (#13). The Hub took worker labels of at most 32 characters, and
   `fresh_qgis` labels its QGIS `fresh-<test name>`, so a test name over 26
