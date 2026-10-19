@@ -8,6 +8,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`qgis_auto_fresh_after_failure = session` restarts the session QGIS after a
+  failure** (#11). `true` runs only the next test on a fresh QGIS and then goes
+  back to the session QGIS the failed test left dirty (an open dialog, loaded
+  layers), so suites alternated between failing and passing. With `session`,
+  the next test that uses `qgis` first closes the session QGIS and starts it
+  again with the same settings; later tests run on the new one. A failed test
+  that ran on `fresh_qgis` does not trigger it, a failed restart errors that
+  test and is retried by the next one, and the restart's own calls stay out of
+  the next test's `actions.jsonl` (new `E2EAutomationClient.unrecorded()`).
+  The `qgis_process` fixture now yields a `SessionQgis` whose `restart()` a
+  conftest can also call. Checked on QGIS 3.34: a restart took 6.5–7.1s, with a
+  modeless or a modal dialog left open.
+
 - **The MCP gateway can record what an agent does** (#8). For exploring a
   task through MCP and then writing it up as a pytest E2E test, the gateway
   appends every tool call to a JSONL file in the same shape as the pytest

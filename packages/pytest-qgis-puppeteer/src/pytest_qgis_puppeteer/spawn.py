@@ -436,8 +436,11 @@ def stop_registered_worker(
     """
     if not _pid_alive(pid):
         return
+    # 閉じる依頼はテストの操作ではないので、操作記録に入れない
+    unrecorded = getattr(automation_client, "unrecorded", contextlib.nullcontext)
     try:
-        automation_client.execute_python(_CLOSE_QGIS_CODE, instance=instance_id)
+        with unrecorded():
+            automation_client.execute_python(_CLOSE_QGIS_CODE, instance=instance_id)
     except Exception:  # noqa: BLE001 - 応答しない QGIS は 3 で止める
         logger.warning(
             "Could not ask QGIS to close (instance_id=%s pid=%d); killing it",

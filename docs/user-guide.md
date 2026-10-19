@@ -474,6 +474,37 @@ routing は `qgis` fixture が自動でハンドル: spawn 後の Worker `instan
 dev モード（`QPUPPETEER_E2E_USE_RUNNING_QGIS=1`）下では `fresh_qgis` テストは
 skip される（既存 QGIS を再起動できないため）。
 
+#### 失敗の後に QGIS を起こし直す: `qgis_auto_fresh_after_failure`
+
+失敗したテストが QGIS に残したもの（閉じ忘れのダイアログ、読み込んだレイヤなど）で、
+後のテストが巻き添えで落ちるのを防ぐ。既定は `false`（何もしない）。
+
+```toml
+[tool.pytest.ini_options]
+qgis_auto_fresh_after_failure = "session"   # または "true"
+```
+
+| 値 | 失敗の後に起きること |
+|---|---|
+| `session` | 次に `qgis` を使うテストの準備で、session の QGIS を閉じて起こし直す。以降のテストも新しい QGIS で動く |
+| `true` | 次の 1 本だけを新しい QGIS（`fresh_qgis`）で動かす。その次からは元の session の QGIS に戻る |
+
+`true` では、汚れた session の QGIS はそのまま残る。そのため「落ちる → 次の 1 本は
+通る → また落ちる」と交互になることがある。ふつうは `session` を勧める。
+起こし直しのコストは、失敗 1 件につき QGIS の起動 1 回分（数秒〜十数秒）。
+
+- `session` でも、失敗したテストが `fresh_qgis` だった場合は起こし直さない
+  （session の QGIS を使っていないため）
+- 起こし直した QGIS は instance_id が変わる。`qgis` / `automation_client` は
+  そのまま新しい QGIS に届くが、`hub_ready` fixture の値（最初の instance_id）は古くなる
+- 起こし直しの呼び出し（閉じる依頼、起動の待ち）は、次のテストの操作記録に入らない
+- 起こし直せなかったときは、そのテストを error にして、次に `qgis` を使うテストで
+  もう一度試す
+- dev モードや、`qgis_process` fixture を override している場合（[9.](#9-完全制御が必要な場合-fixture-オーバーライド)）は
+  起こし直せないので、警告だけ出して何もしない
+- conftest から自分で起こし直すこともできる。`qgis_process` fixture の値
+  （`SessionQgis`）の `restart()` を呼ぶ
+
 ### 7. 任意のタイミングで QGIS を立てる: `spawn_qgis()`
 
 multi-instance テストや「テスト本体内で QGIS を 2 つ立てて比較したい」場合は

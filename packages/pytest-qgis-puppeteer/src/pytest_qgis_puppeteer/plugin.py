@@ -54,7 +54,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -245,12 +245,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     # ADR-0002 §10.7 / §17.5: 失敗連鎖防止の自動 fresh_qgis。前テストの call フェーズが
     # failed なら、次テスト setup 時に ``fresh_qgis`` marker を動的付与して QGIS を
     # 再起動する。1 件の失敗で QGIS 状態が壊れて以降全滅する事故への保険。
-    # 既定 OFF（fresh_qgis は ~10s/test のコスト）。
+    # ``session`` なら次の 1 本ではなく session の QGIS そのものを起こし直す（#11）。
+    # 既定 OFF（QGIS の起動は ~10s のコスト）。
     parser.addini(
         "qgis_auto_fresh_after_failure",
-        "Automatically mark the next test with @pytest.mark.fresh_qgis after a "
-        "test failure (ADR-0002 §17.5). Useful for isolation in long suites. "
-        "Default: 'false'.",
+        "After a test failure, 'true' runs the next test on a fresh QGIS "
+        "(@pytest.mark.fresh_qgis); 'session' restarts the session QGIS before the "
+        "next test that uses `qgis` (ADR-0002 §17.5). Default: 'false'.",
         default="false",
     )
     # ADR-0002 §17 / Roadmap "Qt 未捕捉例外 → fail 連動": Worker 内の sys.excepthook
@@ -306,6 +307,9 @@ _CONFIG_ATTR_ACTIVE_FRESH_WORKERS = "_qgis_puppeteer_active_fresh_workers"
 # ADR-0002 §17.5 失敗連鎖防止: 「直前テストが call で failed した」flag。
 # 次テストの setup phase で読まれて fresh_qgis marker が動的付与されたあとクリアされる。
 _CONFIG_ATTR_PRIOR_TEST_FAILED = "_qgis_puppeteer_prior_test_failed"
+# #11: ``qgis_auto_fresh_after_failure = session`` のとき「session の QGIS を起こし
+# 直す」flag。次に ``qgis`` を使うテストの setup で読まれ、起こし直したらクリアされる。
+_CONFIG_ATTR_RESTART_SESSION_QGIS = "_qgis_puppeteer_restart_session_qgis"
 # ADR-0003 Phase 3: 子側で test outcomes を集計するための buffer
 # (counts dict + failed_tests list + start time)。``pytest_sessionfinish`` で
 # ``_env_stats.json`` に書き出される。
@@ -1303,14 +1307,17 @@ def qgis_process(
     pytestconfig: pytest.Config,
     automation_client: E2EAutomationClient,
     hub_port: int,
-) -> Iterator[None]:
-    """`qgis_bin` で指定された QGIS 実行ファイルを spawn する。
+) -> Iterator[SessionQgis | None]:
+    """session の QGIS を spawn し、`SessionQgis` を yield する。
 
     QGIS 内の QGIS Puppeteer プラグインが `QPUPPETEER_HUB_PORT` env を見て
     外部所有者モードに入り、自前で Hub を spawn しない。teardown では Hub に
-    register された Worker の pid を `list_instances` で拾って kill。
+    register された Worker を `_shutdown_registered_workers` で閉じる。
 
-    dev モードでは spawn も teardown もしない。
+    ``qgis_auto_fresh_after_failure = session`` のときは、失敗の後にこの
+    `SessionQgis` を `restart()` する（#11）。conftest から直接呼んでもよい。
+
+    dev モードでは spawn も teardown もせず、None を yield する。
     """
     if _is_dev_mode():
         logger.info("Dev mode: skipping QGIS spawn/teardown (using existing Worker)")
@@ -1357,28 +1364,80 @@ def qgis_process(
     register_timeout_s = float(
         pytestconfig.getini("qgis_startup_timeout") or DEFAULT_WORKER_REGISTER_TIMEOUT_S
     )
-    with spawn_qgis(
-        hub_port=hub_port,
-        automation_client=automation_client,
-        env=user_env,
-        register_timeout_s=register_timeout_s,
-        graceful_shutdown_timeout_s=DEFAULT_QGIS_GRACEFUL_SHUTDOWN_TIMEOUT_S,
-        label="qgis_process",
-        **spawn_kwargs,
-    ):
-        try:
-            yield None
-        finally:
-            # session 中に fresh_qgis 等で別途 register された Worker が残っていれば
-            # ここで一括掃除（spawn_qgis 自身は自分の Worker しか kill しないため）。
-            _shutdown_registered_workers(automation_client)
+    session = SessionQgis(
+        lambda: spawn_qgis(
+            hub_port=hub_port,
+            automation_client=automation_client,
+            env=user_env,
+            register_timeout_s=register_timeout_s,
+            graceful_shutdown_timeout_s=DEFAULT_QGIS_GRACEFUL_SHUTDOWN_TIMEOUT_S,
+            label="qgis_process",
+            **spawn_kwargs,
+        )
+    )
+    session.start()
+    try:
+        yield session
+    finally:
+        # session 中に fresh_qgis 等で別途 register された Worker が残っていれば
+        # ここで一括掃除（spawn_qgis 自身は自分の Worker しか閉じないため）。
+        _shutdown_registered_workers(automation_client)
+        session.stop()
+
+
+class SessionQgis:
+    """session の QGIS（`qgis_process` fixture の値）。
+
+    `spawn_qgis` を ``ExitStack`` で持つので、session の途中で止めて起こし
+    直せる。失敗したテストが残したもの（閉じ忘れのダイアログなど）で後続が
+    落ち続けるのを止めるため（#11）。
+
+    Attributes:
+        worker: 今の session の QGIS。止めている間は None。
+    """
+
+    def __init__(self, spawn: Callable[[], contextlib.AbstractContextManager[Any]]) -> None:
+        self._spawn = spawn
+        self._stack: contextlib.ExitStack | None = None
+        self.worker: Any = None
+
+    def start(self) -> None:
+        """QGIS を起こし、コマンドを処理できるまで待つ。"""
+        if self._stack is not None:
+            return
+        stack = contextlib.ExitStack()
+        self.worker = stack.enter_context(self._spawn())
+        self._stack = stack
+
+    def stop(self) -> None:
+        """QGIS を閉じる（`spawn.stop_registered_worker`）。止まっていれば何もしない。"""
+        stack, self._stack = self._stack, None
+        self.worker = None
+        if stack is not None:
+            stack.close()
+
+    def restart(self) -> None:
+        """QGIS を閉じて、同じ設定で起こし直す。
+
+        起こし直した QGIS は instance_id が変わる。session の
+        ``automation_client`` は既定の送り先を固定していないので、そのまま
+        新しい QGIS に届く。``hub_ready`` の値（最初の instance_id）は古くなる。
+        """
+        started = time.monotonic()
+        self.stop()
+        self.start()
+        logger.info(
+            "Session QGIS restarted in %.1fs (instance_id=%s)",
+            time.monotonic() - started,
+            getattr(self.worker, "instance_id", None),
+        )
 
 
 @pytest.fixture(scope="session")
 def hub_ready(
     pytestconfig: pytest.Config,
     automation_client: E2EAutomationClient,
-    qgis_process: None,
+    qgis_process: SessionQgis | None,
 ) -> str:
     """Worker が登録され、**コマンドを処理できる**ようになるまで待つ。
 
@@ -1454,14 +1513,22 @@ def qgis(
     automation_client: E2EAutomationClient,
     hub_ready: str,
     hub_port: int,
+    qgis_process: SessionQgis | None,
 ) -> Iterator[E2EAutomationClient]:
     """テスト用 AutomationClient を供給する function-scope fixture。
 
     通常は session の ``automation_client`` をそのまま返す。``@pytest.mark.fresh_qgis``
     が付いた test では、その test だけ別 QGIS を spawn してそちらに routing する
     （ADR-0002 §10.4 / ADR-0003 §fresh_qgis 合成ルール）。
+
+    ``qgis_auto_fresh_after_failure = session`` で前のテストが失敗していれば、
+    先に session の QGIS を起こし直す（#11）。
     """
     del hub_ready  # session worker が register 済みであることを要求するだけ
+    if getattr(pytestconfig, _CONFIG_ATTR_RESTART_SESSION_QGIS, False):
+        # 起こし直しはこのテストの操作ではないので、操作記録に入れない
+        with automation_client.unrecorded():
+            _restart_session_qgis(pytestconfig, qgis_process, request.node.nodeid)
     marker = request.node.get_closest_marker("fresh_qgis")
     if marker is None:
         yield automation_client
@@ -1551,15 +1618,43 @@ def _resolve_diag_capture_screenshots(config: pytest.Config) -> bool:
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
-def _resolve_auto_fresh_after_failure(config: pytest.Config) -> bool:
-    """``qgis_auto_fresh_after_failure`` ini を bool で解釈する。
+def _restart_session_qgis(config: pytest.Config, session: Any, nodeid: str) -> None:
+    """失敗の後、session の QGIS を起こし直す（#11）。
 
-    既定 False（fresh_qgis は重いので opt-in）。truthy 値は "true"/"yes"/"1"/"on"。
+    起こし直せなければ flag を残す（次に ``qgis`` を使うテストでもう一度試す）。
+    ``session`` が `SessionQgis` でない（dev モード、または ``qgis_process`` を
+    override している）なら起こし直せないので、警告して flag を捨てる。
+    """
+    if not isinstance(session, SessionQgis):
+        setattr(config, _CONFIG_ATTR_RESTART_SESSION_QGIS, False)
+        logger.warning(
+            "qgis_auto_fresh_after_failure = session has no effect: the session QGIS "
+            "is not one this plugin started (dev mode, %s=1, or an overridden "
+            "qgis_process fixture), so it is not restarted",
+            ENV_DEV_MODE,
+        )
+        return
+    logger.info("Auto-fresh: prior test failed, restarting the session QGIS before %s", nodeid)
+    session.restart()
+    setattr(config, _CONFIG_ATTR_RESTART_SESSION_QGIS, False)
+
+
+def _resolve_auto_fresh_after_failure(config: pytest.Config) -> str | None:
+    """``qgis_auto_fresh_after_failure`` ini を解釈する。
+
+    - ``"session"`` → ``"session"``：session の QGIS を起こし直す（#11）
+    - truthy（"true"/"yes"/"1"/"on"）→ ``"test"``：次の 1 本を fresh_qgis にする
+    - それ以外（既定の "false" を含む）→ None：何もしない（QGIS の起動は重いので opt-in）
     """
     raw = config.getini("qgis_auto_fresh_after_failure")
     if raw is None or raw == "":
-        return False
-    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+        return None
+    value = str(raw).strip().lower()
+    if value == "session":
+        return "session"
+    if value in ("1", "true", "yes", "on"):
+        return "test"
+    return None
 
 
 def _resolve_fail_on_uncaught_exception(config: pytest.Config) -> bool:
@@ -2027,8 +2122,12 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo) -> Itera
         # ADR-0002 §17.5: 失敗連鎖防止の自動 fresh_qgis を opt-in なら flag を立てる。
         # 次テストの ``pytest_runtest_setup`` で flag を読んで fresh_qgis marker を
         # 動的付与する。
-        if _resolve_auto_fresh_after_failure(item.config):
+        mode = _resolve_auto_fresh_after_failure(item.config)
+        if mode == "test":
             setattr(item.config, _CONFIG_ATTR_PRIOR_TEST_FAILED, True)
+        elif mode == "session" and item.get_closest_marker("fresh_qgis") is None:
+            # fresh_qgis のテストは session の QGIS を使っていないので、起こし直さない
+            setattr(item.config, _CONFIG_ATTR_RESTART_SESSION_QGIS, True)
     # promoted_to_failed は将来 telemetry に使う想定（現状は info ログのみ）
     if promoted_to_failed:
         logger.info(

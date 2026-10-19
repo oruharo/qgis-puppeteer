@@ -256,26 +256,31 @@ class TestPendingScreenshotDir:
 
 
 class TestResolveAutoFreshAfterFailure:
-    """``qgis_auto_fresh_after_failure`` ini の bool 解釈ルール。"""
+    """``qgis_auto_fresh_after_failure`` ini の解釈ルール。"""
 
-    def test_default_false_when_unset(self) -> None:
+    def test_default_off_when_unset(self) -> None:
         config = _FakeConfig(ini={})
-        # 未設定（_FakeConfig.getini が "" を返す）→ 既定 False（opt-in）
-        assert _resolve_auto_fresh_after_failure(config) is False  # type: ignore[arg-type]
+        # 未設定（_FakeConfig.getini が "" を返す）→ 既定 off（opt-in）
+        assert _resolve_auto_fresh_after_failure(config) is None  # type: ignore[arg-type]
 
-    def test_empty_string_is_false(self) -> None:
+    def test_empty_string_is_off(self) -> None:
         config = _FakeConfig(ini={"qgis_auto_fresh_after_failure": ""})
-        assert _resolve_auto_fresh_after_failure(config) is False  # type: ignore[arg-type]
+        assert _resolve_auto_fresh_after_failure(config) is None  # type: ignore[arg-type]
 
     @pytest.mark.parametrize("value", ["true", "True", "1", "yes", "on", "  TRUE  "])
-    def test_truthy_values(self, value: str) -> None:
+    def test_truthy_values_mean_the_next_test(self, value: str) -> None:
         config = _FakeConfig(ini={"qgis_auto_fresh_after_failure": value})
-        assert _resolve_auto_fresh_after_failure(config) is True  # type: ignore[arg-type]
+        assert _resolve_auto_fresh_after_failure(config) == "test"  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("value", ["session", "Session", "  SESSION "])
+    def test_session(self, value: str) -> None:
+        config = _FakeConfig(ini={"qgis_auto_fresh_after_failure": value})
+        assert _resolve_auto_fresh_after_failure(config) == "session"  # type: ignore[arg-type]
 
     @pytest.mark.parametrize("value", ["false", "0", "no", "off", "anything-else"])
     def test_falsy_values(self, value: str) -> None:
         config = _FakeConfig(ini={"qgis_auto_fresh_after_failure": value})
-        assert _resolve_auto_fresh_after_failure(config) is False  # type: ignore[arg-type]
+        assert _resolve_auto_fresh_after_failure(config) is None  # type: ignore[arg-type]
 
 
 class TestPytestRuntestSetupAutoFresh:

@@ -987,6 +987,18 @@ class TestActionRecorderWireup:
         assert actions[0].step_path == ("ログイン",)
         assert actions[1].step_path == ()
 
+    def test_unrecorded_calls_are_left_out(self) -> None:
+        """#11: QGIS を閉じるなど、テストの操作ではない呼び出しは記録しない。"""
+        e2e, _inner = _make_client(call_results=[{"ok": True}, {"ok": True}, {"ok": True}])
+        rec = self._attach(e2e)
+        e2e.click_widget({"object_name": "before"})
+        with e2e.unrecorded():
+            e2e.click_widget({"object_name": "hidden"})
+        e2e.click_widget({"object_name": "after"})
+        names = [a.params["selector"]["object_name"] for a in rec.actions()]
+        assert names == ["before", "after"]
+        assert e2e.get_recorder() is rec
+
     def test_step_without_recorder_is_noop(self) -> None:
         """recorder 未 attach でも ``step()`` 自体は失敗しない（test 側の書きやすさ）。"""
         e2e, _inner = _make_client(call_results=[{"ok": True}])

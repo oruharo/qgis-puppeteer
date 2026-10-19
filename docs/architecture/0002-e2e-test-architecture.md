@@ -1468,6 +1468,15 @@ call フェーズが failed なら、`pytest_runtest_makereport` が config 上�
 1 件のみ（連続失敗時は毎回 fresh する）。既に明示 `fresh_qgis` marker が付いて
 いる test では二重付与しない。
 
+> **2026-10-20 注（#11 で追加）**: 次の 1 本だけを fresh にしても、失敗したテストが
+> 汚した session の QGIS はそのまま残る。後続はまたそこに戻るので、「落ちる → 1 本
+> 通る → また落ちる」と交互になった。そこで `qgis_auto_fresh_after_failure = session`
+> を足した。失敗の後、次に `qgis` を使うテストの準備で session の QGIS そのものを
+> 閉じて起こし直す。`qgis_process` fixture は `spawn_qgis` を `ExitStack` で持つ
+> `SessionQgis` を yield するようになり、`restart()` で起こし直せる。失敗したテストが
+> `fresh_qgis` だった場合は、session の QGIS を使っていないので起こし直さない。
+> 既存の `true` は「次の 1 本だけ」の意味のまま。
+
 ### Flaky 検出の自動化（§17.5）
 
 CI 結果の履歴解析により最近 N 回で M 回以上失敗しているテストを自動 quarantine 候補としてレポート。

@@ -369,6 +369,21 @@ class E2EAutomationClient:
         return self._recorder
 
     @contextmanager
+    def unrecorded(self) -> Iterator[None]:
+        """この中の ``call(...)`` を timeline に記録しない（操作後のスクリーンショットも撮らない）。
+
+        QGIS を閉じるなど、テストの操作ではない呼び出し用。失敗の後に session の
+        QGIS を起こし直すと、閉じる依頼が次のテストの記録に入り、閉じかけの
+        QGIS を撮ろうとして失敗していた（#11）。
+        """
+        recorder = self._recorder
+        self._recorder = None
+        try:
+            yield
+        finally:
+            self._recorder = recorder
+
+    @contextmanager
     def step(self, name: str) -> Iterator[None]:
         """論理ステップを recorder の step stack に push し、ネスト構造を timeline に残す。
 
