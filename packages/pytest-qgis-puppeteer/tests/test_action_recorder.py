@@ -61,6 +61,42 @@ class TestRecordBasic:
         # error 時 result は None（重複情報を出さない）
         assert rec.result is None
 
+    def test_value_put_into_a_password_field_is_redacted(self) -> None:
+        """#10: Worker が masked を返したら、入れた値は記録に残さない。"""
+        r = ActionRecorder()
+        params = {"selector": {"object_name": "password"}, "value": "s3cret"}
+        r.record(
+            command="qgis_set_widget_value",
+            params=params,
+            result={"success": True, "masked": True, "prior_value": None},
+        )
+        rec = r.actions()[0]
+        assert rec.params == {"selector": {"object_name": "password"}, "value": "***"}
+        assert "s3cret" not in json.dumps(rec.to_dict())
+        assert params["value"] == "s3cret"  # 呼び出し側の dict は書き換えない
+
+    def test_masked_widget_in_a_failure_also_redacts(self) -> None:
+        r = ActionRecorder()
+        r.record(
+            command="qgis_set_widget_value",
+            params={"selector": {"object_name": "password"}, "value": "s3cret"},
+            result={
+                "success": False,
+                "error": "widget_readonly",
+                "widget": {"class": "QLineEdit", "masked": True},
+            },
+        )
+        assert r.actions()[0].params["value"] == "***"
+
+    def test_ordinary_field_keeps_its_value(self) -> None:
+        r = ActionRecorder()
+        r.record(
+            command="qgis_set_widget_value",
+            params={"selector": {"object_name": "name"}, "value": "Tokyo"},
+            result={"success": True, "prior_value": ""},
+        )
+        assert r.actions()[0].params["value"] == "Tokyo"
+
     def test_negative_duration_clamped_to_zero(self) -> None:
         r = ActionRecorder()
         r.record(command="x", params={}, duration_ms=-5.0)

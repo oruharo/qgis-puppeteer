@@ -259,6 +259,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Password fields leaked their text** (#10). `QLineEdit`s in `Password`,
+  `PasswordEchoOnEdit` or `NoEcho` mode, and QGIS's `QgsPasswordLineEdit`, were
+  read like any other field, so a password typed by a test or a person ended up
+  in MCP responses (the agent's context) and in the diagnostic bundle. Such
+  fields now report `"masked": true` and no `text` in `qgis_snapshot_ui`, in the
+  widget summaries of click / set_value / actionability results, and through
+  `Locator.get_text()` / `get_value()`; a `text` selector never matches their
+  contents; `qgis_set_widget_value` returns `prior_value: null` and
+  `masked: true`; and the `value` put into one is written as `"***"` in
+  pytest's `actions.jsonl` and in MCP recordings
+  (`qgis_puppeteer.action_log.redact_secret_value`). Read the contents with
+  `execute_python` when a test really needs them.
+
 - **`fresh_qgis` crashed the QGIS it was cleaning up when `qgis_command` is a
   launcher that exits early** (#9). The teardown only stopped the process it
   had started; with a launcher already gone it fell through to the

@@ -90,6 +90,31 @@ def safe_jsonify(value: Any) -> Any:
         return "<unrepresentable>"
 
 
+SECRET_PLACEHOLDER = "***"
+
+
+def redact_secret_value(params: Any, result: Any) -> Any:
+    """パスワード欄に入れた ``value`` を、記録に残す前に伏せる（#10）。
+
+    相手がパスワード欄かは、値を入れる前には分からない。Worker は相手が
+    パスワード欄なら結果に ``masked: true``（または widget の要約に
+    ``masked: true``）を付けるので、それを見て ``params["value"]`` を
+    `SECRET_PLACEHOLDER` に置き換える。``params`` は書き換えずに新しい dict を返す。
+    """
+    if not isinstance(params, dict) or "value" not in params or not _reports_masked(result):
+        return params
+    return {**params, "value": SECRET_PLACEHOLDER}
+
+
+def _reports_masked(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+    if result.get("masked") is True:
+        return True
+    widget = result.get("widget")
+    return isinstance(widget, dict) and widget.get("masked") is True
+
+
 def format_error(exc: BaseException) -> dict[str, str]:
     """例外を ``{"type", "message"}`` にする。"""
     try:

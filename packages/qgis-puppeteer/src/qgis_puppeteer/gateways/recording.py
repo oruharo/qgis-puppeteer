@@ -42,7 +42,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
 
-from qgis_puppeteer.action_log import ActionRecord, now_iso, safe_jsonify
+from qgis_puppeteer.action_log import ActionRecord, now_iso, redact_secret_value, safe_jsonify
 
 logger = logging.getLogger(__name__)
 
@@ -135,11 +135,12 @@ class McpRecorder:
         if self._file is None:
             return
         rendered = summarize_result(result)
+        given = {k: v for k, v in params.items() if v is not None}
         rec = ActionRecord(
             ts=now_iso(),
             duration_ms=max(0.0, round(duration_ms, 3)),
             command=command,
-            params=safe_jsonify({k: v for k, v in params.items() if v is not None}),
+            params=safe_jsonify(redact_secret_value(given, rendered)),
             result=None if is_error else rendered,
             error={"type": "tool_error", "message": _text_of(result)} if is_error else None,
             instance=instance,

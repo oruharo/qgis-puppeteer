@@ -113,6 +113,32 @@ class TestRecorder:
         assert line["error"]["type"] == "tool_error"
         assert len(line["error"]["message"]) > 5000
 
+    def test_value_put_into_a_password_field_is_redacted(self, tmp_path: Path) -> None:
+        """#10: 結果が masked なら、記録の value は "***" になる。"""
+
+        class _Content:
+            type = "text"
+            text = json.dumps({"success": True, "masked": True, "prior_value": None})
+
+        class _Result:
+            content = [_Content()]
+            is_error = False
+
+        r = rec.McpRecorder(tmp_path)
+        path = r.start("pw")["path"]
+        r.record(
+            command="qgis_set_widget_value",
+            params={"selector": {"object_name": "password"}, "value": "s3cret"},
+            result=_Result(),
+            is_error=False,
+            instance=None,
+            duration_ms=0,
+        )
+        r.stop()
+        [line] = _lines(path)
+        assert line["params"]["value"] == "***"
+        assert "s3cret" not in Path(path).read_text(encoding="utf-8")
+
 
 class TestSummarizeResult:
     def test_json_text_is_parsed(self) -> None:

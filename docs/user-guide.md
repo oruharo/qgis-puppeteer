@@ -787,6 +787,24 @@ timeout を超えると `WidgetNotActionableError`。strict mode で複数マッ
 4. `current_index`（QTabWidget）
 5. `text`（その他）
 
+### パスワード欄は文字を返さない
+
+`echoMode` が `Normal` 以外の `QLineEdit`（`Password` / `PasswordEchoOnEdit` /
+`NoEcho`）と、QGIS の `QgsPasswordLineEdit` は、入っている文字を外に出さない。
+テストや人が入れたパスワードが、MCP の応答（エージェントの文脈）や診断バンドルに
+残らないようにするため。
+
+- `qgis_snapshot_ui` / `snapshot()`：`text` を返さず `"masked": true` を付ける。長さも出さない
+- `get_text()` / `get_value()`：`None`
+- click / set_value / actionability の結果に入る widget の要約にも `text` は入らない
+- selector の `text` は、パスワード欄の中身とは一致しない
+- `qgis_set_widget_value` は入れられる。戻り値の `prior_value` は `null`、`masked` は `true`
+- 入れた値（`value`）は、pytest の `actions.jsonl` と MCP の操作記録では `"***"` に置き換える
+
+中身を確かめる必要があるテストは、`execute_python` で明示的に読む
+（`_result = dlg.findChild(QLineEdit, "password").text()` など）。そのコードと
+戻り値は記録に残るので、本物のパスワードには使わない。
+
 ### 例
 
 ```python
@@ -1307,7 +1325,9 @@ qgis_record_stop()                          → {"recording": false, "path": "..
 
 - **全ツールが記録される**（`qgis_list_instances` のように Worker を呼ばない
   ものも含む）。`qgis_record_*` 自身は記録しない
-- `params` は `None` を除いた引数。`qgis_execute_python` のコードも入る
+- `params` は `None` を除いた引数。`qgis_execute_python` のコードも入る。
+  パスワード欄に入れた `value` は `"***"` に置き換わる
+  （[パスワード欄は文字を返さない](#パスワード欄は文字を返さない)）
 - `result` は本文の JSON。2000 文字を超えるもの（UI スナップショット等）は
   `{"truncated": true, "chars": N, "head": "..."}`。画像は中身を書かず大きさだけ
 - 失敗（tool error）は `error.message` に本文全体

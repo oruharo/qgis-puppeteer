@@ -253,12 +253,24 @@ def set_widget_value(selector: dict, value: Any, iface=None) -> dict:
 
     Returns:
         Dictionary with success flag, prior value, and widget metadata.
+        For a password field (`_is_secret_widget`) ``prior_value`` is None and
+        ``masked`` is True, so that callers that log calls can drop ``value``.
     """
     del iface
     widget, error = _resolve_actionable_widget(selector)
     if error is not None:
         return error
 
+    result = _apply_widget_value(widget, value)
+    if _is_secret_widget(widget):
+        if "prior_value" in result:
+            result["prior_value"] = None
+        result["masked"] = True
+    return result
+
+
+def _apply_widget_value(widget: Any, value: Any) -> dict:
+    """`set_widget_value` の本体：解決済みの widget に値を入れる。"""
     # readOnly な input への setValue は Qt 側で no-op になる（例: QLineEdit の
     # setText が値を変えない）が、テスト側からは「成功した」ように見えて
     # silent な失敗になる。早期に明示エラーで返して原因を見える化する。
@@ -852,7 +864,27 @@ def _walk_widgets(root: QWidget) -> Iterator[QWidget]:
     yield from root.findChildren(QWidget)
 
 
+def _is_secret_widget(widget: Any) -> bool:
+    """パスワード欄か（文字を外に出してはいけない欄か）。
+
+    ``echoMode`` が ``Normal`` 以外（``Password`` / ``PasswordEchoOnEdit`` /
+    ``NoEcho``）の ``QLineEdit`` が対象。``QgsPasswordLineEdit`` は目のボタンで
+    ``Normal`` に切り替えられるので、クラスでも判定する。
+    """
+    if not isinstance(widget, QLineEdit):
+        return False
+    if any(cls.__name__ == "QgsPasswordLineEdit" for cls in type(widget).__mro__):
+        return True
+    try:
+        return widget.echoMode() != QLineEdit.EchoMode.Normal
+    except Exception:  # noqa: BLE001 - 判定できなければ伏せる側に倒す
+        return True
+
+
 def _widget_text(widget: QWidget) -> str | None:
+    """widget の表示文字列。パスワード欄は None（要約にも探索にも使わせない）。"""
+    if _is_secret_widget(widget):
+        return None
     if isinstance(widget, QAbstractButton):
         return widget.text()
     if isinstance(widget, QLabel):
@@ -879,6 +911,8 @@ def _widget_summary(widget: Any) -> dict:
         text = widget.text()
     if text:
         info["text"] = text
+    if _is_secret_widget(widget):
+        info["masked"] = True
     role = _widget_role(widget)
     if role is not None:
         info["role"] = role
@@ -1026,7 +1060,12 @@ def _fill_checkable(widget: QAbstractButton, info: dict) -> None:
 
 
 def _fill_line_edit(widget: QLineEdit, info: dict) -> None:
-    info["text"] = widget.text()
+    # パスワード欄は文字も長さも出さない（#10）。読む必要があるテストは
+    # execute_python で明示的に読む
+    if _is_secret_widget(widget):
+        info["masked"] = True
+    else:
+        info["text"] = widget.text()
     placeholder = widget.placeholderText()
     if placeholder:
         info["placeholder"] = placeholder

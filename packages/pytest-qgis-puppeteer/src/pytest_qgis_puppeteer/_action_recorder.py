@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 # 1 行の形と直列化は MCP gateway の操作記録と共有する（qgis_puppeteer.action_log）
-from qgis_puppeteer.action_log import ActionRecord
+from qgis_puppeteer.action_log import ActionRecord, redact_secret_value
 from qgis_puppeteer.action_log import format_error as _format_error
 from qgis_puppeteer.action_log import now_iso as _now_iso
 from qgis_puppeteer.action_log import safe_jsonify as _safe_jsonify
@@ -183,12 +183,15 @@ class ActionRecorder:
         record の **前に** ``next_screenshot_path()`` で取って撮影し、ここに渡す）。
 
         max_actions を超えたら oldest を 1 件捨てて新規を append。
+
+        パスワード欄に入れた値は、結果の ``masked`` を見て ``"***"`` に置き換える
+        （`qgis_puppeteer.action_log.redact_secret_value`）。
         """
         record = ActionRecord(
             ts=ts or _now_iso(),
             duration_ms=max(0.0, float(duration_ms)),
             command=str(command),
-            params=_safe_jsonify(params),
+            params=_safe_jsonify(redact_secret_value(params, result)),
             result=_safe_jsonify(result) if error is None else None,
             error=_format_error(error) if error is not None else None,
             instance=str(instance) if instance is not None else None,
