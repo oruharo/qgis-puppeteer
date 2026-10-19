@@ -1061,108 +1061,26 @@ def _hub_bootstrap_path() -> Path:
     return Path(qgis_puppeteer.__file__).parent / "_hub_bootstrap.py"
 
 
-def _pid_alive(pid: int) -> bool:
-    """pid のプロセスがまだ生きているかを cross-platform に判定する（psutil 不使用）。
-
-    posix: ``os.kill(pid, 0)`` が ``ProcessLookupError`` なら死亡。
-    Windows: ``OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`` + ``GetExitCodeProcess``
-    で exit code が ``STILL_ACTIVE`` (259) なら生存とみなす。
-
-    ADR-0004 Phase 4: ``_terminate_pid_tree`` の固定 sleep を poll に置き換える
-    ためのヘルパ。
-    """
-    if sys.platform == "win32":
-        import ctypes
-        from ctypes import wintypes
-
-        process_query_limited_information = 0x1000
-        still_active = 259
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        kernel32.OpenProcess.restype = wintypes.HANDLE
-        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
-        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        h = kernel32.OpenProcess(process_query_limited_information, False, pid)
-        if not h:
-            return False
-        try:
-            exit_code = wintypes.DWORD()
-            if not kernel32.GetExitCodeProcess(h, ctypes.byref(exit_code)):
-                return False
-            return exit_code.value == still_active
-        finally:
-            kernel32.CloseHandle(h)
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
-
-
-def _wait_pid_dead(pid: int, *, timeout_s: float, poll_interval_s: float = 0.1) -> bool:
-    """pid のプロセスが消えるまで poll する。timeout 内に消えれば True を返す。
-
-    ADR-0004 Phase 4: 固定 sleep 廃止のための helper。
-    """
-    deadline = time.monotonic() + timeout_s
-    while True:
-        if not _pid_alive(pid):
-            return True
-        if time.monotonic() >= deadline:
-            return not _pid_alive(pid)
-        time.sleep(poll_interval_s)
-
-
-def _terminate_pid_tree(pid: int, *, graceful_timeout_s: float) -> None:
-    """QGIS プロセスを graceful → timeout で force kill する。
-
-    ADR-0004 Phase 4: 固定 ``time.sleep(graceful_timeout_s)`` ではなく
-    ``_wait_pid_dead`` で poll するので、QGIS が graceful 終了したら待ち時間を
-    切り上げる（fresh_qgis 多用テストの total time 短縮に効く）。
-    """
-    if sys.platform != "win32":
-        import signal as _signal
-
-        try:
-            os.kill(pid, _signal.SIGTERM)
-        except OSError:
-            logger.debug("SIGTERM(%d) raised", pid, exc_info=True)
-            return
-        if _wait_pid_dead(pid, timeout_s=graceful_timeout_s):
-            return
-        try:
-            os.kill(pid, _signal.SIGKILL)
-        except OSError:
-            logger.debug("SIGKILL(%d) raised", pid, exc_info=True)
-        return
-
-    logger.info("Terminating QGIS pid=%d (graceful)", pid)
-    subprocess.run(
-        ["taskkill", "/PID", str(pid), "/T"],
-        check=False,
-        capture_output=True,
-    )
-    if _wait_pid_dead(pid, timeout_s=graceful_timeout_s):
-        return
-    result = subprocess.run(
-        ["taskkill", "/PID", str(pid), "/T", "/F"],
-        check=False,
-        capture_output=True,
-    )
-    if result.returncode == 0:
-        logger.info("Force-killed QGIS pid=%d", pid)
-
-
 def _shutdown_registered_workers(client: E2EAutomationClient) -> None:
-    """Hub に register されている全 Worker を順に graceful kill。"""
+    """Hub に register されている全 Worker を順に閉じる。
+
+    pid を外から止めるのではなく、まず QGIS 自身に閉じてもらう
+    （`spawn.stop_registered_worker`。消えなければその pid だけを強制終了）。
+    """
+    from pytest_qgis_puppeteer.spawn import stop_registered_worker
+
     try:
         instances = client.list_instances()
     except Exception:  # noqa: BLE001 - best-effort on teardown
         logger.warning("Could not list workers for teardown", exc_info=True)
         return
     for inst in instances:
-        _terminate_pid_tree(inst.pid, graceful_timeout_s=DEFAULT_QGIS_GRACEFUL_SHUTDOWN_TIMEOUT_S)
+        stop_registered_worker(
+            client,
+            instance_id=inst.instance_id,
+            pid=inst.pid,
+            graceful_timeout_s=DEFAULT_QGIS_GRACEFUL_SHUTDOWN_TIMEOUT_S,
+        )
 
 
 # ==============================================================

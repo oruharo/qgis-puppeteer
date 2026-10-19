@@ -259,6 +259,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`fresh_qgis` crashed the QGIS it was cleaning up when `qgis_command` is a
+  launcher that exits early** (#9). The teardown only stopped the process it
+  had started; with a launcher already gone it fell through to the
+  dangling-worker path, which ran `QgsApplication.exitQgis()` inside the live
+  QGIS. That function is the last step of shutdown, not a way to quit, and the
+  QGIS crashed and stayed behind after a 30-second teardown. The teardown now
+  stops the Worker's own pid from `list_instances`: it asks QGIS to close its
+  main window (discarding project changes, so no save prompt), waits for the
+  pid to go, and otherwise force-kills that pid alone, without `/T`. The
+  session teardown closes leftover Workers the same way instead of sending
+  `taskkill /T` to each pid.
+
 - **`qgis_screenshot` saved a transparent image headless, and reported sizes it
   did not use** (#7). Without a canvas it started a render job but saved the
   empty image it had prepared instead of the job's result; it now renders with

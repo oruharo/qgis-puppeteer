@@ -231,6 +231,24 @@ Phase 1 の段階から以下の last-resort を実装する:
 これは ADR-0002 §10.4（`fresh_qgis`）でも同じ問題が出るため、共通ヘルパとして
 `_dispose_worker_best_effort(pid, instance_id)` を切り出して両者で使う。
 
+> **2026-10-20 注（#9 で変更）**: 手順 2 の `QgsApplication.exitQgis()` は誤りだった。
+> `exitQgis()` は終了処理の最後に呼ぶ後片付け（プロバイダの破棄など）で、GUI が
+> 動いている QGIS の中で呼ぶと QGIS が落ちる。`qgis_command` が QGIS を起こして
+> すぐ終わるランチャーだと、`__exit__` で止める subprocess が既に無いので毎回この
+> 経路に入り、QGIS が落ちて残った。今の手順は次のとおり（`spawn.stop_registered_worker`。
+> session の後片付け `_shutdown_registered_workers` も同じものを使う）。
+>
+> 1. `list_instances()` で **instance_id が一致する** Worker を探し、その pid（QGIS
+>    本体）を相手にする。subprocess の pid ではない
+> 2. QGIS の中で、プロジェクトの変更を捨ててメインウィンドウを閉じるよう頼み
+>    （`QTimer.singleShot(0, iface.mainWindow().close)`）、pid が消えるのを待つ
+> 3. 消えなければ、その pid **だけ**を強制終了する（Windows で `/T` を付けない。
+>    子に先に合図が届いて本体が止まらなかった例がある）
+> 4. 最後に、subprocess が残っていれば従来どおり止める
+>
+> 共通ヘルパの名前は `_dispose_worker_best_effort` ではなく `stop_registered_worker`
+> になった。
+
 ### Windows での graceful kill（Phase 4 で改善）
 
 既存の `_terminate_pid_tree`（plugin.py L281-307）は graceful terminate 後に

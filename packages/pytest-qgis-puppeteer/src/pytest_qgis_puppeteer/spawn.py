@@ -23,6 +23,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -359,47 +360,168 @@ def _shutdown_worker_best_effort(
     instance_id: str,
     graceful_timeout_s: float,
 ) -> None:
-    """Worker を graceful → force kill → Hub 側 dangling 検出の順で片付ける。
+    """spawn した QGIS と、起動に使ったプロセスを片付ける。
 
-    ADR-0004 §"dangling worker last-resort" の Phase 1 必須要件:
+    止める相手は ``proc`` ではなく、Hub に登録されている Worker の pid（QGIS
+    本体）。``command`` がランチャーで、QGIS を起こしてすぐ終わる場合、``proc``
+    はもう居ないので、``proc`` だけを見ると QGIS が残る（#9）。
 
-    1. graceful terminate → wait
-    2. 残っていれば force kill
-    3. それでも Hub 側に instance が残っていたら remote から ``QgsApplication.exitQgis()``
-       を試す（subprocess は死んでるが register が deregister されないケース）
-    4. 失敗は warning ログだけ出す（次のテストに進む方を優先）
+    1. Worker がまだ一覧に居れば `stop_registered_worker` で閉じる（閉じるよう
+       頼み、消えなければその pid だけを強制終了）
+    2. ``proc`` が残っていれば従来どおり止める。``qgis_bin`` を直接起こした場合は
+       1 で同じプロセスが終わっているので何もしない。Worker が一覧に居ない
+       （登録が外れた、Hub に聞けない）場合はここが唯一の片付けになる
+    3. 失敗は warning ログだけ出す（次のテストに進む方を優先）
     """
-    if proc.poll() is None:
-        _terminate_worker(proc, graceful_timeout_s=graceful_timeout_s)
-
-    # Hub 側 dangling 検出（subprocess kill だけでは deregister されないケース対策）
+    worker_pid: int | None = None
     try:
-        instances = automation_client.list_instances()
+        for info in automation_client.list_instances():
+            if info.instance_id == instance_id:
+                worker_pid = info.pid
+                break
     except Exception:  # noqa: BLE001 - teardown は best-effort
         logger.warning(
             "list_instances() failed during spawn_qgis teardown (instance_id=%s)",
             instance_id,
             exc_info=True,
         )
-        return
 
-    for info in instances:
-        if info.instance_id != instance_id and info.pid != proc.pid:
-            continue
-        # まだ Hub 側に残っている → remote graceful shutdown を試す（best-effort）。
-        # execute_python は fail-fast だが、下の except でまとめて握る。
+    if worker_pid is not None:
+        stop_registered_worker(
+            automation_client,
+            instance_id=instance_id,
+            pid=worker_pid,
+            graceful_timeout_s=graceful_timeout_s,
+        )
+
+    if proc.poll() is None:
+        _terminate_worker(proc, graceful_timeout_s=graceful_timeout_s)
+
+
+# QGIS に自分で閉じてもらうコード。プロジェクトの変更は捨てる（保存の確認
+# ダイアログで止まらないように）。``QTimer`` で 1 拍遅らせるのは、この
+# execute_python の応答を返してから閉じるため。
+#
+# ``QgsApplication.exitQgis()`` は使わない。あれは終了処理の最後に呼ぶ後片付け
+# （プロバイダの破棄など）で、GUI が動いている最中に呼ぶと QGIS が落ちる。
+_CLOSE_QGIS_CODE = """\
+from qgis.core import QgsApplication, QgsProject
+from qgis.PyQt.QtCore import QTimer
+from qgis.utils import iface
+
+QgsProject.instance().setDirty(False)
+if iface is not None and iface.mainWindow() is not None:
+    QTimer.singleShot(0, iface.mainWindow().close)
+else:
+    QTimer.singleShot(0, QgsApplication.instance().quit)
+"""
+
+
+def stop_registered_worker(
+    automation_client: E2EAutomationClient,
+    *,
+    instance_id: str,
+    pid: int,
+    graceful_timeout_s: float,
+) -> None:
+    """Hub に登録されている QGIS を閉じる（best-effort、例外は出さない）。
+
+    1. QGIS の中でメインウィンドウを閉じるよう頼む（`_CLOSE_QGIS_CODE`）
+    2. ``pid`` が消えるのを ``graceful_timeout_s`` まで待つ
+    3. 消えなければ ``pid`` だけを強制終了する
+
+    3 で子プロセスごと（Windows の ``taskkill /T``）止めないのは、子に先に合図が
+    届いて、本体が止まらないまま固まった例があるため。外部所有者モードの QGIS
+    は Hub を起こさないので、止めるべき子は無い。
+    """
+    if not _pid_alive(pid):
+        return
+    try:
+        automation_client.execute_python(_CLOSE_QGIS_CODE, instance=instance_id)
+    except Exception:  # noqa: BLE001 - 応答しない QGIS は 3 で止める
+        logger.warning(
+            "Could not ask QGIS to close (instance_id=%s pid=%d); killing it",
+            instance_id,
+            pid,
+            exc_info=True,
+        )
+    else:
+        if _wait_pid_dead(pid, timeout_s=graceful_timeout_s):
+            logger.info("QGIS closed (instance_id=%s pid=%d)", instance_id, pid)
+            return
+        logger.warning(
+            "QGIS did not close within %.1fs (instance_id=%s pid=%d); killing it",
+            graceful_timeout_s,
+            instance_id,
+            pid,
+        )
+    _force_kill_pid(pid)
+    if not _wait_pid_dead(pid, timeout_s=2.0):
+        logger.warning("QGIS still alive after force kill (pid=%d)", pid)
+
+
+def _force_kill_pid(pid: int) -> None:
+    """``pid`` だけを強制終了する（子プロセスは巻き込まない）。"""
+    if sys.platform == "win32":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/F"],
+            check=False,
+            capture_output=True,
+        )
+        return
+    import signal as _signal
+
+    try:
+        os.kill(pid, _signal.SIGKILL)
+    except OSError:
+        logger.debug("SIGKILL(%d) raised", pid, exc_info=True)
+
+
+def _pid_alive(pid: int) -> bool:
+    """pid のプロセスがまだ生きているかを cross-platform に判定する（psutil 不使用）。
+
+    posix: ``os.kill(pid, 0)`` が ``ProcessLookupError`` なら死亡。
+    Windows: ``OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`` + ``GetExitCodeProcess``
+    で exit code が ``STILL_ACTIVE`` (259) なら生存とみなす。
+    """
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        process_query_limited_information = 0x1000
+        still_active = 259
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        h = kernel32.OpenProcess(process_query_limited_information, False, pid)
+        if not h:
+            return False
         try:
-            automation_client.execute_python(
-                "from qgis.core import QgsApplication; QgsApplication.exitQgis()",
-                instance=info.instance_id,
-            )
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "Remote exitQgis() failed for dangling worker (instance_id=%s pid=%d)",
-                info.instance_id,
-                info.pid,
-                exc_info=True,
-            )
+            exit_code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(h, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == still_active
+        finally:
+            kernel32.CloseHandle(h)
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _wait_pid_dead(pid: int, *, timeout_s: float, poll_interval_s: float = 0.1) -> bool:
+    """pid のプロセスが消えるまで poll する。timeout 内に消えれば True を返す。"""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if not _pid_alive(pid):
+            return True
+        if time.monotonic() >= deadline:
+            return not _pid_alive(pid)
+        time.sleep(poll_interval_s)
 
 
 def _terminate_worker(proc: subprocess.Popen[bytes], *, graceful_timeout_s: float) -> None:

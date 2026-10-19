@@ -13,12 +13,14 @@
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from dataclasses import dataclass
 from typing import Any
 
 import pytest
+from pytest_qgis_puppeteer import spawn as spawn_module
 from pytest_qgis_puppeteer.spawn import (
     SpawnedWorker,
     WorkerRegisterTimeout,
@@ -26,6 +28,7 @@ from pytest_qgis_puppeteer.spawn import (
     _build_env,
     _wait_for_worker_by_token,
     spawn_qgis,
+    stop_registered_worker,
 )
 
 # ============================================================
@@ -115,9 +118,41 @@ class _FakeAutomationClient:
                     inst.launch_token = token
         return snapshot
 
+    # QGIS 側で起きることの代役（閉じる、応答しない等）。None なら何もしない
+    on_execute_python: Any = None
+
     def execute_python(self, code: str, *, instance: str | None = None) -> Any:
         self.execute_python_calls.append({"code": code, "instance": instance})
+        if self.on_execute_python is not None:
+            self.on_execute_python(code, instance)
         return None
+
+
+class _FakeProcesses:
+    """``spawn._pid_alive`` / ``spawn._force_kill_pid`` の代役。
+
+    ``alive`` に入っている pid だけが生きている。強制終了された pid は
+    ``force_killed`` に積まれ、``alive`` から消える。
+    """
+
+    def __init__(self) -> None:
+        self.alive: set[int] = set()
+        self.force_killed: list[int] = []
+
+    def pid_alive(self, pid: int) -> bool:
+        return pid in self.alive
+
+    def force_kill(self, pid: int) -> None:
+        self.force_killed.append(pid)
+        self.alive.discard(pid)
+
+
+@pytest.fixture
+def processes(monkeypatch: pytest.MonkeyPatch) -> _FakeProcesses:
+    fake = _FakeProcesses()
+    monkeypatch.setattr(spawn_module, "_pid_alive", fake.pid_alive)
+    monkeypatch.setattr(spawn_module, "_force_kill_pid", fake.force_kill)
+    return fake
 
 
 class _FakePopen:
@@ -572,18 +607,81 @@ class TestSpawnQgisContextManager:
         # subprocess は terminate された（dangling 防止）
         assert mock_popen[0].terminated or mock_popen[0].killed
 
-    def test_dangling_worker_remote_shutdown_attempted(
+    def test_launcher_exited_worker_is_asked_to_close(
         self,
         monkeypatch: pytest.MonkeyPatch,
         mock_popen: list[_FakePopen],
+        processes: _FakeProcesses,
     ) -> None:
-        """teardown 時に Hub 側に instance が残っていれば remote exitQgis() を呼ぶ。"""
+        """#9: ランチャーが先に終わっていても、一覧の pid の QGIS を閉じる。
+
+        以前はここで、動いている QGIS の中で ``exitQgis()`` を呼んで落としていた。
+        """
         monkeypatch.delenv("QPUPPETEER_E2E_USE_RUNNING_QGIS", raising=False)
         client = _FakeAutomationClient()
         client.bind_popens(mock_popen)
         client.feed(
-            [_FakeInstance(instance_id="inst-1", pid=12345)],  # register 検出
-            [_FakeInstance(instance_id="inst-1", pid=12345)],  # teardown 時もまだ残ってる
+            [_FakeInstance(instance_id="inst-1", pid=23456)],  # register 検出
+            [_FakeInstance(instance_id="inst-1", pid=23456)],  # teardown 時もまだ居る
+        )
+        processes.alive.add(23456)
+        client.on_execute_python = lambda code, instance: processes.alive.discard(23456)
+        with spawn_qgis(
+            hub_port=9876,
+            automation_client=client,  # type: ignore[arg-type]
+            command=["launcher.bat"],
+            register_timeout_s=2.0,
+            graceful_shutdown_timeout_s=0.5,
+        ):
+            mock_popen[0].returncode = 0  # ランチャーは QGIS を起こして終わった
+        codes = [call["code"] for call in client.execute_python_calls]
+        assert len(codes) == 1
+        assert "iface.mainWindow().close" in codes[0]
+        assert "setDirty(False)" in codes[0]
+        assert client.execute_python_calls[0]["instance"] == "inst-1"
+        assert not any("exitQgis" in code for code in codes)
+        assert processes.force_killed == []
+        assert not mock_popen[0].terminated
+
+    def test_worker_that_does_not_close_is_force_killed_alone(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_popen: list[_FakePopen],
+        processes: _FakeProcesses,
+    ) -> None:
+        """閉じない QGIS は、その pid だけを強制終了する。"""
+        monkeypatch.delenv("QPUPPETEER_E2E_USE_RUNNING_QGIS", raising=False)
+        client = _FakeAutomationClient()
+        client.bind_popens(mock_popen)
+        client.feed(
+            [_FakeInstance(instance_id="inst-1", pid=23456)],
+            [_FakeInstance(instance_id="inst-1", pid=23456)],
+        )
+        processes.alive.add(23456)
+        with spawn_qgis(
+            hub_port=9876,
+            automation_client=client,  # type: ignore[arg-type]
+            command=["launcher.bat"],
+            register_timeout_s=2.0,
+            graceful_shutdown_timeout_s=0.1,
+        ):
+            mock_popen[0].returncode = 0
+        assert len(client.execute_python_calls) == 1
+        assert processes.force_killed == [23456]
+
+    def test_unlisted_worker_falls_back_to_the_subprocess(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_popen: list[_FakePopen],
+        processes: _FakeProcesses,
+    ) -> None:
+        """Worker が一覧に居なければ、従来どおり起動したプロセスを止める。"""
+        monkeypatch.delenv("QPUPPETEER_E2E_USE_RUNNING_QGIS", raising=False)
+        client = _FakeAutomationClient()
+        client.bind_popens(mock_popen)
+        client.feed(
+            [_FakeInstance(instance_id="inst-1", pid=12345)],
+            [_FakeInstance(instance_id="other", pid=999)],  # 自分はもう居ない
         )
         with spawn_qgis(
             hub_port=9876,
@@ -593,11 +691,83 @@ class TestSpawnQgisContextManager:
             graceful_shutdown_timeout_s=0.1,
         ):
             pass
-        # remote exitQgis() が呼ばれている
-        assert any(
-            "exitQgis" in call["code"] and call["instance"] == "inst-1"
-            for call in client.execute_python_calls
+        assert client.execute_python_calls == []
+        assert processes.force_killed == []
+        assert mock_popen[0].terminated or mock_popen[0].killed
+
+
+# ============================================================
+# stop_registered_worker / _force_kill_pid（#9）
+# ============================================================
+
+
+class TestStopRegisteredWorker:
+    def test_dead_pid_is_left_alone(self, processes: _FakeProcesses) -> None:
+        client = _FakeAutomationClient()
+        stop_registered_worker(
+            client,  # type: ignore[arg-type]
+            instance_id="inst-1",
+            pid=23456,
+            graceful_timeout_s=0.1,
         )
+        assert client.execute_python_calls == []
+        assert processes.force_killed == []
+
+    def test_unreachable_worker_is_force_killed(self, processes: _FakeProcesses) -> None:
+        """閉じるよう頼めない（応答しない）QGIS は待たずに強制終了する。"""
+        client = _FakeAutomationClient()
+
+        def _raise(code: str, instance: str | None) -> None:
+            raise TimeoutError("worker did not answer")
+
+        client.on_execute_python = _raise
+        processes.alive.add(23456)
+        started = time.monotonic()
+        stop_registered_worker(
+            client,  # type: ignore[arg-type]
+            instance_id="inst-1",
+            pid=23456,
+            graceful_timeout_s=5.0,
+        )
+        assert processes.force_killed == [23456]
+        assert time.monotonic() - started < 2.0  # graceful_timeout_s は待たない
+
+
+class TestForceKillPid:
+    def test_windows_kills_the_pid_without_its_tree(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[list[str]] = []
+        monkeypatch.setattr(spawn_module.sys, "platform", "win32")
+        monkeypatch.setattr(spawn_module.subprocess, "run", lambda cmd, **kwargs: calls.append(cmd))
+        spawn_module._force_kill_pid(23456)
+        assert calls == [["taskkill", "/PID", "23456", "/F"]]
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="SIGKILL is posix only")
+    def test_posix_sends_sigkill(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import signal
+
+        calls: list[tuple[int, int]] = []
+        monkeypatch.setattr(spawn_module.os, "kill", lambda pid, sig: calls.append((pid, sig)))
+        spawn_module._force_kill_pid(23456)
+        assert calls == [(23456, signal.SIGKILL)]
+
+
+class TestShutdownRegisteredWorkers:
+    def test_every_listed_worker_is_stopped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """session の後片付けも、pid に taskkill /T ではなく同じ手順で閉じる。"""
+        from pytest_qgis_puppeteer.plugin import _shutdown_registered_workers
+
+        stopped: list[tuple[str, int]] = []
+        monkeypatch.setattr(
+            spawn_module,
+            "stop_registered_worker",
+            lambda client, *, instance_id, pid, graceful_timeout_s: stopped.append(
+                (instance_id, pid)
+            ),
+        )
+        client = _FakeAutomationClient()
+        client.feed([_FakeInstance("a", 111), _FakeInstance("b", 222)])
+        _shutdown_registered_workers(client)  # type: ignore[arg-type]
+        assert stopped == [("a", 111), ("b", 222)]
 
 
 # ============================================================
