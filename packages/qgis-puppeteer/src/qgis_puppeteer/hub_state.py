@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import secrets
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import PurePosixPath, PureWindowsPath
@@ -26,6 +27,7 @@ from qgis_puppeteer.protocol import (
     ErrorCode,
     InstanceInfo,
     RegisterRequest,
+    RejectedRegistration,
 )
 
 # ============================================================
@@ -67,8 +69,12 @@ LIVENESS_PROBE_SECONDS: float = 2.0
 # SUPERSEDE / sticky / registered_seq が飛ぶのを防ぐ。Hub は誰も戻らなければ
 # grace 満了（最長 GRACE 秒）後に通常どおり idle-shutdown する。
 
-# label の最大長（ADR-0001 §5）
-LABEL_MAX_LENGTH: int = 32
+# label の最大長（ADR-0001 §5）。32 → 128（#13、2026-10-20）。fresh_qgis の
+# ``fresh-<テスト名>`` が普通の長さのテスト名で収まるように
+LABEL_MAX_LENGTH: int = 128
+
+# #13: 断った登録を launch_token ごとに覚えておく件数（古いものから捨てる）
+REJECTED_REGISTRATIONS_MAX: int = 64
 
 # Origin 検証の許可ホスト（ADR-0001 §9.2）
 _ALLOWED_ORIGIN_HOSTS: frozenset[str] = frozenset({"localhost", "127.0.0.1"})
@@ -324,6 +330,9 @@ class HubState:
         self._seq_counter: int = 0
         # ADR-0005 C1=(b): liveness probe 待ちの保留登録（conn_id → 保留情報）。
         self._pending: dict[str, _PendingRegistration] = {}
+        # #13: 断った登録（launch_token → (記録, 断った時刻)）。起動した側が
+        # 待たずに失敗し、起こした QGIS を片付けられるように
+        self._rejected: OrderedDict[str, tuple[RejectedRegistration, float]] = OrderedDict()
 
     # ----- 登録 -----
 
@@ -335,9 +344,9 @@ class HubState:
         # 2. label 妥当性チェック
         lv = validate_label(label)
         if not lv.ok:
-            return RegisterOutcome(
-                ok=False,
-                error=Error(
+            return self._reject(
+                req,
+                Error(
                     code=ErrorCode.LABEL_CONFLICT,
                     message=f"Invalid label '{label}': {lv.reason}",
                     details={"reason": lv.reason},
@@ -421,6 +430,9 @@ class HubState:
         # label_explicit: worker が明示指定した label がそのまま採用された時のみ
         # True（auto 採番 / suffix rename は再起動で変わるので False）。
         label_explicit = bool(req.label) and label == req.label
+        # 一度断った token でも、後で登録できたら記録は要らない（#13）
+        if req.launch_token:
+            self._rejected.pop(req.launch_token, None)
         """grace 残骸を掃除して新しい不透明 instance_id で登録する共通経路。
 
         通常の FRESH / SUPERSEDE / takeover / suffix / liveness 確認後の
@@ -495,9 +507,9 @@ class HubState:
         if alive_responders:
             # 真に同時 active な同 label（U3 の事故）→ fail-safe で reject。
             suggested = self._suggest_alternate_label(label)
-            return RegisterOutcome(
-                ok=False,
-                error=Error(
+            return self._reject(
+                pending.req,
+                Error(
                     code=ErrorCode.LABEL_CONFLICT,
                     message=f"Label '{label}' is already in use by a live instance",
                     details={"suggested_label": suggested, "policy": "reject"},
@@ -512,6 +524,43 @@ class HubState:
                 self._conn_by_instance.pop(entry.instance_id, None)
                 evicted.append(entry.instance_id)
         return self._register_fresh(conn_id, pending.req, label, evicted_ids=tuple(evicted))
+
+    def _reject(self, req: RegisterRequest, error: Error) -> RegisterOutcome:
+        """登録を断る。launch_token 付きなら、断ったことを覚えておく（#13）。
+
+        token の形式自体が不正な登録は、覚えても照合に使えないので覚えない。
+        """
+        token = req.launch_token
+        if token and validate_launch_token(token).ok:
+            self._rejected.pop(token, None)
+            self._rejected[token] = (
+                RejectedRegistration(
+                    launch_token=token,
+                    pid=req.pid,
+                    label=req.label,
+                    code=error.code.value,
+                    message=error.message,
+                ),
+                self._clock(),
+            )
+            while len(self._rejected) > REJECTED_REGISTRATIONS_MAX:
+                self._rejected.popitem(last=False)
+        return RegisterOutcome(ok=False, error=error)
+
+    def list_rejected(self) -> list[RejectedRegistration]:
+        """断った登録を古い順に返す（#13）。``rejected_ago`` は今からの経過秒。"""
+        now = self._clock()
+        return [
+            RejectedRegistration(
+                launch_token=rec.launch_token,
+                pid=rec.pid,
+                label=rec.label,
+                code=rec.code,
+                message=rec.message,
+                rejected_ago=round(now - at, 1),
+            )
+            for rec, at in self._rejected.values()
+        ]
 
     def cancel_pending_registration(self, conn_id: str) -> None:
         """保留中の登録を破棄する（newcomer が probe 中に切断した場合等）。"""

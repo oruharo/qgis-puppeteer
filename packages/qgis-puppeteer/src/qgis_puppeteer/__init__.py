@@ -55,6 +55,7 @@ from qgis_puppeteer.protocol import (
     MessageType,
     RegisterAck,
     RegisterRequest,
+    RejectedRegistration,
     Request,
     Response,
     Role,
@@ -75,6 +76,7 @@ if TYPE_CHECKING:
         AutomationClientError,
         NotConnectedError,
         RegisterError,
+        RegistrationRejectedError,
         RequestError,
     )
 
@@ -85,6 +87,7 @@ _CLIENT_EXPORTS = frozenset(
         "AutomationClientError",
         "NotConnectedError",
         "RegisterError",
+        "RegistrationRejectedError",
         "RequestError",
     }
 )
@@ -151,6 +154,7 @@ __all__ = [
     "AutomationClientError",
     "NotConnectedError",
     "RegisterError",
+    "RegistrationRejectedError",
     "RequestError",
     # hub_spawn（Hub 起動競合回避）
     "DEFAULT_HUB_HOST",
@@ -183,6 +187,7 @@ __all__ = [
     "ListInstancesRequest",
     "ListInstancesResponse",
     "Message",
+    "RejectedRegistration",
     "MessageType",
     "RegisterAck",
     "RegisterRequest",

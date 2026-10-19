@@ -1558,7 +1558,7 @@ def qgis(
     from pytest_qgis_puppeteer.spawn import spawn_qgis
 
     saved_default = automation_client.get_default_instance()
-    label = f"fresh-{request.node.name}"
+    label = _fresh_label(request.node)
     spawn_kwargs: dict[str, Any] = {
         "hub_port": hub_port,
         "automation_client": automation_client,
@@ -1583,12 +1583,45 @@ def qgis(
             active_fresh = {}
             setattr(pytestconfig, _CONFIG_ATTR_ACTIVE_FRESH_WORKERS, active_fresh)
         active_fresh[request.node.nodeid] = worker
+        # ラベルはテスト名を縮めたものになりうるので、どのテストの QGIS かを残す（#13）
+        logger.info(
+            "fresh_qgis: %s runs on instance_id=%s (label=%s, pid=%d)",
+            request.node.nodeid,
+            worker.instance_id,
+            worker.label,
+            worker.pid,
+        )
         automation_client.use_instance(worker.instance_id)
         try:
             yield automation_client
         finally:
             automation_client.use_instance(saved_default)
             active_fresh.pop(request.node.nodeid, None)
+
+
+def _fresh_label(item: pytest.Item) -> str:
+    """fresh_qgis の QGIS に付けるラベル（#13）。
+
+    ふつうは ``fresh-<テスト名>``。パラメータの値が長くて Hub の上限
+    （``LABEL_MAX_LENGTH``）を超えるときは、値の代わりにパラメータの番号を使う
+    （``fresh-test_open[2]``、パラメータが複数なら ``[2-0]``）。同じテストの別の
+    ケースと同じラベルにならず、人にも何番目のケースか読める。関数名だけで
+    上限を超えるときは切る。テストの完全な名前は、起動時のログと診断バンドルの
+    ``fresh_qgis.json`` に残る。
+    """
+    from qgis_puppeteer.hub_state import LABEL_MAX_LENGTH
+
+    label = f"fresh-{item.name}"
+    if len(label) <= LABEL_MAX_LENGTH:
+        return label
+    base = getattr(item, "originalname", None) or item.name
+    callspec = getattr(item, "callspec", None)
+    if callspec is not None:
+        numbers = "-".join(str(i) for i in callspec.indices.values())
+        label = f"fresh-{base}[{numbers}]"
+    else:
+        label = f"fresh-{base}"
+    return label[:LABEL_MAX_LENGTH]
 
 
 # ==============================================================
@@ -1948,6 +1981,23 @@ def _dump_diagnostic_bundle(
     if active_fresh:
         worker = active_fresh.get(item.nodeid)
         if worker is not None:
+            try:
+                # どの QGIS で動いたか（ラベルはテスト名を縮めたものになりうる、#13）
+                (bundle_dir / "fresh_qgis.json").write_text(
+                    json.dumps(
+                        {
+                            "nodeid": item.nodeid,
+                            "instance_id": worker.instance_id,
+                            "label": worker.label,
+                            "pid": worker.pid,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("fresh_qgis.json failed during diagnostic dump", exc_info=True)
             try:
                 stdout_lines = worker.captured_stdout()
                 stderr_lines = worker.captured_stderr()

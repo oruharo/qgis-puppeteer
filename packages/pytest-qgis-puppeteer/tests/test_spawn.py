@@ -23,6 +23,7 @@ import pytest
 from pytest_qgis_puppeteer import spawn as spawn_module
 from pytest_qgis_puppeteer.spawn import (
     SpawnedWorker,
+    WorkerRegisterRejected,
     WorkerRegisterTimeout,
     _build_command,
     _build_env,
@@ -30,6 +31,8 @@ from pytest_qgis_puppeteer.spawn import (
     spawn_qgis,
     stop_registered_worker,
 )
+from qgis_puppeteer.client import RegistrationRejectedError
+from qgis_puppeteer.protocol import RejectedRegistration
 
 # ============================================================
 # fakes
@@ -605,6 +608,80 @@ class TestSpawnQgisContextManager:
         ):
             pass
         # subprocess は terminate された（dangling 防止）
+        assert mock_popen[0].terminated or mock_popen[0].killed
+
+    @pytest.mark.parametrize(
+        ("label", "env"),
+        [
+            ("x" * 129, None),
+            ("1234", None),
+            (None, {"QPUPPETEER_WORKER_LABEL": "@reserved"}),
+        ],
+        ids=["too-long", "digits-only", "env-at-prefix"],
+    )
+    def test_label_the_hub_would_reject_fails_before_launch(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_popen: list[_FakePopen],
+        label: str | None,
+        env: dict[str, str] | None,
+    ) -> None:
+        """#13: 起こしてから断られると、待ったあとに「登録されなかった」としか分からない。"""
+        monkeypatch.delenv("QPUPPETEER_E2E_USE_RUNNING_QGIS", raising=False)
+        client = _FakeAutomationClient()
+        with (
+            pytest.raises(ValueError, match="would reject the worker label"),
+            spawn_qgis(
+                hub_port=9876,
+                automation_client=client,  # type: ignore[arg-type]
+                qgis_bin="qgis-bin.exe",
+                label=label,
+                env=env,
+            ),
+        ):
+            pass
+        assert mock_popen == []  # QGIS は起こしていない
+
+    def test_rejected_registration_kills_the_qgis_and_fails_fast(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_popen: list[_FakePopen],
+        processes: _FakeProcesses,
+    ) -> None:
+        """#13: Hub が断ったら待たずに失敗し、断られた QGIS（pid）を止める。"""
+        monkeypatch.delenv("QPUPPETEER_E2E_USE_RUNNING_QGIS", raising=False)
+        client = _FakeAutomationClient()
+        client.bind_popens(mock_popen)
+        processes.alive.add(23456)
+
+        def _rejected(*_args: Any, **_kwargs: Any) -> str:
+            raise RegistrationRejectedError(
+                RejectedRegistration(
+                    launch_token="lt-x",
+                    pid=23456,
+                    label="fresh-x",
+                    code="label_conflict",
+                    message="Label 'fresh-x' is already in use by a live instance",
+                )
+            )
+
+        client.wait_for_ready = _rejected  # type: ignore[method-assign]
+        started = time.monotonic()
+        with (
+            pytest.raises(WorkerRegisterRejected, match="already in use") as excinfo,
+            spawn_qgis(
+                hub_port=9876,
+                automation_client=client,  # type: ignore[arg-type]
+                command=["launcher.bat"],
+                register_timeout_s=30.0,
+                graceful_shutdown_timeout_s=0.1,
+            ),
+        ):
+            pass
+        assert time.monotonic() - started < 5.0
+        assert isinstance(excinfo.value, WorkerRegisterTimeout)  # 既存の except でも拾える
+        assert excinfo.value.rejection.pid == 23456
+        assert processes.force_killed == [23456]
         assert mock_popen[0].terminated or mock_popen[0].killed
 
     def test_launcher_exited_worker_is_asked_to_close(

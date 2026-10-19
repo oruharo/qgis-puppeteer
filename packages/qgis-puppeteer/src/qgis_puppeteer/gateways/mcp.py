@@ -49,6 +49,7 @@ from qgis_puppeteer.client import (
     AutomationClient,
     AutomationClientError,
     NotConnectedError,
+    RegistrationRejectedError,
     RequestError,
 )
 from qgis_puppeteer.gateways.recording import ENV_RECORD, McpRecorder
@@ -905,6 +906,24 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
                                 + "; see instances for their current state"
                             ),
                             "instances": [_instance_info_to_dict(i) for i in snapshot],
+                        }
+                    }
+                )
+            except RegistrationRejectedError as e:
+                # 断られた Worker は来ないので、待ち時間を使い切らずに理由を返す（#13）
+                rec = e.rejection
+                return _error_result(
+                    {
+                        "error": {
+                            "code": "registration_rejected",
+                            "message": str(e),
+                            "rejection": {
+                                "launch_token": rec.launch_token,
+                                "pid": rec.pid,
+                                "label": rec.label,
+                                "code": rec.code,
+                                "message": rec.message,
+                            },
                         }
                     }
                 )

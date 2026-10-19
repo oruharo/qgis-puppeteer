@@ -32,6 +32,7 @@ from pytest_qgis_puppeteer.locator import (
 )
 from pytest_qgis_puppeteer.spawn import (
     SpawnedWorker,
+    WorkerRegisterRejected,
     WorkerRegisterTimeout,
     spawn_qgis,
     spawn_qgis_fixture,
@@ -47,6 +48,7 @@ __all__ = [
     "SpawnedWorker",
     "WidgetNotActionableError",
     "WorkerCodeError",
+    "WorkerRegisterRejected",
     "WorkerRegisterTimeout",
     "expect",
     "spawn_qgis",

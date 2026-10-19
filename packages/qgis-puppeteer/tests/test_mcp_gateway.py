@@ -388,6 +388,36 @@ class TestMcpGatewayListInstances:
         assert payload["error"]["code"] == "not_ready"
         assert payload["error"]["instances"][0]["state"] == "unresponsive"
 
+    def test_wait_ready_reports_a_rejected_registration_at_once(self) -> None:
+        """#13: Hub が断った登録は待たずに理由付きで返す。"""
+
+        async def run() -> tuple[bool, dict[str, Any], float]:
+            async with fake_hub_server() as (hub, hub_url):
+                hub.rejected.append(
+                    {
+                        "launch_token": "lt-mine",
+                        "pid": 4321,
+                        "label": "x" * 200,
+                        "code": "label_conflict",
+                        "message": "Invalid label: too_long",
+                    }
+                )
+                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                async with Client(gateway, raise_exceptions=True) as client:
+                    loop = asyncio.get_running_loop()
+                    started = loop.time()
+                    result = await client.call_tool(
+                        "qgis_wait_ready", {"instance": "lt-mine", "timeout_s": 30}
+                    )
+                    took = loop.time() - started
+                    return bool(result.is_error), json.loads(_extract_text(result)), took
+
+        is_error, payload, took = _run(run())
+        assert is_error is True
+        assert payload["error"]["code"] == "registration_rejected"
+        assert payload["error"]["rejection"]["pid"] == 4321
+        assert took < 5.0
+
 
 class TestMcpGatewayToolDispatch:
     def test_list_layers_forwards_command_to_worker(self) -> None:

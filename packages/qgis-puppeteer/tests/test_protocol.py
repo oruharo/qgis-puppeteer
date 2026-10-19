@@ -22,6 +22,7 @@ from qgis_puppeteer.protocol import (
     ProtocolDecodeError,
     RegisterAck,
     RegisterRequest,
+    RejectedRegistration,
     Request,
     Response,
     Role,
@@ -193,6 +194,31 @@ class TestRoundTrip:
         assert isinstance(msg, ListInstancesResponse)
         assert msg.instances[0].state == "active"
         assert msg.instances[0].last_seen_ago is None
+
+    def test_rejected_registrations_round_trip(self) -> None:
+        """#13: 断った登録は include_rejected で頼んだときに rejected に載る。"""
+        req = ListInstancesRequest(id="uuid-13c", include_rejected=True)
+        assert decode_message(encode_message(req)) == req
+        msg = ListInstancesResponse(
+            id="uuid-13d",
+            rejected=[
+                RejectedRegistration(
+                    launch_token="lt-abc",
+                    pid=4321,
+                    label="x" * 200,
+                    code="label_conflict",
+                    message="Invalid label: too_long",
+                    rejected_ago=1.5,
+                )
+            ],
+        )
+        assert decode_message(encode_message(msg)) == msg
+
+    def test_old_hub_response_has_no_rejected(self) -> None:
+        raw = '{"type": "list_instances_response", "id": "uuid-13e", "instances": []}'
+        msg = decode_message(raw)
+        assert isinstance(msg, ListInstancesResponse)
+        assert msg.rejected == []
 
     def test_bye(self) -> None:
         msg = Bye(id="uuid-14", instance_id="worker-a-1234")

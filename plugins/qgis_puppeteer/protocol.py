@@ -118,6 +118,27 @@ class InstanceInfo:
 
 
 @dataclass(frozen=True)
+class RejectedRegistration:
+    """Hub が断った Worker の登録（#13）。
+
+    ``launch_token`` 付きで登録を求めてきた Worker だけを、token ごとに最近の
+    ものから一定数だけ覚えておく。起動した側（``spawn_qgis``）が「待っても
+    登録されない」と分かって早く失敗し、起こした QGIS（``pid``）を片付ける
+    ために使う。``list_instances`` を ``include_rejected=True`` で呼んだとき
+    だけ返る。旧 Hub からは返らない。
+    """
+
+    launch_token: str
+    pid: int | None
+    label: str | None
+    # Error.code の値（"label_conflict" など）と、Hub が Worker に返した文言
+    code: str
+    message: str
+    # Hub の時計で何秒前に断ったか
+    rejected_ago: float | None = None
+
+
+@dataclass(frozen=True)
 class Error:
     """エラーレスポンスの詳細。"""
 
@@ -230,10 +251,13 @@ class ListInstancesRequest:
 
     ``include_disconnected`` を立てると grace 中（切断済み・再接続待ち）の
     entry も ``state="disconnected"`` で返す。既定は従来どおり出さない。
+    ``include_rejected`` を立てると、断った登録（`RejectedRegistration`）も
+    ``rejected`` に載せる（#13）。旧 Hub はこのフィールドを無視する。
     """
 
     id: str
     include_disconnected: bool = False
+    include_rejected: bool = False
 
     @property
     def type(self) -> MessageType:
@@ -246,6 +270,8 @@ class ListInstancesResponse:
 
     id: str
     instances: list[InstanceInfo] = field(default_factory=list)
+    # include_rejected=True のときだけ載る（#13）
+    rejected: list[RejectedRegistration] = field(default_factory=list)
 
     @property
     def type(self) -> MessageType:
@@ -454,6 +480,7 @@ def _build_message(msg_type: MessageType, payload: dict[str, Any]) -> Message:
         return ListInstancesRequest(
             id=payload["id"],
             include_disconnected=bool(payload.get("include_disconnected", False)),
+            include_rejected=bool(payload.get("include_rejected", False)),
         )
 
     if msg_type is MessageType.LIST_INSTANCES_RESPONSE:
@@ -474,7 +501,18 @@ def _build_message(msg_type: MessageType, payload: dict[str, Any]) -> Message:
             )
             for item in raw_instances
         ]
-        return ListInstancesResponse(id=payload["id"], instances=instances)
+        rejected = [
+            RejectedRegistration(
+                launch_token=str(item["launch_token"]),
+                pid=None if item.get("pid") is None else int(item["pid"]),
+                label=item.get("label"),
+                code=str(item.get("code", "")),
+                message=str(item.get("message", "")),
+                rejected_ago=item.get("rejected_ago"),
+            )
+            for item in payload.get("rejected", [])
+        ]
+        return ListInstancesResponse(id=payload["id"], instances=instances, rejected=rejected)
 
     if msg_type is MessageType.BYE:
         return Bye(id=payload["id"], instance_id=payload["instance_id"])

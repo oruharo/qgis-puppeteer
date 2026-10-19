@@ -13,7 +13,9 @@ from qgis_puppeteer.hub_state import (
     GRACE_SECONDS,
     HEARTBEAT_TIMEOUT_SECONDS,
     IDLE_SHUTDOWN_DELAY_SECONDS,
+    LABEL_MAX_LENGTH,
     LIVENESS_PROBE_SECONDS,
+    REJECTED_REGISTRATIONS_MAX,
     UNRESPONSIVE_CLOSE_SECONDS,
     HubState,
     RegisterOutcome,
@@ -877,6 +879,63 @@ class TestOriginValidation:
 # ============================================================
 
 
+class TestRejectedRegistrations:
+    """#13: 断った登録を launch_token ごとに覚えて、起動した側に返す。"""
+
+    def test_invalid_label_is_remembered_with_pid(self) -> None:
+        clock = FakeClock()
+        state = HubState(clock=clock)
+        out = state.register_worker(
+            "conn-1",
+            _worker_req(label="x" * (LABEL_MAX_LENGTH + 1), pid=4321, launch_token="lt-abc"),
+        )
+        assert out.ok is False
+        clock.advance(2.0)
+        [rec] = state.list_rejected()
+        assert rec.launch_token == "lt-abc"
+        assert rec.pid == 4321
+        assert rec.code == ErrorCode.LABEL_CONFLICT.value
+        assert "too_long" in rec.message
+        assert rec.rejected_ago == 2.0
+
+    def test_live_label_conflict_is_remembered(self) -> None:
+        clock = FakeClock()
+        state = HubState(clock=clock)
+        state.register_worker("conn-1", _worker_req(label="A", pid=1111))
+        r2 = _register_resolving(
+            state,
+            clock,
+            "conn-2",
+            _worker_req(label="A", pid=2222, launch_token="lt-second"),
+            incumbent_responds=True,
+        )
+        assert r2.ok is False
+        [rec] = state.list_rejected()
+        assert (rec.launch_token, rec.pid) == ("lt-second", 2222)
+
+    def test_without_a_token_nothing_is_remembered(self) -> None:
+        state = HubState(clock=FakeClock())
+        state.register_worker("conn-1", _worker_req(label="@bad"))
+        assert state.list_rejected() == []
+
+    def test_a_later_success_forgets_the_rejection(self) -> None:
+        state = HubState(clock=FakeClock())
+        state.register_worker("conn-1", _worker_req(label="@bad", launch_token="lt-x"))
+        assert len(state.list_rejected()) == 1
+        ok = state.register_worker("conn-2", _worker_req(label="good", launch_token="lt-x"))
+        assert ok.ok is True
+        assert state.list_rejected() == []
+
+    def test_only_the_latest_are_kept(self) -> None:
+        state = HubState(clock=FakeClock())
+        for i in range(REJECTED_REGISTRATIONS_MAX + 5):
+            state.register_worker(f"conn-{i}", _worker_req(label="@bad", launch_token=f"lt-{i}"))
+        tokens = [r.launch_token for r in state.list_rejected()]
+        assert len(tokens) == REJECTED_REGISTRATIONS_MAX
+        assert tokens[0] == "lt-5"
+        assert tokens[-1] == f"lt-{REJECTED_REGISTRATIONS_MAX + 4}"
+
+
 class TestLabelValidation:
     def test_valid_label(self) -> None:
         assert validate_label("A").ok
@@ -888,10 +947,15 @@ class TestLabelValidation:
         assert not validate_label("").ok
 
     def test_too_long_rejected(self) -> None:
-        assert not validate_label("x" * 33).ok
+        assert not validate_label("x" * (LABEL_MAX_LENGTH + 1)).ok
 
     def test_boundary_length_accepted(self) -> None:
-        assert validate_label("x" * 32).ok
+        assert validate_label("x" * LABEL_MAX_LENGTH).ok
+
+    def test_limit_fits_ordinary_test_names(self) -> None:
+        """#13: fresh_qgis の ``fresh-<テスト名>`` が 32 字で断られていた。"""
+        assert LABEL_MAX_LENGTH == 128
+        assert validate_label("fresh-test_login_with_saved_credentials_and_retry").ok
 
     def test_numeric_only_rejected(self) -> None:
         """数字のみの label は pid と衝突するため禁止（ADR-0001 §5）。"""

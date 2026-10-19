@@ -52,6 +52,8 @@ class FakeHub:
         self.unresponsive: set[str] = set()
         # list_instances で返す project（instance_id → path）。未設定は None
         self.projects: dict[str, str | None] = {}
+        # include_rejected=True の list_instances で返す断った登録（#13）
+        self.rejected: list[dict[str, Any]] = []
         # Origin 検証モード（ws ハンドラでは検証できないのでテストでは無視）
 
     async def handler(self, ws: ServerConnection) -> None:
@@ -143,6 +145,7 @@ class FakeHub:
                         "type": "list_instances_response",
                         "id": data["id"],
                         "instances": [_parse(iid) for iid in self.workers],
+                        "rejected": self.rejected if data.get("include_rejected") else [],
                     }
                 )
             )

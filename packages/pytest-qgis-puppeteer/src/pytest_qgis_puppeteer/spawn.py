@@ -30,7 +30,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from qgis_puppeteer.launcher import generate_launch_token, inject_launch_token
+from qgis_puppeteer.client import RegistrationRejectedError
+from qgis_puppeteer.hub_state import LABEL_MAX_LENGTH, validate_label
+from qgis_puppeteer.launcher import ENV_WORKER_LABEL, generate_launch_token, inject_launch_token
+from qgis_puppeteer.protocol import RejectedRegistration
 
 if TYPE_CHECKING:
     from pytest_qgis_puppeteer.automation_client import E2EAutomationClient
@@ -53,6 +56,20 @@ class WorkerRegisterTimeout(TimeoutError):
     ``TimeoutError`` を継承しているので既存の ``except TimeoutError`` でも拾えるが、
     `pytest_qgis_puppeteer` 由来の問題であることを明示するための独自型。
     """
+
+
+class WorkerRegisterRejected(WorkerRegisterTimeout):
+    """spawn した QGIS の登録を Hub が断った（#13）。
+
+    断られた Worker はつなぎ直さないので、``register_timeout_s`` を待たずに出す。
+    ``WorkerRegisterTimeout`` の下位型なので、「QGIS が登録されなかった」として
+    既存の ``except`` でも拾える。``rejection`` に Hub の記録（理由と QGIS の
+    pid）が入る。出す前に、その QGIS は止めてある。
+    """
+
+    def __init__(self, message: str, *, rejection: RejectedRegistration) -> None:
+        super().__init__(message)
+        self.rejection = rejection
 
 
 @dataclass(frozen=True)
@@ -155,6 +172,9 @@ def spawn_qgis(
     launch_token = generate_launch_token()
     spawn_env = _build_env(base=os.environ, hub_port=hub_port, user_env=env)
     spawn_env = inject_launch_token(spawn_env, launch_token, label=label)
+    # Hub が断るラベルなら、QGIS を起こす前に知らせる（#13）。起こしてから
+    # 断られると、待ったあとに「登録されなかった」としか分からない
+    _check_worker_label(spawn_env.get(ENV_WORKER_LABEL))
 
     logger.info(
         "spawn_qgis: launching %s (launch_token=%s)",
@@ -178,6 +198,12 @@ def spawn_qgis(
             launch_token=launch_token,
             timeout_s=register_timeout_s,
         )
+    except WorkerRegisterRejected as e:
+        # 断られた QGIS は登録されていないので、閉じるよう頼めない。pid で止める
+        _kill_rejected_worker(e.rejection)
+        _terminate_worker(proc, graceful_timeout_s=graceful_shutdown_timeout_s)
+        _join_drain_threads(drain_threads, timeout_s=2.0)
+        raise
     except WorkerRegisterTimeout:
         # register 失敗時はサブプロセスを片付けてから raise（dangling 防止）
         _terminate_worker(proc, graceful_timeout_s=graceful_shutdown_timeout_s)
@@ -346,11 +372,42 @@ def _wait_for_worker_by_token(
         return automation_client.wait_for_ready(
             launch_token, timeout_s=timeout_s, poll_interval_s=poll_interval_s
         )
+    except RegistrationRejectedError as e:
+        raise WorkerRegisterRejected(
+            f"The Hub rejected the QGIS started with launch_token={launch_token} "
+            f"(pid={e.rejection.pid}, label={e.rejection.label!r}): "
+            f"{e.rejection.code}: {e.rejection.message}",
+            rejection=e.rejection,
+        ) from e
     except TimeoutError as e:
         raise WorkerRegisterTimeout(
             f"QGIS subprocess (launch_token={launch_token}) did not register "
             f"to Hub and answer a command within {timeout_s}s"
         ) from e
+
+
+def _check_worker_label(label: str | None) -> None:
+    """Hub が断るラベルなら ``ValueError``（#13）。None はラベル無し（Hub が自動で付ける）。"""
+    if label is None:
+        return
+    result = validate_label(label)
+    if not result.ok:
+        raise ValueError(
+            f"spawn_qgis: the Hub would reject the worker label {label!r} "
+            f"({result.reason}). A label is 1-{LABEL_MAX_LENGTH} characters, "
+            "not digits only, and does not start with '@'."
+        )
+
+
+def _kill_rejected_worker(rejection: RejectedRegistration) -> None:
+    """登録を断られた QGIS を止める（best-effort）。"""
+    pid = rejection.pid
+    if pid is None or not _pid_alive(pid):
+        return
+    logger.warning("Killing the QGIS whose registration was rejected (pid=%d)", pid)
+    _force_kill_pid(pid)
+    if not _wait_pid_dead(pid, timeout_s=2.0):
+        logger.warning("Rejected QGIS still alive after force kill (pid=%d)", pid)
 
 
 def _shutdown_worker_best_effort(

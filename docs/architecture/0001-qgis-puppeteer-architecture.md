@@ -563,6 +563,21 @@ ContextVar は asyncio の Task 単位で隔離されるため、並行ツール
 - **label 自体は `@` で始められない**（`@` は selector 側のプレフィックスとして予約）
 - selector 側で先頭に `@` を付けることで「label として解釈する」を明示できる（例: selector `@1234` は「数字 1234 という label を探せ」の意味。ただし数字のみの label は自動採番含め存在しないので、実質は `@A` 等の英数字 label の曖昧性回避用途）
 
+> **2026-10-20 注（#13 で変更）**: 上限を 32 文字から **128 文字**に上げた。32 文字の
+> 理由はこの ADR に書かれておらず、32 文字に依存するコード（ファイル名など）も
+> 無かった。pytest-qgis-puppeteer は `fresh_qgis` の QGIS に `fresh-<テスト名>` の
+> label を付けるので、26 文字を超えるテスト名で登録を断られ、待ち時間（既定 60 秒）の
+> あとに「登録されなかった」と失敗し、ランチャー経由だと QGIS が残っていた。あわせて:
+>
+> - Hub は断った登録を `launch_token` ごとに覚え（最近の 64 件）、`list_instances` を
+>   `include_rejected=True` で呼ぶと `rejected` に返す（`RejectedRegistration`：理由と
+>   QGIS の `pid`）。`wait_for_ready(launch_token)` はそれを見たら待たずに
+>   `RegistrationRejectedError` を出し、`spawn_qgis` は断られた QGIS を pid で止める
+> - `spawn_qgis` は、利用側が渡す label（`label=` / `QPUPPETEER_WORKER_LABEL`）が
+>   この制約に反するなら、QGIS を起こす前に `ValueError` にする。書き換えはしない
+> - `fresh_qgis` の label は pytest の持ち物なので、128 文字を超えるパラメータ付きの
+>   テストはパラメータの値を番号に置き換える（`fresh-test_open[2]`）
+
 Worker 側の label 自動採番（`{project_basename}-{pid 下4桁}`）は文字列なので数字単独にはならない。
 
 #### 曖昧時の挙動

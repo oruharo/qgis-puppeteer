@@ -30,7 +30,8 @@ from pytest_qgis_puppeteer.automation_client import (
     _find_in_snapshot,
     _raise_for_execute_result,
 )
-from qgis_puppeteer.protocol import Error, ErrorCode, InstanceInfo
+from qgis_puppeteer.client import RegistrationRejectedError
+from qgis_puppeteer.protocol import Error, ErrorCode, InstanceInfo, RejectedRegistration
 
 # ============================================================
 # fixtures
@@ -55,6 +56,7 @@ def _make_client(
     else:
         inner.call = AsyncMock(side_effect=call_results)
     inner.list_instances = AsyncMock(return_value=[])
+    inner.list_rejected = AsyncMock(return_value=[])
     inner.close = AsyncMock(return_value=None)
 
     loop = MagicMock(name="EventLoop")
@@ -321,6 +323,42 @@ class TestWaitForReady:
         )
         assert e2e.wait_for_ready("lt-mine", timeout_s=5.0, poll_interval_s=0.01) == "w-mine"
         assert inner.call.await_args.kwargs["instance"] == "w-mine"
+
+    def test_rejected_registration_fails_without_waiting(self) -> None:
+        """#13: Hub が断った Worker は来ないので、待ち時間を待たずに理由付きで失敗する。"""
+        e2e, inner = _make_client()
+        inner.list_instances = AsyncMock(return_value=[])
+        inner.list_rejected = AsyncMock(
+            return_value=[
+                RejectedRegistration(
+                    launch_token="lt-mine",
+                    pid=4321,
+                    label="x" * 200,
+                    code="label_conflict",
+                    message="Invalid label: too_long",
+                )
+            ]
+        )
+        started = time.monotonic()
+        with pytest.raises(RegistrationRejectedError) as excinfo:
+            e2e.wait_for_ready("lt-mine", timeout_s=30.0, poll_interval_s=0.01)
+        assert time.monotonic() - started < 2.0
+        assert excinfo.value.rejection.pid == 4321
+        assert "too_long" in str(excinfo.value)
+
+    def test_someone_elses_rejection_is_ignored(self) -> None:
+        e2e, inner = _make_client()
+        inner.list_instances = AsyncMock(
+            side_effect=[[], [self._info("w-mine", launch_token="lt-mine")]]
+        )
+        inner.list_rejected = AsyncMock(
+            return_value=[
+                RejectedRegistration(
+                    launch_token="lt-other", pid=1, label="@x", code="label_conflict", message=""
+                )
+            ]
+        )
+        assert e2e.wait_for_ready("lt-mine", timeout_s=5.0, poll_interval_s=0.01) == "w-mine"
 
     def test_require_project_waits_for_the_load_to_finish(self) -> None:
         """ready（GUI が空いた）と「プロジェクトが読めた」は別。"""

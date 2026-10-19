@@ -29,7 +29,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 
 import pytest
-from qgis_puppeteer.client import AutomationClient, RequestError
+from qgis_puppeteer.client import AutomationClient, RegistrationRejectedError, RequestError
 from qgis_puppeteer.protocol import ErrorCode
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
@@ -250,6 +250,44 @@ class TestHubClientIntegration:
                 finally:
                     await w1.stop()
                     await w2.stop()
+
+            _run(inner())
+
+    def test_rejected_registration_is_reported_via_real_hub(self) -> None:
+        """#13: Hub が断った登録を、起動した側が待たずに知る。"""
+        port = _get_free_port()
+        with _hub_subprocess(port):
+
+            async def inner() -> None:
+                url = f"ws://127.0.0.1:{port}"
+                ws = await ws_connect(url, additional_headers={"Origin": "http://localhost"})
+                try:
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "register",
+                                "id": "reg-long",
+                                "role": "worker",
+                                "protocol_version": 1,
+                                "pid": 4321,
+                                "label": "fresh-" + "x" * 200,
+                                "launch_token": "lt-rejected",
+                            }
+                        )
+                    )
+                    ack = json.loads(await ws.recv())
+                    assert ack["ok"] is False
+                finally:
+                    await ws.close()
+                async with AutomationClient(url=url) as client:
+                    [rec] = await client.list_rejected()
+                    assert (rec.launch_token, rec.pid) == ("lt-rejected", 4321)
+                    assert "too_long" in rec.message
+                    loop = asyncio.get_running_loop()
+                    started = loop.time()
+                    with pytest.raises(RegistrationRejectedError):
+                        await client.wait_for_ready("lt-rejected", timeout_s=30.0)
+                    assert loop.time() - started < 5.0
 
             _run(inner())
 

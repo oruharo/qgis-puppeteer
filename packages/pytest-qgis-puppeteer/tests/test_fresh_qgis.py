@@ -238,3 +238,54 @@ class TestFreshQgisMarkerRegistration:
         )
         result = pytester.runpytest("--strict-markers", "--collect-only")
         assert result.ret == 0
+
+
+# ============================================================
+# _fresh_label（#13）
+# ============================================================
+
+
+class TestFreshLabel:
+    """fresh_qgis の QGIS のラベルは Hub の上限に収まり、人にも読める。"""
+
+    def test_short_test_name_is_used_as_is(self, pytester: pytest.Pytester) -> None:
+        from pytest_qgis_puppeteer.plugin import _fresh_label
+
+        [item] = pytester.getitems("def test_login(): pass")
+        assert _fresh_label(item) == "fresh-test_login"
+
+    def test_long_parameters_become_their_numbers(self, pytester: pytest.Pytester) -> None:
+        from pytest_qgis_puppeteer.plugin import _fresh_label
+        from qgis_puppeteer.hub_state import LABEL_MAX_LENGTH, validate_label
+
+        long_path = "C:/data/projects/2026/survey/" + "very_long_folder_name/" * 6 + "p.gpkg"
+        items = pytester.getitems(
+            textwrap.dedent(
+                f"""
+                import pytest
+
+                @pytest.mark.parametrize("mode", ["read", "write"])
+                @pytest.mark.parametrize("path", [{long_path!r}, "short.gpkg"])
+                def test_open_project(path, mode):
+                    pass
+                """
+            )
+        )
+        labels = [_fresh_label(item) for item in items]
+        assert len(set(labels)) == len(labels)  # ケースごとに別のラベル
+        for label in labels:
+            assert len(label) <= LABEL_MAX_LENGTH
+            assert validate_label(label).ok
+        # 長いケースは番号、短いケースはそのまま
+        assert "fresh-test_open_project[0-0]" in labels
+        assert "fresh-test_open_project[short.gpkg-read]" in labels
+
+    def test_a_huge_function_name_is_cut(self, pytester: pytest.Pytester) -> None:
+        from pytest_qgis_puppeteer.plugin import _fresh_label
+        from qgis_puppeteer.hub_state import LABEL_MAX_LENGTH
+
+        name = "test_" + "x" * 200
+        [item] = pytester.getitems(f"def {name}(): pass")
+        label = _fresh_label(item)
+        assert len(label) == LABEL_MAX_LENGTH
+        assert label.startswith("fresh-test_xxx")

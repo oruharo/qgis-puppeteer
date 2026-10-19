@@ -471,6 +471,13 @@ def test_auth_with_reset_cache(qgis):
 routing は `qgis` fixture が自動でハンドル: spawn 後の Worker `instance_id` を
 `automation_client.use_instance(...)` でセットし、test 終了時に元の default に戻す。
 
+fresh の QGIS のラベル（`list_instances` やログに出る名前）は `fresh-<テスト名>`。
+パラメータの値が長くてラベルの上限（128 文字）を超えるときは、値の代わりに
+パラメータの番号を使う（`fresh-test_open_project[2]`）。テストの完全な名前は、
+起動時のログ（`fresh_qgis: <nodeid> runs on instance_id=... (label=...)`）と、
+失敗時の診断バンドルの `fresh_qgis.json` に残る。ラベルを決め打ちして送り先に
+使わないこと（`qgis` がすでに切り替えている）。
+
 dev モード（`QPUPPETEER_E2E_USE_RUNNING_QGIS=1`）下では `fresh_qgis` テストは
 skip される（既存 QGIS を再起動できないため）。
 
@@ -534,6 +541,20 @@ def test_two_workers_compare(automation_client, hub_port, qgis_bin):
 ```
 
 `spawn_qgis()` は context exit で graceful → force kill する。
+
+**ラベルと、登録を断られたとき**:
+
+- `label=`（または環境変数 `QPUPPETEER_WORKER_LABEL`）が Hub の受け付けない形なら、
+  QGIS を起こす前に `ValueError` になる。受け付けるのは 1〜128 文字で、数字だけでなく、
+  `@` で始まらないもの。ラベルを省くと Hub が自動で付ける
+- 起こした QGIS の登録を Hub が断ったら（同じラベルの QGIS が生きている、など）、
+  待ち時間を待たずに `WorkerRegisterRejected` で失敗する。メッセージに断った理由が入り、
+  断られた QGIS は止めてある。`WorkerRegisterTimeout` の下位型なので、既存の
+  `except WorkerRegisterTimeout` でも拾える
+- QGIS が登録の要求すら送ってこない場合（プラグインが読み込まれない、など）は、
+  今までどおり `register_timeout_s` まで待ってから `WorkerRegisterTimeout` になる。
+  このときは QGIS の pid が分からないので、止めるのは起動したプロセスだけ。
+  ランチャーが QGIS を起こしてすぐ終わる場合は、QGIS が残ることがある
 
 `launch_token` の Worker が register し、**かつ軽い read-only の往復が返る**
 まで待ってから返る（`wait_for_ready()`）。重いプロジェクトを開く QGIS では

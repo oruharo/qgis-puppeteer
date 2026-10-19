@@ -284,6 +284,32 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`fresh_qgis` QGIS were not registered when the test name was long, and stayed
+  behind** (#13). The Hub took worker labels of at most 32 characters, and
+  `fresh_qgis` labels its QGIS `fresh-<test name>`, so a test name over 26
+  characters was refused; nothing told the waiting side, which gave up after
+  `qgis_startup_timeout` with "did not register", and with a launcher that
+  exits early the QGIS was left running. Now:
+  - The label limit is 128 characters (ADR-0001 §5 had no reason for 32, and
+    nothing depended on it). A `fresh_qgis` label that would still be longer
+    uses the parameter numbers instead of their values
+    (`fresh-test_open[2]`); the full test id is logged with the instance and
+    written to the diagnostic bundle's `fresh_qgis.json`.
+  - `spawn_qgis()` raises `ValueError` before launching when the label it is
+    given (`label=` or `QPUPPETEER_WORKER_LABEL`) is one the Hub would refuse.
+    It does not rewrite labels the caller chose.
+  - The Hub remembers refused registrations per `launch_token` (the latest 64)
+    and returns them from `list_instances` when asked with
+    `include_rejected=True` (`RejectedRegistration`, with the reason and the
+    QGIS pid; older Hubs return none). `wait_for_ready(launch_token)` raises
+    `RegistrationRejectedError` at once instead of waiting, and `spawn_qgis()`
+    then kills that QGIS by pid and raises `WorkerRegisterRejected`, a
+    subclass of `WorkerRegisterTimeout`. The MCP tool `qgis_wait_ready`
+    returns the tool error `registration_rejected` with the record.
+  Checked on QGIS 3.34: a fresh test with a 180-character parameter registered
+  as `fresh-test_…[0]`, and a QGIS refused for a live label failed in 7s
+  (QGIS startup included) with the reason, and was not left running.
+
 - **Password fields leaked their text** (#10). `QLineEdit`s in `Password`,
   `PasswordEchoOnEdit` or `NoEcho` mode, and QGIS's `QgsPasswordLineEdit`, were
   read like any other field, so a password typed by a test or a person ended up

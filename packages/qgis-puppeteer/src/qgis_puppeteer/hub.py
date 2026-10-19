@@ -413,7 +413,10 @@ class Hub(QObject):
 
     def _handle_list_instances(self, conn_id: str, req: ListInstancesRequest) -> None:
         instances = self._state.list_instances(include_disconnected=req.include_disconnected)
-        self._send(conn_id, ListInstancesResponse(id=req.id, instances=instances))
+        rejected = self._state.list_rejected() if req.include_rejected else []
+        self._send(
+            conn_id, ListInstancesResponse(id=req.id, instances=instances, rejected=rejected)
+        )
 
     # ------------------------------------------------------------
     # update_info

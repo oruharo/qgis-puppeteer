@@ -46,6 +46,7 @@ from qgis_puppeteer.protocol import (
     ProtocolDecodeError,
     RegisterAck,
     RegisterRequest,
+    RejectedRegistration,
     Request,
     Response,
     Role,
@@ -110,6 +111,32 @@ class AttributionAmbiguousError(AutomationClientError):
     """ADR-0005 H4: best-effort attribution（registered_seq）で複数候補が
     出て「自分の起動分」を一意に決められない。silent 誤帰属を防ぐため送出。
     """
+
+
+class RegistrationRejectedError(AutomationClientError):
+    """待っていた Worker の登録を Hub が断った（#13）。
+
+    断られた Worker はつなぎ直さないので、待ち続けても登録されない。
+    ``rejection`` に Hub の記録（理由と、断られた QGIS の ``pid``）が入る。
+    """
+
+    def __init__(self, rejection: RejectedRegistration) -> None:
+        self.rejection = rejection
+        super().__init__(
+            f"Hub rejected the registration of launch_token={rejection.launch_token} "
+            f"(pid={rejection.pid}, label={rejection.label!r}): "
+            f"{rejection.code}: {rejection.message}"
+        )
+
+
+def find_rejection(
+    selector: str, rejected: list[RejectedRegistration]
+) -> RejectedRegistration | None:
+    """``selector`` が launch_token なら、その token の断られた登録を返す（#13）。"""
+    for rec in reversed(rejected):
+        if rec.launch_token == selector:
+            return rec
+    return None
 
 
 class WorkerCodeError(AutomationClientError):
@@ -415,6 +442,25 @@ class AutomationClient:
             )
         return list(msg.instances)
 
+    async def list_rejected(self) -> list[RejectedRegistration]:
+        """Hub が断った Worker の登録を返す（#13、`RejectedRegistration`）。
+
+        旧 Hub は覚えていないので、常に空になる。
+        """
+        self._require_connected()
+        req_id = self._new_id()
+        fut = self._make_future(req_id)
+        await self._send(ListInstancesRequest(id=req_id, include_rejected=True))
+        msg = await self._await_reply(req_id, fut, None)
+        if not isinstance(msg, ListInstancesResponse):
+            raise RequestError(
+                Error(
+                    code=ErrorCode.INVALID_COMMAND,
+                    message=f"unexpected reply type: {msg.type.value}",
+                )
+            )
+        return list(msg.rejected)
+
     async def current_max_seq(self) -> int:
         """現在の最大 registered_seq を返す（ADR-0005 D6 best-effort 相関の基点）。
 
@@ -489,6 +535,8 @@ class AutomationClient:
         Raises:
             TimeoutError: ``timeout_s`` 以内に使える状態にならなかった。
             RequestError(instance_ambiguous): selector 省略で active が複数。
+            RegistrationRejectedError: selector が launch_token で、その Worker の
+                登録を Hub が断った（待っても登録されないので待たない）。
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_s
@@ -509,6 +557,10 @@ class AutomationClient:
                 candidate = actives[0] if actives else None
             else:
                 candidate = _match_selector(selector, actives)
+                if candidate is None:
+                    rejection = find_rejection(selector, await self.list_rejected())
+                    if rejection is not None:
+                        raise RegistrationRejectedError(rejection)
 
             if candidate is not None:
                 remaining = deadline - loop.time()

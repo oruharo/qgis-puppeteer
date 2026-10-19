@@ -33,11 +33,13 @@ from qgis_puppeteer.client import (
     ConfirmationRequiredError,
     InstanceInfo,
     NonSerializableResultError,
+    RegistrationRejectedError,
     RequestError,
     WorkerCodeError,
+    find_rejection,
 )
 from qgis_puppeteer.hub_state import select_by_selector
-from qgis_puppeteer.protocol import ErrorCode, Role
+from qgis_puppeteer.protocol import ErrorCode, RejectedRegistration, Role
 from qgis_puppeteer.selector_match import (
     record_matches_selector,
     resolve_with_index,
@@ -207,6 +209,11 @@ class E2EAutomationClient:
         """Hub が管理している Worker 一覧を取得する。"""
         client, loop = self._require_connected()
         return loop.run_until_complete(client.list_instances())
+
+    def list_rejected(self) -> list[RejectedRegistration]:
+        """Hub が断った Worker の登録を返す（#13）。旧 Hub では常に空。"""
+        client, loop = self._require_connected()
+        return loop.run_until_complete(client.list_rejected())
 
     def call(
         self,
@@ -488,6 +495,8 @@ class E2EAutomationClient:
 
         Raises:
             TimeoutError: ``timeout_s`` 以内に使える状態にならなかった。
+            RegistrationRejectedError: selector が launch_token で、その Worker の
+                登録を Hub が断った（理由と QGIS の pid は ``rejection`` に入る）。
         """
         client, loop = self._require_connected()
         deadline = time.monotonic() + timeout_s
@@ -502,6 +511,11 @@ class E2EAutomationClient:
             else:
                 matched = select_by_selector(selector, candidates)
                 candidate = matched[0] if len(matched) == 1 else None
+                if candidate is None:
+                    # 断られた Worker はつなぎ直さないので、待っても来ない（#13）
+                    rejection = find_rejection(selector, self.list_rejected())
+                    if rejection is not None:
+                        raise RegistrationRejectedError(rejection)
 
             if candidate is not None:
                 remaining = deadline - time.monotonic()
