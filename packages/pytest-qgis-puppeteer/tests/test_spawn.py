@@ -788,7 +788,7 @@ class TestSpawnQgisContextManager:
         monkeypatch.setattr(
             spawn_module,
             "_kill_unregistered_qgis",
-            lambda proc, *, launched_at, gave_up_at: searched.append(proc.pid),
+            lambda proc, *, launch_token, launched_at, gave_up_at: searched.append(proc.pid),
         )
         client = _FakeAutomationClient()
         client.bind_popens(mock_popen)
@@ -1043,45 +1043,86 @@ class TestSpawnQgisFixture:
 # ============================================================
 
 
-class TestDescendantQgisPids:
-    """起動したプロセスの子孫から、QGIS の実行ファイルだけを拾う。"""
+class _FakeWindowsProcess:
+    """``spawn._WindowsProcess`` の代役。開いた 1 つのハンドルの役をする。"""
 
-    def _tree(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # (pid, 親の pid, 名前, 作られた時刻)
-        rows = [
-            (200, 100, "cmd.exe", 1000.5),  # ランチャー（cmd）の子の cmd
-            (300, 200, "qgis-ltr-bin.exe", 1001.0),  # 孫の QGIS → 止める
-            (310, 100, "QGIS-BIN.EXE", 1002.0),  # 子の QGIS（大文字）→ 止める
-            (400, 100, "qgis-ltr-bin.exe", 900.0),  # 起動より前（pid の使い回し）→ 止めない
-            (410, 100, "qgis-ltr-bin.exe", 2000.0),  # 待ちが切れた後 → 止めない
-            (500, 100, "notepad.exe", 1003.0),  # QGIS ではない → 止めない
-            (600, 999, "qgis-ltr-bin.exe", 1004.0),  # 無関係の親 → 止めない
+    def __init__(self, pid: int, created: float | None, environ: dict[str, str] | None) -> None:
+        self.pid = pid
+        self._created = created
+        self._environ = environ
+        self.terminated = False
+        self.closed = False
+
+    def created_at(self) -> float | None:
+        return self._created
+
+    def environ(self) -> dict[str, str] | None:
+        return self._environ
+
+    def terminate(self) -> bool:
+        self.terminated = True
+        return True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class TestKillQgisWithToken:
+    """環境変数の launch_token で、自分の起こした QGIS だけを止める（#18）。
+
+    ランチャーの途中（cmd、Python、start）が終わっていると親子関係はたどれないが、
+    token は環境変数で QGIS まで届いている。調べるのも止めるのも同じハンドルで行う。
+    """
+
+    def _processes(self, monkeypatch: pytest.MonkeyPatch) -> dict[int, _FakeWindowsProcess]:
+        # (pid, 名前, 作られた時刻, 環境変数)。開けないものは None
+        rows: list[tuple[int, str, float | None, dict[str, str] | None]] = [
+            (300, "qgis-ltr-bin.exe", 1001.0, {"QPUPPETEER_LAUNCH_TOKEN": "lt-mine"}),  # 止める
+            (310, "QGIS-BIN.EXE", 1002.0, {"qpuppeteer_launch_token": "lt-mine"}),  # 大文字小文字
+            (320, "qgis-ltr-bin.exe", 1003.0, {}),  # 人が起こした QGIS（token 無し）
+            (330, "qgis-ltr-bin.exe", 1004.0, {"QPUPPETEER_LAUNCH_TOKEN": "lt-other"}),
+            (340, "qgis-ltr-bin.exe", 900.0, {"QPUPPETEER_LAUNCH_TOKEN": "lt-mine"}),  # 範囲外
+            (350, "qgis-ltr-bin.exe", 1005.0, None),  # 環境変数を読めない
+            (360, "python.exe", 1006.0, {"QPUPPETEER_LAUNCH_TOKEN": "lt-mine"}),  # QGIS でない
         ]
+        opened = {pid: _FakeWindowsProcess(pid, t, e) for pid, _, t, e in rows}
+        opened[370] = None  # type: ignore[assignment]  # 開けない（管理者で動いている等）
         monkeypatch.setattr(
-            spawn_module, "_list_processes", lambda: [(p, pp, n) for p, pp, n, _ in rows]
+            spawn_module,
+            "_list_processes",
+            lambda: [(p, 1, n) for p, n, _, _ in rows] + [(370, 1, "qgis-bin.exe")],
         )
-        created = {p: t for p, _, _, t in rows}
-        monkeypatch.setattr(spawn_module, "_process_created_at", created.get)
+        monkeypatch.setattr(spawn_module, "_open_process", opened.get)
+        return opened
 
-    def test_only_qgis_created_within_the_window_is_picked(
+    def test_only_qgis_carrying_our_token_is_killed_through_its_handle(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        self._tree(monkeypatch)
-        pids = spawn_module._descendant_qgis_pids(100, since=1000.0, until=1500.0)
-        assert sorted(pids) == [300, 310]
-
-    def test_kill_is_by_pid_alone(
-        self, monkeypatch: pytest.MonkeyPatch, processes: _FakeProcesses
-    ) -> None:
-        self._tree(monkeypatch)
-        monkeypatch.setattr(spawn_module.sys, "platform", "win32")
-        processes.alive.update({300, 310})
-        spawn_module._kill_unregistered_qgis(
-            _FakePopen(pid=100),
-            launched_at=1000.0,
-            gave_up_at=1500.0,  # type: ignore[arg-type]
+        opened = self._processes(monkeypatch)
+        killed, unreadable = spawn_module._kill_qgis_with_token(
+            "lt-mine", since=1000.0, until=1500.0
         )
-        assert sorted(processes.force_killed) == [300, 310]
+        assert sorted(killed) == [300, 310]
+        assert [p for p, h in opened.items() if h and h.terminated] == [300, 310]
+        assert unreadable == 2  # 350（読めない）と 370（開けない）
+        assert all(h.closed for h in opened.values() if h is not None and h.pid != 360)
+
+    def test_unreadable_ones_are_reported(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        self._processes(monkeypatch)
+        monkeypatch.setattr(spawn_module.sys, "platform", "win32")
+        with caplog.at_level(logging.WARNING, logger="pytest_qgis_puppeteer.spawn"):
+            spawn_module._kill_unregistered_qgis(
+                _FakePopen(pid=100),  # type: ignore[arg-type]
+                launch_token="lt-mine",
+                launched_at=1000.0,
+                gave_up_at=1500.0,
+            )
+        assert "Could not inspect 2 QGIS process(es)" in caplog.text
+        assert "pid=300" in caplog.text
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows API")
@@ -1092,6 +1133,37 @@ def test_windows_process_list_and_creation_time_are_real() -> None:
     rows = {pid: (ppid, name) for pid, ppid, name in spawn_module._list_processes()}
     assert rows[me][0] == os.getppid()
     assert rows[me][1].lower().startswith("python")
-    created = spawn_module._process_created_at(me)
+    process = spawn_module._open_process(me)
+    assert process is not None
+    try:
+        created = process.created_at()
+    finally:
+        process.close()
     assert created is not None
     assert 0 <= time.time() - created < 3600
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows API")
+def test_windows_process_handle_reads_the_token_and_kills() -> None:
+    """#18: token は環境変数で子プロセスに届き、外から読める。同じハンドルで止められる。"""
+    import os
+    import subprocess
+
+    env = dict(os.environ, QPUPPETEER_LAUNCH_TOKEN="lt-probe")
+    child = subprocess.Popen(["ping", "-n", "30", "127.0.0.1"], env=env, stdout=subprocess.DEVNULL)
+    try:
+        time.sleep(0.3)
+        process = spawn_module._open_process(child.pid)
+        assert process is not None
+        try:
+            assert process.environ().get("QPUPPETEER_LAUNCH_TOKEN") == "lt-probe"
+            created = process.created_at()
+            assert created is not None and 0 <= time.time() - created < 60
+            assert process.terminate() is True
+        finally:
+            process.close()
+        assert child.wait(timeout=5) is not None
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()

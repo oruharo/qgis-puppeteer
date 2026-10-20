@@ -32,7 +32,12 @@ from typing import TYPE_CHECKING, Any
 
 from qgis_puppeteer.client import RegistrationRejectedError, find_rejection
 from qgis_puppeteer.hub_state import LABEL_MAX_LENGTH, validate_label
-from qgis_puppeteer.launcher import ENV_WORKER_LABEL, generate_launch_token, inject_launch_token
+from qgis_puppeteer.launcher import (
+    ENV_LAUNCH_TOKEN,
+    ENV_WORKER_LABEL,
+    generate_launch_token,
+    inject_launch_token,
+)
 from qgis_puppeteer.protocol import RejectedRegistration
 
 if TYPE_CHECKING:
@@ -217,8 +222,10 @@ def spawn_qgis(
         _abandon_launch(automation_client, launch_token)
         if not _stop_late_worker(automation_client, launch_token=launch_token):
             # Hub に何も届いていない QGIS（登録の要求を送ってこない）は、
-            # 起動したプロセスの子孫としてたどって止める（#18）
-            _kill_unregistered_qgis(proc, launched_at=launched_at, gave_up_at=time.time())
+            # 環境変数の launch_token で見つけて止める（#18）
+            _kill_unregistered_qgis(
+                proc, launch_token=launch_token, launched_at=launched_at, gave_up_at=time.time()
+            )
         _terminate_worker(proc, graceful_timeout_s=graceful_shutdown_timeout_s)
         _join_drain_threads(drain_threads, timeout_s=2.0)
         raise
@@ -477,23 +484,29 @@ def _stop_late_worker(
 
 
 def _kill_unregistered_qgis(
-    proc: subprocess.Popen[bytes], *, launched_at: float, gave_up_at: float
+    proc: subprocess.Popen[bytes],
+    *,
+    launch_token: str,
+    launched_at: float,
+    gave_up_at: float,
 ) -> None:
-    """登録の要求を一度も送ってこない QGIS を、起動したプロセスからたどって止める（#18）。
+    """登録の要求を一度も送ってこない QGIS を見つけて止める（#18）。
 
     ランチャーが QGIS を起こしてすぐ終わると、``proc`` を止めても QGIS は残り、
     Hub にも見えないので pid が分からない。
 
-    - Windows: 親が終わっても、子は親の pid を覚えている。``proc`` の pid から子孫を
-      たどり、名前が ``qgis`` で始まる実行ファイル（``qgis-ltr-bin.exe`` など）だけを
-      その pid だけ止める。ランチャーの途中のもの（cmd、PowerShell など）は止めない。
-      親の pid が別のプロセスに使い回されていても取り違えにくいよう、作られた時刻が
-      ``launched_at`` から ``gave_up_at`` の間のものだけをたどる
+    - Windows: 名前が ``qgis`` で始まる実行ファイルのうち、``launched_at`` から
+      ``gave_up_at`` の間に作られ、環境変数 ``QPUPPETEER_LAUNCH_TOKEN`` が自分の
+      ``launch_token`` と一致するものだけを止める。token は環境変数でランチャーの
+      途中（cmd、Python、``start`` など）を通って QGIS まで届くので、途中の
+      プロセスが終わっていても見つけられる。親子関係はたどらない（途中が終わると、
+      生きているプロセスの一覧から鎖が切れるため）。人が起こした QGIS は token を
+      持たないので巻き込まない。調べるのも止めるのも同じハンドルで行う（pid で
+      開き直すと、その間に pid が使い回されたとき別のプロセスを止めうる）。
+      調べられなかった QGIS（管理者で動いている、途中で終わった、など）は止めずに
+      飛ばし、その数を warning に出す
     - posix: QGIS を起こしたコマンドは自分のプロセスグループで動いているので、
       グループごと止める
-
-    ランチャーが QGIS を子孫でない形で起こす作り（スケジューラ経由など）だと、
-    たどれない。
     """
     if sys.platform != "win32":
         import signal as _signal
@@ -502,42 +515,223 @@ def _kill_unregistered_qgis(
             os.killpg(proc.pid, _signal.SIGKILL)
         return
     try:
-        pids = _descendant_qgis_pids(proc.pid, since=launched_at, until=gave_up_at)
+        killed, unreadable = _kill_qgis_with_token(
+            launch_token, since=launched_at, until=gave_up_at
+        )
     except Exception:  # noqa: BLE001 - 片付けは best-effort
-        logger.warning("Could not list the processes started by %d", proc.pid, exc_info=True)
+        logger.warning("Could not look for the QGIS of %s", launch_token, exc_info=True)
         return
-    for pid in pids:
-        logger.warning("QGIS (pid=%d) started by this spawn never registered; killing it", pid)
-        _force_kill_pid(pid)
-        if not _wait_pid_dead(pid, timeout_s=2.0):
-            logger.warning("QGIS still alive after force kill (pid=%d)", pid)
+    for pid in killed:
+        logger.warning(
+            "QGIS (pid=%d, launch_token=%s) never registered; killed it", pid, launch_token
+        )
+    if unreadable:
+        logger.warning(
+            "Could not inspect %d QGIS process(es) started while waiting for %s "
+            "(no access, or they exited); if one of them was ours, it is still running",
+            unreadable,
+            launch_token,
+        )
 
 
-def _descendant_qgis_pids(root_pid: int, *, since: float, until: float) -> list[int]:
-    """``root_pid`` の子孫のうち、QGIS の実行ファイルの pid（Windows）。
+def _kill_qgis_with_token(
+    launch_token: str, *, since: float, until: float
+) -> tuple[list[int], int]:
+    """token が ``launch_token`` の QGIS を止める（Windows）。
 
-    作られた時刻が ``since``〜``until``（エポック秒）のものだけをたどる。
+    名前（``qgis*.exe``）で絞ったものを 1 つずつ開き、そのハンドルで作られた時刻
+    （``since``〜``until``、エポック秒）、環境変数の token、の順に確かめ、一致すれば
+    同じハンドルで止める。
+
+    Returns:
+        (止めた pid, 調べられなかった数)。範囲外の時刻のものは数えない。
     """
-    children: dict[int, list[tuple[int, str]]] = {}
-    for pid, ppid, name in _list_processes():
-        children.setdefault(ppid, []).append((pid, name))
-    found: list[int] = []
-    seen: set[int] = set()
-    stack = [root_pid]
-    while stack:
-        parent = stack.pop()
-        for pid, name in children.get(parent, ()):
-            if pid in seen or pid == parent:
+    killed: list[int] = []
+    unreadable = 0
+    for pid, _ppid, name in _list_processes():
+        lower = name.lower()
+        if not (lower.startswith("qgis") and lower.endswith(".exe")):
+            continue
+        process = _open_process(pid)
+        if process is None:
+            unreadable += 1
+            continue
+        try:
+            created = process.created_at()
+            if created is None:
+                unreadable += 1
                 continue
-            created = _process_created_at(pid)
-            if created is None or not since <= created <= until:
+            if not since <= created <= until:
                 continue
-            seen.add(pid)
-            stack.append(pid)
-            lower = name.lower()
-            if lower.startswith("qgis") and lower.endswith(".exe"):
-                found.append(pid)
-    return found
+            environ = process.environ()
+            if environ is None:
+                unreadable += 1
+                continue
+            token = next((v for k, v in environ.items() if k.upper() == ENV_LAUNCH_TOKEN), None)
+            if token != launch_token:
+                continue
+            if process.terminate():
+                killed.append(pid)
+            else:
+                logger.warning("Could not kill QGIS (pid=%d)", pid)
+        finally:
+            process.close()
+    return killed, unreadable
+
+
+class _WindowsProcess:
+    """1 つのプロセスのハンドル。調べるのも止めるのも、これ 1 つで行う（#18）。"""
+
+    # PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_TERMINATE | SYNCHRONIZE
+    _ACCESS = 0x0400 | 0x0010 | 0x0001 | 0x00100000
+
+    def __init__(self, handle: int) -> None:
+        self._handle = handle
+
+    @classmethod
+    def open(cls, pid: int) -> _WindowsProcess | None:
+        kernel32 = _kernel32()
+        handle = kernel32.OpenProcess(cls._ACCESS, False, pid)
+        return cls(handle) if handle else None
+
+    def close(self) -> None:
+        if self._handle:
+            _kernel32().CloseHandle(self._handle)
+            self._handle = 0
+
+    def created_at(self) -> float | None:
+        """作られた時刻（エポック秒）。"""
+        import ctypes
+        from ctypes import wintypes
+
+        created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+        if not _kernel32().GetProcessTimes(
+            self._handle,
+            ctypes.byref(created),
+            ctypes.byref(exited),
+            ctypes.byref(kernel),
+            ctypes.byref(user),
+        ):
+            return None
+        ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime  # 1601 年からの 100ns
+        return (ticks - 116_444_736_000_000_000) / 10_000_000
+
+    def environ(self) -> dict[str, str] | None:
+        """環境変数。読めなければ None（64 ビットの Windows 8 以降）。
+
+        PEB → ``RTL_USER_PROCESS_PARAMETERS`` → 環境変数の塊、の順に
+        ``ReadProcessMemory`` で読む（PEB の ProcessParameters が 0x20、
+        Environment が 0x80、EnvironmentSize が 0x3F0）。pytest の Python が
+        32 ビットなら読まない。
+        """
+        import ctypes
+
+        if ctypes.sizeof(ctypes.c_void_p) != 8:
+            return None
+
+        class _BasicInformation(ctypes.Structure):
+            _fields_ = [
+                ("ExitStatus", ctypes.c_void_p),
+                ("PebBaseAddress", ctypes.c_void_p),
+                ("AffinityMask", ctypes.c_void_p),
+                ("BasePriority", ctypes.c_void_p),
+                ("UniqueProcessId", ctypes.c_void_p),
+                ("InheritedFromUniqueProcessId", ctypes.c_void_p),
+            ]
+
+        info = _BasicInformation()
+        if _ntdll().NtQueryInformationProcess(
+            self._handle, 0, ctypes.byref(info), ctypes.sizeof(info), None
+        ):
+            return None
+        if not info.PebBaseAddress:
+            return None
+        params = self._read_pointer(info.PebBaseAddress + 0x20)
+        if not params:
+            return None
+        address = self._read_pointer(params + 0x80)
+        size = self._read_pointer(params + 0x3F0)
+        if not address or not size or size > 1 << 22:
+            return None
+        block = self._read(address, size)
+        if block is None:
+            return None
+        environ: dict[str, str] = {}
+        for item in block.decode("utf-16-le", errors="replace").split("\0"):
+            if not item:
+                break
+            key, sep, value = item.partition("=")
+            if sep and key:  # "=C:=C:\..." のような隠しの項目は key が空になる
+                environ[key] = value
+        return environ
+
+    def terminate(self) -> bool:
+        """強制終了し、終わるまで最大 2 秒待つ。終わったら True。"""
+        kernel32 = _kernel32()
+        if not kernel32.TerminateProcess(self._handle, 1):
+            return False
+        return kernel32.WaitForSingleObject(self._handle, 2000) == 0  # WAIT_OBJECT_0
+
+    def _read(self, address: int, size: int) -> bytes | None:
+        import ctypes
+
+        buf = ctypes.create_string_buffer(size)
+        got = ctypes.c_size_t()
+        if not _kernel32().ReadProcessMemory(
+            self._handle, ctypes.c_void_p(address), buf, size, ctypes.byref(got)
+        ):
+            return None
+        return buf.raw[: got.value]
+
+    def _read_pointer(self, address: int) -> int | None:
+        raw = self._read(address, 8)
+        return None if raw is None or len(raw) < 8 else int.from_bytes(raw, "little")
+
+
+def _open_process(pid: int) -> _WindowsProcess | None:
+    """``pid`` を調べて止められるように開く（Windows）。開けなければ None。"""
+    return _WindowsProcess.open(pid)
+
+
+def _kernel32() -> Any:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    kernel32.ReadProcessMemory.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    kernel32.ReadProcessMemory.restype = wintypes.BOOL
+    kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.TerminateProcess.restype = wintypes.BOOL
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    return kernel32
+
+
+def _ntdll() -> Any:
+    import ctypes
+    from ctypes import wintypes
+
+    ntdll = ctypes.windll.ntdll  # type: ignore[attr-defined]
+    ntdll.NtQueryInformationProcess.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_ulong,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong),
+    ]
+    ntdll.NtQueryInformationProcess.restype = ctypes.c_long
+    return ntdll
 
 
 def _list_processes() -> list[tuple[int, int, str]]:
@@ -581,36 +775,6 @@ def _list_processes() -> list[tuple[int, int, str]]:
         return found
     finally:
         kernel32.CloseHandle(snapshot)
-
-
-def _process_created_at(pid: int) -> float | None:
-    """プロセスが作られた時刻（エポック秒、Windows）。開けなければ None。"""
-    import ctypes
-    from ctypes import wintypes
-
-    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
-    kernel32.GetProcessTimes.restype = wintypes.BOOL
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-    if not handle:
-        return None
-    try:
-        created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
-        if not kernel32.GetProcessTimes(
-            handle,
-            ctypes.byref(created),
-            ctypes.byref(exited),
-            ctypes.byref(kernel),
-            ctypes.byref(user),
-        ):
-            return None
-        ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime  # 1601 年からの 100ns
-        return (ticks - 116_444_736_000_000_000) / 10_000_000
-    finally:
-        kernel32.CloseHandle(handle)
 
 
 def _kill_rejected_worker(rejection: RejectedRegistration) -> None:
