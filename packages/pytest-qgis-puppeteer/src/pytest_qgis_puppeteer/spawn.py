@@ -181,11 +181,16 @@ def spawn_qgis(
         " ".join(str(c) for c in cmd),
         launch_token,
     )
+    # 起動した時刻（#18）。待ちが切れたとき、これより後に作られた子孫だけを
+    # 自分の起こした QGIS とみなす。時計の粒度の分だけ少し前に取る
+    launched_at = time.time() - 1.0
     proc = subprocess.Popen(
         cmd,
         env=spawn_env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        # posix: ランチャーから起きた QGIS も、プロセスグループごと止められるように
+        start_new_session=sys.platform != "win32",
     )
 
     captured_stdout: list[str] = []
@@ -210,7 +215,10 @@ def spawn_qgis(
         # 自分で閉じてもらう。Hub に QGIS がもう見えていれば、そちらはここで
         # 止める（#16）。ランチャー経由だと proc はもう居ない
         _abandon_launch(automation_client, launch_token)
-        _stop_late_worker(automation_client, launch_token=launch_token)
+        if not _stop_late_worker(automation_client, launch_token=launch_token):
+            # Hub に何も届いていない QGIS（登録の要求を送ってこない）は、
+            # 起動したプロセスの子孫としてたどって止める（#18）
+            _kill_unregistered_qgis(proc, launched_at=launched_at, gave_up_at=time.time())
         _terminate_worker(proc, graceful_timeout_s=graceful_shutdown_timeout_s)
         _join_drain_threads(drain_threads, timeout_s=2.0)
         raise
@@ -419,8 +427,10 @@ def _stop_late_worker(
     automation_client: E2EAutomationClient,
     *,
     launch_token: str,
-) -> None:
+) -> bool:
     """待ち時間が切れた後、Hub に見えている自分の QGIS を止める（#16、best-effort）。
+
+    Hub に自分の QGIS が見えていれば True（止められたかどうかは問わない）。
 
     待ちが切れても、QGIS が Hub に何も届けていないとは限らない:
 
@@ -451,8 +461,10 @@ def _stop_late_worker(
                 rejection = None
             if rejection is not None:
                 pid = rejection.pid
-    if pid is None or not _pid_alive(pid):
-        return
+    if pid is None:
+        return False
+    if not _pid_alive(pid):
+        return True
     logger.warning(
         "QGIS (launch_token=%s pid=%d) did not become usable in time; killing it",
         launch_token,
@@ -461,6 +473,144 @@ def _stop_late_worker(
     _force_kill_pid(pid)
     if not _wait_pid_dead(pid, timeout_s=2.0):
         logger.warning("QGIS still alive after force kill (pid=%d)", pid)
+    return True
+
+
+def _kill_unregistered_qgis(
+    proc: subprocess.Popen[bytes], *, launched_at: float, gave_up_at: float
+) -> None:
+    """登録の要求を一度も送ってこない QGIS を、起動したプロセスからたどって止める（#18）。
+
+    ランチャーが QGIS を起こしてすぐ終わると、``proc`` を止めても QGIS は残り、
+    Hub にも見えないので pid が分からない。
+
+    - Windows: 親が終わっても、子は親の pid を覚えている。``proc`` の pid から子孫を
+      たどり、名前が ``qgis`` で始まる実行ファイル（``qgis-ltr-bin.exe`` など）だけを
+      その pid だけ止める。ランチャーの途中のもの（cmd、PowerShell など）は止めない。
+      親の pid が別のプロセスに使い回されていても取り違えにくいよう、作られた時刻が
+      ``launched_at`` から ``gave_up_at`` の間のものだけをたどる
+    - posix: QGIS を起こしたコマンドは自分のプロセスグループで動いているので、
+      グループごと止める
+
+    ランチャーが QGIS を子孫でない形で起こす作り（スケジューラ経由など）だと、
+    たどれない。
+    """
+    if sys.platform != "win32":
+        import signal as _signal
+
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, _signal.SIGKILL)
+        return
+    try:
+        pids = _descendant_qgis_pids(proc.pid, since=launched_at, until=gave_up_at)
+    except Exception:  # noqa: BLE001 - 片付けは best-effort
+        logger.warning("Could not list the processes started by %d", proc.pid, exc_info=True)
+        return
+    for pid in pids:
+        logger.warning("QGIS (pid=%d) started by this spawn never registered; killing it", pid)
+        _force_kill_pid(pid)
+        if not _wait_pid_dead(pid, timeout_s=2.0):
+            logger.warning("QGIS still alive after force kill (pid=%d)", pid)
+
+
+def _descendant_qgis_pids(root_pid: int, *, since: float, until: float) -> list[int]:
+    """``root_pid`` の子孫のうち、QGIS の実行ファイルの pid（Windows）。
+
+    作られた時刻が ``since``〜``until``（エポック秒）のものだけをたどる。
+    """
+    children: dict[int, list[tuple[int, str]]] = {}
+    for pid, ppid, name in _list_processes():
+        children.setdefault(ppid, []).append((pid, name))
+    found: list[int] = []
+    seen: set[int] = set()
+    stack = [root_pid]
+    while stack:
+        parent = stack.pop()
+        for pid, name in children.get(parent, ()):
+            if pid in seen or pid == parent:
+                continue
+            created = _process_created_at(pid)
+            if created is None or not since <= created <= until:
+                continue
+            seen.add(pid)
+            stack.append(pid)
+            lower = name.lower()
+            if lower.startswith("qgis") and lower.endswith(".exe"):
+                found.append(pid)
+    return found
+
+
+def _list_processes() -> list[tuple[int, int, str]]:
+    """(pid, 親の pid, 実行ファイル名) の一覧（Windows、Toolhelp32 で取る）。"""
+    import ctypes
+    from ctypes import wintypes
+
+    class _Entry(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_Entry)]
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_Entry)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+    if not snapshot or snapshot == wintypes.HANDLE(-1).value:
+        raise OSError("CreateToolhelp32Snapshot failed")
+    try:
+        entry = _Entry()
+        entry.dwSize = ctypes.sizeof(_Entry)
+        found: list[tuple[int, int, str]] = []
+        ok = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while ok:
+            found.append(
+                (int(entry.th32ProcessID), int(entry.th32ParentProcessID), entry.szExeFile)
+            )
+            ok = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+        return found
+    finally:
+        kernel32.CloseHandle(snapshot)
+
+
+def _process_created_at(pid: int) -> float | None:
+    """プロセスが作られた時刻（エポック秒、Windows）。開けなければ None。"""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+        if not kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(created),
+            ctypes.byref(exited),
+            ctypes.byref(kernel),
+            ctypes.byref(user),
+        ):
+            return None
+        ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime  # 1601 年からの 100ns
+        return (ticks - 116_444_736_000_000_000) / 10_000_000
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _kill_rejected_worker(rejection: RejectedRegistration) -> None:

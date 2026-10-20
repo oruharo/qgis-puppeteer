@@ -776,6 +776,34 @@ class TestSpawnQgisContextManager:
         self._timeout_spawn(client)
         assert processes.force_killed == [23456]
 
+    def test_descendants_are_searched_only_when_the_hub_saw_nothing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_popen: list[_FakePopen],
+        processes: _FakeProcesses,
+    ) -> None:
+        """#18: Hub に何も見えないときだけ、起動したプロセスの子孫をたどる。"""
+        monkeypatch.delenv("QPUPPETEER_E2E_USE_RUNNING_QGIS", raising=False)
+        searched: list[int] = []
+        monkeypatch.setattr(
+            spawn_module,
+            "_kill_unregistered_qgis",
+            lambda proc, *, launched_at, gave_up_at: searched.append(proc.pid),
+        )
+        client = _FakeAutomationClient()
+        client.bind_popens(mock_popen)
+        self._timeout_spawn(client)  # Hub には何も見えない
+        assert searched == [mock_popen[0].pid]
+
+        searched.clear()
+        client2 = _FakeAutomationClient()
+        client2.bind_popens(mock_popen)
+        client2.feed([_FakeInstance(instance_id="late", pid=23456)])  # Hub に見えている
+        processes.alive.add(23456)
+        self._timeout_spawn(client2)
+        assert searched == []
+        assert 23456 in processes.force_killed
+
     def test_launcher_exited_worker_is_asked_to_close(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -1008,3 +1036,62 @@ class TestSpawnQgisFixture:
         inner = f._get_wrapped_function()
         params = inspect.signature(inner).parameters
         assert set(params.keys()) == {"hub_port", "automation_client"}
+
+
+# ============================================================
+# 登録の要求を一度も送ってこない QGIS（#18）
+# ============================================================
+
+
+class TestDescendantQgisPids:
+    """起動したプロセスの子孫から、QGIS の実行ファイルだけを拾う。"""
+
+    def _tree(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # (pid, 親の pid, 名前, 作られた時刻)
+        rows = [
+            (200, 100, "cmd.exe", 1000.5),  # ランチャー（cmd）の子の cmd
+            (300, 200, "qgis-ltr-bin.exe", 1001.0),  # 孫の QGIS → 止める
+            (310, 100, "QGIS-BIN.EXE", 1002.0),  # 子の QGIS（大文字）→ 止める
+            (400, 100, "qgis-ltr-bin.exe", 900.0),  # 起動より前（pid の使い回し）→ 止めない
+            (410, 100, "qgis-ltr-bin.exe", 2000.0),  # 待ちが切れた後 → 止めない
+            (500, 100, "notepad.exe", 1003.0),  # QGIS ではない → 止めない
+            (600, 999, "qgis-ltr-bin.exe", 1004.0),  # 無関係の親 → 止めない
+        ]
+        monkeypatch.setattr(
+            spawn_module, "_list_processes", lambda: [(p, pp, n) for p, pp, n, _ in rows]
+        )
+        created = {p: t for p, _, _, t in rows}
+        monkeypatch.setattr(spawn_module, "_process_created_at", created.get)
+
+    def test_only_qgis_created_within_the_window_is_picked(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._tree(monkeypatch)
+        pids = spawn_module._descendant_qgis_pids(100, since=1000.0, until=1500.0)
+        assert sorted(pids) == [300, 310]
+
+    def test_kill_is_by_pid_alone(
+        self, monkeypatch: pytest.MonkeyPatch, processes: _FakeProcesses
+    ) -> None:
+        self._tree(monkeypatch)
+        monkeypatch.setattr(spawn_module.sys, "platform", "win32")
+        processes.alive.update({300, 310})
+        spawn_module._kill_unregistered_qgis(
+            _FakePopen(pid=100),
+            launched_at=1000.0,
+            gave_up_at=1500.0,  # type: ignore[arg-type]
+        )
+        assert sorted(processes.force_killed) == [300, 310]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows API")
+def test_windows_process_list_and_creation_time_are_real() -> None:
+    import os
+
+    me = os.getpid()
+    rows = {pid: (ppid, name) for pid, ppid, name in spawn_module._list_processes()}
+    assert rows[me][0] == os.getppid()
+    assert rows[me][1].lower().startswith("python")
+    created = spawn_module._process_created_at(me)
+    assert created is not None
+    assert 0 <= time.time() - created < 3600

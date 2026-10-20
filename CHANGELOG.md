@@ -316,6 +316,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A QGIS that never sent a registration was left running** (#18). When the
+  plugin does not load, the QGIS never reaches the Hub, so neither the
+  instance list nor the refusal record gives its pid, and a launcher that has
+  already exited leaves nothing to stop. When the startup wait gives up with
+  nothing of its own on the Hub, `spawn_qgis()` now follows the processes it
+  started. On Windows a child keeps its parent's pid after the parent exits:
+  it walks the launcher's descendants (Toolhelp32 through ctypes, no WMI)
+  created between the launch and the timeout, and kills by pid only those whose
+  executable name starts with `qgis` (`qgis-ltr-bin.exe`), never the launcher
+  steps in between; the time window keeps a reused parent pid from pulling in
+  unrelated processes. On posix the QGIS command now runs in its own process
+  group, which is killed. A launcher that starts QGIS outside its process tree,
+  or a renamed QGIS executable, is still out of reach. Checked on QGIS 3.34
+  with a profile that lacks the plugin: the QGIS was killed when the wait gave
+  up, and none was left.
+
 - **A QGIS that registered only after `spawn_qgis()` stopped waiting was left
   running** (#16). When the wait gives up, `spawn_qgis()` now tells the Hub
   that it abandoned the `launch_token` (new client-to-Hub message
