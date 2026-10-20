@@ -8,6 +8,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **pytest warns when the QGIS plugin and its own qgis-puppeteer differ** (#17).
+  The plugin folder is a copy of the library with no version or commit, and
+  the two are updated by different means (a lock file, a copy step, a uvx
+  cache), so a fix could be present on one side only without anyone noticing.
+  Both sides now compute a 12-hex fingerprint of the copied files
+  (`qgis_puppeteer._fingerprint`; line endings and plugin-owned files do not
+  count, so it matches whenever `sync_plugin.py --check` passes, and it does
+  for a built wheel). The Worker sends it on registration, `list_instances`
+  and `qgis_list_instances` return it as `source_fingerprint`, the MCP gateway
+  names its own in its startup line, and pytest compares them once per
+  session in `hub_ready`, raising `QgisPluginMismatchWarning` (also when an
+  older plugin sends none). It does not fail the run unless asked with `-W
+  error`. Checked on QGIS 3.34: no warning for a matching plugin, a warning
+  after one line of the plugin copy was edited.
+
 - **Messages logged while QGIS starts can be read and checked** (#15). The
   message check clears the Worker's record right before each test body, so
   what QGIS logged from startup until then (a project that failed to load, a

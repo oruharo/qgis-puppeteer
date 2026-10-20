@@ -395,3 +395,13 @@ class TestRegisterFailureReason:
         assert register_failure_reason(err) == "label_conflict: launch_abandoned"
         assert register_failure_reason(Error(ErrorCode.LABEL_CONFLICT, "x")) == "label_conflict"
         assert register_failure_reason(None) == "unknown"
+
+
+def test_registration_carries_the_source_fingerprint() -> None:
+    """#17: pytest 側が、QGIS のプラグインの版の食い違いに気付けるように。"""
+    from qgis_puppeteer._fingerprint import source_fingerprint
+    from qgis_puppeteer.worker_state import WorkerConfig, WorkerState
+
+    state = WorkerState(WorkerConfig(pid=1, label="A"))
+    req = state.build_register("r")
+    assert req.source_fingerprint == source_fingerprint()

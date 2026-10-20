@@ -215,6 +215,22 @@ class TestRoundTrip:
         )
         assert decode_message(encode_message(msg)) == msg
 
+    def test_source_fingerprint_round_trip(self) -> None:
+        """#17: Worker の指紋は登録で送られ、一覧で返る。旧形式では None。"""
+        reg = RegisterRequest(id="r", role=Role.WORKER, pid=1, label="A", source_fingerprint="ab12")
+        assert decode_message(encode_message(reg)) == reg
+        resp = ListInstancesResponse(
+            id="l",
+            instances=[InstanceInfo(instance_id="w", label="A", pid=1, source_fingerprint="ab12")],
+        )
+        assert decode_message(encode_message(resp)) == resp
+        old = decode_message(
+            '{"type": "list_instances_response", "id": "o", "instances": '
+            '[{"instance_id": "w", "label": "A", "pid": 1}]}'
+        )
+        assert isinstance(old, ListInstancesResponse)
+        assert old.instances[0].source_fingerprint is None
+
     def test_abandon_launch_round_trip(self) -> None:
         msg = AbandonLaunch(id="uuid-ab", launch_token="lt-late")
         assert decode_message(encode_message(msg)) == msg

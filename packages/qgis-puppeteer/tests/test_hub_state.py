@@ -938,6 +938,19 @@ class TestRejectedRegistrations:
         assert tokens[-1] == f"lt-{REJECTED_REGISTRATIONS_MAX + 4}"
 
 
+class TestSourceFingerprint:
+    def test_the_workers_fingerprint_is_listed(self) -> None:
+        """#17: 登録で申告された指紋を、一覧でそのまま返す（旧プラグインは None）。"""
+        state = HubState(clock=FakeClock())
+        req = _worker_req(label="new")
+        state.register_worker(
+            "c1", RegisterRequest(**{**req.__dict__, "source_fingerprint": "ab12"})
+        )
+        state.register_worker("c2", _worker_req(label="old", pid=2))
+        by_label = {i.label: i.source_fingerprint for i in state.list_instances()}
+        assert by_label == {"new": "ab12", "old": None}
+
+
 class TestAbandonedLaunches:
     """#16: 起こした側がもう待っていない launch_token の登録は断る。"""
 

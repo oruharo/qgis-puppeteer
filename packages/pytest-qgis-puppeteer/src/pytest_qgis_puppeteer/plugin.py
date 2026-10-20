@@ -54,6 +54,7 @@ import subprocess
 import sys
 import threading
 import time
+import warnings
 from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1564,7 +1565,56 @@ def hub_ready(
     timeout_s = float(
         pytestconfig.getini("qgis_startup_timeout") or DEFAULT_WORKER_REGISTER_TIMEOUT_S
     )
-    return automation_client.wait_for_ready(timeout_s=timeout_s)
+    instance_id = automation_client.wait_for_ready(timeout_s=timeout_s)
+    _check_plugin_fingerprint(automation_client, instance_id)
+    return instance_id
+
+
+class QgisPluginMismatchWarning(UserWarning):
+    """QGIS のプラグインと pytest 側の qgis-puppeteer の中身が食い違っている（#17）。
+
+    片側にしか入っていない修正は効かない。``-W error::pytest_qgis_puppeteer.
+    QgisPluginMismatchWarning`` で失敗にもできる。
+    """
+
+
+def _check_plugin_fingerprint(client: E2EAutomationClient, instance_id: str) -> None:
+    """session の QGIS のプラグインと、pytest 側のライブラリの指紋を比べる（#17）。
+
+    session の最初に 1 回。食い違っていれば `QgisPluginMismatchWarning` を出す
+    （失敗にはしない）。旧プラグインは指紋を送らないので「分からない」と知らせる。
+    """
+    from qgis_puppeteer._fingerprint import source_fingerprint
+
+    try:
+        info = next((i for i in client.list_instances() if i.instance_id == instance_id), None)
+    except Exception:  # noqa: BLE001 - 確かめられなくてもテストは進める
+        logger.debug("Could not read the plugin fingerprint", exc_info=True)
+        return
+    if info is None:
+        return
+    mine = source_fingerprint()
+    theirs = getattr(info, "source_fingerprint", None)
+    if theirs == mine:
+        logger.info("QGIS Puppeteer plugin matches pytest's qgis-puppeteer (%s)", mine)
+        return
+    import qgis_puppeteer
+
+    here = Path(qgis_puppeteer.__file__).resolve().parent
+    if theirs is None:
+        message = (
+            "The QGIS Puppeteer plugin in QGIS is older than the version check, so it "
+            f"cannot be compared with pytest's qgis-puppeteer ({mine}, {here}). "
+            "Install the plugin from the same commit."
+        )
+    else:
+        message = (
+            f"The QGIS Puppeteer plugin in QGIS ({theirs}) differs from pytest's "
+            f"qgis-puppeteer ({mine}, {here}). Fixes on one side only do not take "
+            "effect; install the plugin and pin pytest-qgis-puppeteer to the same commit."
+        )
+    logger.warning(message)
+    warnings.warn(message, QgisPluginMismatchWarning, stacklevel=2)
 
 
 # ==============================================================

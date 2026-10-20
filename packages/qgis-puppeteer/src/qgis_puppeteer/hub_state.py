@@ -116,6 +116,8 @@ class WorkerEntry:
     # ハートビートが途絶えた時刻。TCP は生きているが pong が返らない状態
     # （GUI スレッドが塞がっている、または half-open）。pong で None に戻る。
     unresponsive_since: float | None = None
+    # #17: Worker が登録時に申告したライブラリの指紋（旧プラグインは None）
+    source_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -486,6 +488,7 @@ class HubState:
             registered_at=now,
             last_seen_at=now,
             label_explicit=label_explicit,
+            source_fingerprint=req.source_fingerprint,
         )
         self._workers_by_conn[conn_id] = entry
         self._conn_by_instance[instance_id] = conn_id
@@ -844,6 +847,7 @@ class HubState:
             pid=entry.pid,
             project=entry.project,
             launch_token=entry.launch_token,
+            source_fingerprint=entry.source_fingerprint,
             registered_seq=entry.registered_seq,
             registered_at=entry.registered_at,
             label_explicit=entry.label_explicit,

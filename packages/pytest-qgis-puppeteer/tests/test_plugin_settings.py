@@ -402,3 +402,49 @@ class TestFormatUncaughtExceptions:
         assert "<unknown>" in out
         assert "<no-ts>" in out
         assert "<no-thread>" in out
+
+
+class TestPluginFingerprintCheck:
+    """#17: session の QGIS のプラグインと pytest 側の qgis-puppeteer の指紋を比べる。"""
+
+    class _Client:
+        def __init__(self, fingerprint: str | None) -> None:
+            self.fingerprint = fingerprint
+
+        def list_instances(self) -> list[Any]:
+            from qgis_puppeteer.protocol import InstanceInfo
+
+            return [
+                InstanceInfo(
+                    instance_id="w-1",
+                    label="qgis_process",
+                    pid=1,
+                    source_fingerprint=self.fingerprint,
+                )
+            ]
+
+    def _check(self, fingerprint: str | None) -> list[Any]:
+        import warnings
+
+        from pytest_qgis_puppeteer.plugin import _check_plugin_fingerprint
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _check_plugin_fingerprint(self._Client(fingerprint), "w-1")  # type: ignore[arg-type]
+        return caught
+
+    def test_matching_plugin_is_quiet(self) -> None:
+        from qgis_puppeteer._fingerprint import source_fingerprint
+
+        assert self._check(source_fingerprint()) == []
+
+    def test_a_different_plugin_warns(self) -> None:
+        from pytest_qgis_puppeteer import QgisPluginMismatchWarning
+
+        [w] = self._check("000000000000")
+        assert issubclass(w.category, QgisPluginMismatchWarning)
+        assert "differs" in str(w.message)
+
+    def test_an_old_plugin_without_a_fingerprint_warns(self) -> None:
+        [w] = self._check(None)
+        assert "older than the version check" in str(w.message)

@@ -170,6 +170,25 @@ git インストールなら `serverInfo.version` も `0.1.0+g1c1ff51` の形に
 Claude Code の MCP ログ（`Connection established with capabilities: … "version"`）
 でも commit が分かる。
 
+#### QGIS のプラグインと pytest 側の版の食い違い
+
+QGIS のプラグインのフォルダはライブラリの写しで、版や commit を持たない。そこで
+両方が、写しの対象になるファイルの中身から**指紋**（12 桁の 16 進）を作る。
+`sync_plugin.py --check` が通る組み合わせなら同じになり、改行の違いは数えない。
+
+- Worker は登録のときに指紋を送り、`list_instances` / MCP の `qgis_list_instances`
+  の `source_fingerprint` に出る（旧プラグインは `null`）
+- pytest は session の QGIS が使える状態になったとき（`hub_ready`）に 1 回、
+  自分の qgis-puppeteer の指紋と比べる。食い違っていれば
+  `pytest_qgis_puppeteer.QgisPluginMismatchWarning` を出す（失敗にはしない）。
+  旧プラグインで指紋が無いときも、比べられないことを警告する。失敗にしたいときは
+  `-W error::pytest_qgis_puppeteer.QgisPluginMismatchWarning`
+- MCP の gateway は、起動時に名乗る 1 行に自分の指紋を入れる（`fingerprint …`）。
+  `qgis_list_instances` の `source_fingerprint` と比べる
+
+片側にしか入っていない修正は効かないので、uv.lock の固定とプラグインの入れ直しは
+同じ commit にそろえる。
+
 #### `uvx --from <ローカルディレクトリ>` は src の変更で再ビルドしない
 
 vendor コピーなどローカルパスを `uvx --from` に渡すと、uvx はその環境を

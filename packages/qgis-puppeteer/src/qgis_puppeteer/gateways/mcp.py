@@ -1439,6 +1439,9 @@ def _instance_info_to_dict(info: Any) -> dict[str, Any]:
         "state": info.state,
         "last_seen_ago": info.last_seen_ago,
         "grace_expires_in": info.grace_expires_in,
+        # #17: QGIS のプラグインのライブラリの指紋。gateway 自身の指紋は serverInfo
+        # と同じく gateway.log に出る。旧プラグインでは null
+        "source_fingerprint": getattr(info, "source_fingerprint", None),
     }
 
 
@@ -1503,11 +1506,14 @@ def main() -> int:
     # gateway が二重に立っていた事故（Desktop の shared pool と .mcp.json）で、
     # ログファイルの有無だけでは版を取り違えた。
     version, source = _install_source()
+    from qgis_puppeteer._fingerprint import source_fingerprint
+
     logger.info(
-        "Gateway qgis-puppeteer %s, %s, code at %s, pid %d, python %s",
+        "Gateway qgis-puppeteer %s, %s, code at %s, fingerprint %s, pid %d, python %s",
         version or "?",
         source,
         Path(__file__).resolve().parent.parent,
+        source_fingerprint(),  # #17: qgis_list_instances の source_fingerprint と比べる
         os.getpid(),
         sys.version.split()[0],
     )

@@ -118,6 +118,8 @@ class InstanceInfo:
     last_seen_ago: float | None = None
     # disconnected のみ: Hub が登録を破棄するまでの残り秒。
     grace_expires_in: float | None = None
+    # #17: その QGIS のプラグインのライブラリの指紋。旧プラグイン・旧 Hub では None
+    source_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -181,6 +183,9 @@ class RegisterRequest:
     # ADR-0005 D4: active 同 label 衝突時のポリシー。
     # "reject"（既定 / None）/ "takeover" / "suffix"。worker 側 env で決まる。
     conflict_policy: str | None = None
+    # #17: Worker 側（QGIS のプラグイン）のライブラリの中身の指紋
+    # （`qgis_puppeteer._fingerprint`）。旧プラグインは送らない
+    source_fingerprint: str | None = None
 
     @property
     def type(self) -> MessageType:
@@ -473,6 +478,7 @@ def _build_message(msg_type: MessageType, payload: dict[str, Any]) -> Message:
             previous_instance_id=payload.get("previous_instance_id"),
             launch_token=payload.get("launch_token"),
             conflict_policy=payload.get("conflict_policy"),
+            source_fingerprint=payload.get("source_fingerprint"),
         )
 
     if msg_type is MessageType.REGISTER_ACK:
@@ -527,6 +533,7 @@ def _build_message(msg_type: MessageType, payload: dict[str, Any]) -> Message:
                 state=str(item.get("state", "active")),
                 last_seen_ago=item.get("last_seen_ago"),
                 grace_expires_in=item.get("grace_expires_in"),
+                source_fingerprint=item.get("source_fingerprint"),
             )
             for item in raw_instances
         ]

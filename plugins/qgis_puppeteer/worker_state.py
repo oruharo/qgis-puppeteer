@@ -261,6 +261,7 @@ class WorkerState:
             previous_instance_id=self.previous_instance_id,
             launch_token=self.config.launch_token,
             conflict_policy=self.config.conflict_policy,
+            source_fingerprint=_own_fingerprint(),
         )
 
     def on_register_ack(self, ack: RegisterAck) -> None:
@@ -389,3 +390,13 @@ def register_failure_reason(error: Error | None) -> str:
         return "unknown"
     detail = error.details.get("reason") if isinstance(error.details, dict) else None
     return f"{error.code.value}: {detail}" if detail else error.code.value
+
+
+def _own_fingerprint() -> str | None:
+    """この Worker が動いている ``qgis_puppeteer``（QGIS のプラグイン）の指紋（#17）。"""
+    try:
+        from qgis_puppeteer._fingerprint import source_fingerprint
+
+        return source_fingerprint()
+    except Exception:  # noqa: BLE001 - 指紋が取れなくても登録は続ける
+        return None

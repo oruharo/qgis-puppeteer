@@ -31,6 +31,7 @@ from pytest_qgis_puppeteer.locator import (
     SelectorAmbiguousError,
     WidgetNotActionableError,
 )
+from pytest_qgis_puppeteer.plugin import QgisPluginMismatchWarning
 from pytest_qgis_puppeteer.spawn import (
     SpawnedWorker,
     WorkerRegisterRejected,
@@ -54,5 +55,6 @@ __all__ = [
     "expect",
     "spawn_qgis",
     "unexpected_messages",
+    "QgisPluginMismatchWarning",
     "spawn_qgis_fixture",
 ]

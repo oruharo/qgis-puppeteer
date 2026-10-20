@@ -103,6 +103,8 @@ class TestMcpGatewayListInstances:
         assert instances[0]["state"] == "active"
         assert "last_seen_ago" in instances[0]
         assert instances[0]["instance_id"] == "worker-alpha-1111"
+        # #17: プラグインの指紋の欄がある（この偽の Hub は返さないので null）
+        assert "source_fingerprint" in instances[0]
 
     def test_discovery_tools_reconnect_after_the_hub_connection_went_stale(self) -> None:
         """Hub を入れ替えた直後でも list_instances / use_instance が張り直して通る。
