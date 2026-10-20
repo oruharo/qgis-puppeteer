@@ -49,9 +49,12 @@ class _FakeClient:
         return self._take("qgis_check_actionability")
 
     def click_widget(
-        self, selector: dict[str, Any], *, instance: str | None = None
+        self, selector: dict[str, Any], *, wait: bool = True, instance: str | None = None
     ) -> dict[str, Any]:
-        self.calls.append(("qgis_click_widget", {"selector": selector}, instance))
+        params: dict[str, Any] = {"selector": selector}
+        if not wait:
+            params["wait"] = False
+        self.calls.append(("qgis_click_widget", params, instance))
         return self._take("qgis_click_widget")
 
     def set_widget_value(
@@ -59,15 +62,13 @@ class _FakeClient:
         selector: dict[str, Any],
         value: Any,
         *,
+        wait: bool = True,
         instance: str | None = None,
     ) -> dict[str, Any]:
-        self.calls.append(
-            (
-                "qgis_set_widget_value",
-                {"selector": selector, "value": value},
-                instance,
-            )
-        )
+        params: dict[str, Any] = {"selector": selector, "value": value}
+        if not wait:
+            params["wait"] = False
+        self.calls.append(("qgis_set_widget_value", params, instance))
         return self._take("qgis_set_widget_value")
 
     def snapshot_ui(
@@ -150,6 +151,34 @@ class TestAutoWaitClick:
         assert result == {"success": True}
         commands = [c[0] for c in client.calls]
         assert commands == ["qgis_check_actionability", "qgis_click_widget"]
+
+    def test_wait_false_is_forwarded(self) -> None:
+        """#21: ``wait=False`` は click にも値の設定にも渡る。既定では送らない。"""
+        ready = {
+            "exists": True,
+            "visible": True,
+            "enabled": True,
+            "not_covered": True,
+            "editable": True,
+            "actionable": True,
+        }
+        client = _FakeClient(
+            {
+                "qgis_check_actionability": [ready] * 3,
+                "qgis_click_widget": [{"success": True, "queued": True}, {"success": True}],
+                "qgis_set_widget_value": [{"success": True, "queued": True}],
+            }
+        )
+        loc = Locator(client, {"object_name": "ok"})
+        assert loc.click(wait=False) == {"success": True, "queued": True}
+        loc.check(wait=False)
+        loc.click()
+        sent = [c[1] for c in client.calls if c[0] != "qgis_check_actionability"]
+        assert sent == [
+            {"selector": {"object_name": "ok"}, "wait": False},
+            {"selector": {"object_name": "ok"}, "value": True, "wait": False},
+            {"selector": {"object_name": "ok"}},
+        ]
 
     def test_click_polls_until_actionable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """初回 disabled → 2 回目 actionable で click が走る。

@@ -81,7 +81,7 @@ def build_handlers(iface: Any | None = None) -> dict[str, Handler]:
     )
 
     handlers["qgis_select_features"] = lambda params: layer_tools.select_features(
-        params["layer_name"], params["expression"], iface
+        params["layer_name"], params["expression"], iface, wait=params.get("wait", True)
     )
 
     handlers["qgis_get_selected_features"] = lambda params: layer_tools.get_selected_features(
@@ -150,6 +150,7 @@ def build_handlers(iface: Any | None = None) -> dict[str, Handler]:
         params["xmax"],
         params["ymax"],
         iface,
+        wait=params.get("wait", True),
     )
 
     # ------------------------------------------------------------
@@ -162,10 +163,12 @@ def build_handlers(iface: Any | None = None) -> dict[str, Handler]:
         include_main_window=params.get("include_main_window", False),
     )
 
-    handlers["qgis_click_widget"] = lambda params: ui_tools.click_widget(params["selector"], iface)
+    handlers["qgis_click_widget"] = lambda params: ui_tools.click_widget(
+        params["selector"], iface, wait=params.get("wait", True)
+    )
 
     handlers["qgis_set_widget_value"] = lambda params: ui_tools.set_widget_value(
-        params["selector"], params["value"], iface
+        params["selector"], params["value"], iface, wait=params.get("wait", True)
     )
 
     handlers["qgis_check_actionability"] = lambda params: ui_tools.check_actionability(

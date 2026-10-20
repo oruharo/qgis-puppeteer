@@ -195,8 +195,16 @@ class TestLayerHandlers:
         build_handlers = _import_build_handlers()
         handlers = build_handlers(None)
         handlers["qgis_select_features"]({"layer_name": "L", "expression": '"n" > 0'})
-        args, _ = fake_tools["layer"].select_features.calls[0]
+        args, kwargs = fake_tools["layer"].select_features.calls[0]
         assert args == ("L", '"n" > 0', None)
+        assert kwargs == {"wait": True}
+
+    def test_select_features_forwards_wait(self, fake_tools: dict[str, Any]) -> None:
+        build_handlers = _import_build_handlers()
+        handlers = build_handlers(None)
+        handlers["qgis_select_features"]({"layer_name": "L", "expression": "1", "wait": False})
+        _, kwargs = fake_tools["layer"].select_features.calls[0]
+        assert kwargs == {"wait": False}
 
     def test_get_selected_features_uses_default_limit(self, fake_tools: dict[str, Any]) -> None:
         build_handlers = _import_build_handlers()
@@ -310,8 +318,18 @@ class TestScreenshotHandlers:
         build_handlers = _import_build_handlers()
         handlers = build_handlers(None)
         handlers["qgis_set_canvas_extent"]({"xmin": 1.0, "ymin": 2.0, "xmax": 3.0, "ymax": 4.0})
-        args, _ = fake_tools["shot"].set_canvas_extent.calls[0]
+        args, kwargs = fake_tools["shot"].set_canvas_extent.calls[0]
         assert args == (1.0, 2.0, 3.0, 4.0, None)
+        assert kwargs == {"wait": True}
+
+    def test_set_canvas_extent_forwards_wait(self, fake_tools: dict[str, Any]) -> None:
+        build_handlers = _import_build_handlers()
+        handlers = build_handlers(None)
+        handlers["qgis_set_canvas_extent"](
+            {"xmin": 1.0, "ymin": 2.0, "xmax": 3.0, "ymax": 4.0, "wait": False}
+        )
+        _, kwargs = fake_tools["shot"].set_canvas_extent.calls[0]
+        assert kwargs == {"wait": False}
 
 
 # ==============================================================
@@ -354,16 +372,32 @@ class TestUiHandlers:
         handlers = build_handlers(iface)
         selector = {"name": "ok_button"}
         handlers["qgis_click_widget"]({"selector": selector})
-        args, _ = fake_tools["ui"].click_widget.calls[0]
+        args, kwargs = fake_tools["ui"].click_widget.calls[0]
         assert args == (selector, iface)
+        assert kwargs == {"wait": True}
+
+    def test_click_widget_forwards_wait(self, fake_tools: dict[str, Any]) -> None:
+        build_handlers = _import_build_handlers()
+        handlers = build_handlers(None)
+        handlers["qgis_click_widget"]({"selector": {"name": "b"}, "wait": False})
+        _, kwargs = fake_tools["ui"].click_widget.calls[0]
+        assert kwargs == {"wait": False}
 
     def test_set_widget_value_forwards_selector_and_value(self, fake_tools: dict[str, Any]) -> None:
         build_handlers = _import_build_handlers()
         handlers = build_handlers(None)
         selector = {"name": "input_x"}
         handlers["qgis_set_widget_value"]({"selector": selector, "value": "hello"})
-        args, _ = fake_tools["ui"].set_widget_value.calls[0]
+        args, kwargs = fake_tools["ui"].set_widget_value.calls[0]
         assert args == (selector, "hello", None)
+        assert kwargs == {"wait": True}
+
+    def test_set_widget_value_forwards_wait(self, fake_tools: dict[str, Any]) -> None:
+        build_handlers = _import_build_handlers()
+        handlers = build_handlers(None)
+        handlers["qgis_set_widget_value"]({"selector": {"name": "x"}, "value": 1, "wait": False})
+        _, kwargs = fake_tools["ui"].set_widget_value.calls[0]
+        assert kwargs == {"wait": False}
 
     def test_check_actionability_forwards_selector_and_iface(
         self, fake_tools: dict[str, Any]

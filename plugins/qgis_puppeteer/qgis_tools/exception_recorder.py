@@ -9,6 +9,8 @@ stderr に出るだけで「テストの pass/fail」には反映されない（
 
 - ``install_excepthook()`` — 1 度だけ呼ぶ。previous hook を chain して保持する
 - ``get_recent(limit=None)`` — 蓄積した例外レコードを古い順に返す
+- ``record(type_name, message, traceback_text="")`` — hook を通らない失敗を積む
+  （後で動かす処理の中で握った例外など。``queued.run_later`` が使う）
 - ``clear()`` — バッファをクリア（test setup でリセットする想定）
 - ``size_limit()`` — リングバッファの maxlen
 
@@ -81,27 +83,43 @@ def _our_hook(
 ) -> None:
     """内部 hook。レコード化して buffer に積み、previous hook に chain する。"""
     try:
-        record = {
-            "ts": datetime.now().isoformat(timespec="microseconds"),
-            "type": exc_type.__name__ if exc_type is not None else "<unknown>",
-            "message": _safe_str(exc_value),
-            "traceback": "".join(traceback.format_exception(exc_type, exc_value, exc_tb)),
-            "thread": threading.current_thread().name,
-        }
+        record = _make_record(
+            exc_type.__name__ if exc_type is not None else "<unknown>",
+            _safe_str(exc_value),
+            "".join(traceback.format_exception(exc_type, exc_value, exc_tb)),
+        )
     except Exception:  # noqa: BLE001 - hook 自身が落ちると無限再帰になるので握る
-        record = {
-            "ts": datetime.now().isoformat(timespec="microseconds"),
-            "type": "<recorder_error>",
-            "message": "exception_recorder failed to format the record",
-            "traceback": "",
-            "thread": threading.current_thread().name,
-        }
+        record = _make_record(
+            "<recorder_error>", "exception_recorder failed to format the record", ""
+        )
     with _LOCK:
         _BUF.append(record)
     # previous hook に chain（stderr 出力 / KeyboardInterrupt 標準処理を壊さない）
     if _PREV_HOOK is not None:
         with contextlib.suppress(Exception):
             _PREV_HOOK(exc_type, exc_value, exc_tb)
+
+
+def record(type_name: str, message: str, traceback_text: str = "") -> None:
+    """Hook を通らない失敗を 1 件積む。レコードの形は hook と同じ。
+
+    後で動かす処理（``QTimer`` で積んだ click など）は、もう呼び出し元へ結果を
+    返せない。そこで握った例外や ``success: false`` を未捕捉例外と同じ場所に残し、
+    テストの判定（``qgis_fail_on_uncaught_exception``）に乗せるために使う。
+    """
+    item = _make_record(type_name, message, traceback_text)
+    with _LOCK:
+        _BUF.append(item)
+
+
+def _make_record(type_name: str, message: str, traceback_text: str) -> dict[str, Any]:
+    return {
+        "ts": datetime.now().isoformat(timespec="microseconds"),
+        "type": type_name,
+        "message": message,
+        "traceback": traceback_text,
+        "thread": threading.current_thread().name,
+    }
 
 
 def get_recent(limit: int | None = None) -> list[dict[str, Any]]:

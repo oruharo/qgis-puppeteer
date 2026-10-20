@@ -137,6 +137,15 @@ def _raise_for_execute_result(result: Any) -> None:
     )
 
 
+def _with_wait(params: dict[str, Any], wait: bool) -> dict[str, Any]:
+    """``wait=False`` のときだけ params に ``wait`` を足す（#21）。
+
+    既定の呼び出しは今までと同じ形のまま送る（``wait`` を知らない古い plugin でも、
+    記録された操作の形でも、変わらないように）。
+    """
+    return params if wait else {**params, "wait": False}
+
+
 # `wait_for_ready` の probe で「まだ経路が通っていない」とみなすエラー。
 # これ以外（コマンド不明なども含む）は Worker が応答した証拠なので ready 扱い。
 _NOT_ROUTED_YET = (
@@ -639,22 +648,39 @@ class E2EAutomationClient:
         )
 
     def click_widget(
-        self, selector: dict[str, Any], *, instance: str | None = None
+        self,
+        selector: dict[str, Any],
+        *,
+        wait: bool = True,
+        instance: str | None = None,
     ) -> dict[str, Any]:
-        """`qgis_click_widget` を呼ぶ。selector 仕様は `ui_tools._find_widget`。"""
-        return self.call("qgis_click_widget", {"selector": selector}, instance=instance)
+        """`qgis_click_widget` を呼ぶ。selector 仕様は `ui_tools._find_widget`。
+
+        ``wait=False`` は click を QGIS 側のイベントループに積んですぐ返す（#21）。
+        押すと ``exec()`` の確認（``QMessageBox.question`` など）を出すボタン用で、
+        確認には dialog handler（``action="button"``）で答える。click の中で出た
+        失敗は戻り値ではなく ``get_recent_exceptions()`` に残る。
+        """
+        return self.call(
+            "qgis_click_widget", _with_wait({"selector": selector}, wait), instance=instance
+        )
 
     def set_widget_value(
         self,
         selector: dict[str, Any],
         value: Any,
         *,
+        wait: bool = True,
         instance: str | None = None,
     ) -> dict[str, Any]:
-        """`qgis_set_widget_value` を呼ぶ。"""
+        """`qgis_set_widget_value` を呼ぶ。
+
+        ``wait=False`` は値を入れる処理を積んですぐ返す（#21）。値の変更に結ばれた
+        処理が ``exec()`` の確認を出す場合用。``prior_value`` は積む前の値。
+        """
         return self.call(
             "qgis_set_widget_value",
-            {"selector": selector, "value": value},
+            _with_wait({"selector": selector, "value": value}, wait),
             instance=instance,
         )
 
@@ -738,12 +764,13 @@ class E2EAutomationClient:
         xmax: float,
         ymax: float,
         *,
+        wait: bool = True,
         instance: str | None = None,
     ) -> dict[str, Any]:
-        """`qgis_set_canvas_extent` を呼ぶ。"""
+        """`qgis_set_canvas_extent` を呼ぶ。``wait`` は `click_widget` と同じ（#21）。"""
         return self.call(
             "qgis_set_canvas_extent",
-            {"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax},
+            _with_wait({"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax}, wait),
             instance=instance,
         )
 
@@ -939,12 +966,17 @@ class E2EAutomationClient:
         layer_name: str,
         expression: str,
         *,
+        wait: bool = True,
         instance: str | None = None,
     ) -> dict[str, Any]:
-        """`qgis_select_features` を呼ぶ。"""
+        """`qgis_select_features` を呼ぶ。
+
+        ``wait`` は `click_widget` と同じ（#21）。``wait=False`` では
+        ``selected_count`` は返らない。
+        """
         return self.call(
             "qgis_select_features",
-            {"layer_name": layer_name, "expression": expression},
+            _with_wait({"layer_name": layer_name, "expression": expression}, wait),
             instance=instance,
         )
 

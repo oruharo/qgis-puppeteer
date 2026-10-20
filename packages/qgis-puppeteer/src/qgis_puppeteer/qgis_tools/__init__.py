@@ -14,6 +14,7 @@ QGIS プラグイン（`qgis_plugin`）から `Worker` に登録される handle
 - `app_tools`         : QGIS を閉じる手順（モーダルを閉じてからメインウィンドウを閉じる）
 - `exception_recorder`: 未捕捉の Python 例外のリングバッファ
 - `message_recorder`  : QgsMessageLog（メッセージバー含む）のリングバッファ
+- `queued`            : 操作をイベントループに積んですぐ返す（`wait=False`）
 - `code_analyzer`     : `python_executor` が使うコード静的解析
 - `permission_manager`: `python_executor` が使う whitelist 永続化
 

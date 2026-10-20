@@ -83,6 +83,43 @@ class TestRegisterValidation:
             reg.register(action, {}, action)
         assert len(reg) == 3
 
+    def test_button_action_keeps_the_button(self) -> None:
+        """#21: action="button" は押すボタンを持ち、一覧にも出る。"""
+        reg = DialogHandlerRegistry()
+        reg.register("yes", {"class": "QMessageBox"}, "button", button="Yes")
+        reg.register("acc", {}, "accept")
+        specs = {s["name"]: s for s in reg.list_specs()}
+        assert specs["yes"]["action"] == "button"
+        assert specs["yes"]["button"] == "Yes"
+        assert specs["acc"]["button"] is None
+        spec = reg.select_for_modal(1, {"class": "QMessageBox"})
+        assert spec is not None
+        assert spec.button == "Yes"
+
+    def test_register_reevaluates_the_open_modal(self) -> None:
+        """#21: 登録より先に開いていた modal にも、新しい handler が効く。"""
+        reg = DialogHandlerRegistry()
+        record = {"class": "QMessageBox", "title": "Confirm"}
+        assert reg.select_for_modal(7, record) is None  # まだ handler が無い
+        reg.register("h", {"title": "Confirm"}, "button", button="Yes")
+        spec = reg.select_for_modal(7, record)
+        assert spec is not None
+        assert spec.name == "h"
+        assert reg.select_for_modal(7, record) is None  # 2 度目は発火しない
+
+    def test_button_action_needs_a_button(self) -> None:
+        reg = DialogHandlerRegistry()
+        with pytest.raises(DialogHandlerError, match="needs button"):
+            reg.register("h", {}, "button")
+        with pytest.raises(DialogHandlerError, match="needs button"):
+            reg.register("h", {}, "button", button="")
+
+    def test_button_on_another_action_is_rejected(self) -> None:
+        """accept に button を付けても押されないので、黙って受けずに断る。"""
+        reg = DialogHandlerRegistry()
+        with pytest.raises(DialogHandlerError, match="only for action"):
+            reg.register("h", {}, "accept", button="Ok")
+
 
 # ============================================================
 # select_for_modal の判定 + 冪等性

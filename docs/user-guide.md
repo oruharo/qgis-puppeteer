@@ -845,6 +845,10 @@ auto-wait で吸収されるか、対応する例外に変換される。
 | `check()` | CheckBox / RadioButton を True に | actionable |
 | `uncheck()` | 同 False に | actionable |
 
+どれも `wait=False` を受ける。押すと確認を `exec()` で出す操作を、待たずに
+QGIS 側へ積んですぐ返す（[Dialog handler](#dialog-handler) の「確認を出す操作は
+`wait=False` と組み合わせる」）。
+
 #### actionable とは（auto-wait チェック項目）
 
 操作実行前に以下が満たされるまで poll（既定 timeout=5s、間隔 250ms）:
@@ -1019,6 +1023,8 @@ expect(loc).to_have_text("Done", timeout_s=10.0)
 「想定外モーダル（Bad Layers / 認証失敗 / 古いプロジェクト警告 等）」を
 登録した条件で自動 dismiss する仕組み。Worker 側で 250ms 周期で
 `activeModalWidget()` を polling し、predicate にマッチすれば action を実行。
+action は Qt のイベントループに積んで行う（action の中でホストのコードが
+さらに確認を出しても、見回りが止まらない）。
 
 ### 提供 MCP ツール / RPC コマンド
 
@@ -1043,8 +1049,69 @@ expect(loc).to_have_text("Done", timeout_s=10.0)
 - `name`: 識別名（既存 name は上書き）
 - `predicate`: selector dict（`title` / `class` / `object_name` を主に使う）。
   空 `{}` は全 modal にマッチ（catch-all）
-- `action`: `"accept"` / `"reject"` / `"close"` のいずれか
+- `action`: `"accept"` / `"reject"` / `"close"` / `"button"` のいずれか
+- `button` (`action="button"` のとき必須): 押すボタン。標準ボタン名（`"Ok"` /
+  `"Yes"` / `"No"` / `"Cancel"` / `"Save"` / `"Discard"` など）か、ボタンの文言
 - `once` (optional): True で 1 度発火したら自動 unregister
+
+### `accept` は QMessageBox の「OK」ではない
+
+`accept` / `reject` は `QDialog.accept()` / `reject()` を呼ぶだけで、
+`QMessageBox` ではどのボタンが押されたか（`clickedButton()`）が決まらない。
+そのため `exec()` や `QMessageBox.question()` の戻り値が `Ok` / `Yes` にならず、
+「OK のときだけ進む」処理は進まない。押されたボタンで分岐する確認には
+`action="button"` を使う:
+
+```python
+automation_client.call("qgis_register_dialog_handler", {
+    "name": "confirm-delete",
+    "predicate": {"title": "削除の確認"},
+    "action": "button",
+    "button": "Yes",
+})
+```
+
+- `QMessageBox` のほか、`QDialogButtonBox` を持つダイアログでも押せる
+- 標準ボタンの文言は QGIS の言語で変わる（日本語では「はい(&Y)」）ので、標準
+  ボタンは名前（`"Yes"`）で指すのがよい。文言で指すときは `&` と末尾の `(&N)` を
+  除いて比べる（`"いいえ"` で「いいえ(&N)」に当たる）
+- ボタンが見つからなければ何もしない（確認は開いたまま）。その失敗は
+  `qgis_get_recent_exceptions` に `QueuedOperationFailed` として残り、
+  `qgis_fail_on_uncaught_exception`（既定 ON）でテストが落ちる
+
+### 確認を出す操作は `wait=False` と組み合わせる
+
+押すと確認を `exec()` で出すボタンを普通に click すると、確認が閉じるまで
+click が返らず、時間切れになる（操作は QGIS の GUI スレッドでその場で行うので、
+ホストのコードが `exec()` で止まると応答を返せない）。`wait=False` を付けると、
+操作を QGIS 側に積んですぐ返す（戻り値に `queued: true`）。確認には dialog
+handler で答える:
+
+```python
+automation_client.call("qgis_register_dialog_handler", {
+    "name": "confirm-delete",
+    "predicate": {"title": "削除の確認"},
+    "action": "button",
+    "button": "Yes",
+    "once": True,
+})
+qgis.locator({"object_name": "deleteButton"}).click(wait=False)
+```
+
+- `wait=False` を受けるもの: `click_widget` / `set_widget_value` /
+  `select_features` / `set_canvas_extent`（pytest のクライアント・MCP とも）と、
+  Locator の `click` / `fill` / `select` / `check` / `uncheck`
+- widget が見つからない・無効・読み取り専用などは、その場で確かめて返す。
+  積んだ処理の中での失敗（候補に無い値など）は戻り値ではなく
+  `qgis_get_recent_exceptions` に残る
+- `set_widget_value` の `prior_value` は積む前の値。`select_features` は
+  `selected_count` を返さない
+- 積んでから動くまでの間に対象の widget が消えたら、触らずに失敗として残す
+  （QGIS が作った widget は、消えても Python 側が気付かず、触ると QGIS が落ちる）
+- 積んだ処理は、呼び出しが返ったあとで動く。結果は `get_value()` や
+  `wait_for_widget` などで確かめる
+- `qgis_execute_python` のコードから確認を出す処理を呼ぶときも同じで、
+  コードの中で `QTimer.singleShot(0, 処理)` と積めば、確認を待たずに返る
 
 ### pytest からの利用例
 
@@ -1079,7 +1146,10 @@ await client.call("qgis_register_dialog_handler", {
 
 ### 注意点
 
-- 同じ modal instance を 2 回処理しない（id ベースの状態管理）
+- 同じ modal instance を 2 回処理しない（modal ごとに振るキーで見る。action で
+  閉じない modal にも 2 度目は発火しない）
+- handler を登録したときは、今開いている modal も見直す（登録より先に開いた
+  確認にも効く）
 - 複数 handler が match する場合は **登録順で先勝ち**
 - modal が閉じたら状態リセット → 同じ条件の modal が再度開けば再度処理
 

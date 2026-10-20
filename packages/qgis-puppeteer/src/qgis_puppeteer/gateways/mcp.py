@@ -603,6 +603,11 @@ async def _call(
 MAX_INLINE_IMAGE_BYTES = 4 * 1024 * 1024
 
 
+def _with_wait(params: dict[str, Any], wait: bool) -> dict[str, Any]:
+    """``wait=False`` のときだけ ``wait`` を足す。既定の呼び出しの形は変えない（#21）。"""
+    return params if wait else {**params, "wait": False}
+
+
 def _present_with_image(result: Any) -> str | CallToolResult:
     """``{"success": True, "path": ...}`` の画像を ImageContent として添える。
 
@@ -674,6 +679,11 @@ def build_gateway(
             "connection dropped; grace_expires_in says how long the Hub still waits for it "
             "to reconnect (QGIS auto-reconnects when it can).\n"
             "- UI tools take a selector dict; build it from qgis_snapshot_ui output.\n"
+            "- A click or value change that opens a confirmation (QMessageBox.question and "
+            "the like) does not return until the confirmation closes, and times out. Pass "
+            "wait=false so it returns at once, and answer the confirmation with "
+            "qgis_register_dialog_handler(action='button', button='Yes'), registered "
+            "before or after the call.\n"
             "- qgis_execute_python runs code inside QGIS and returns whatever that code "
             "assigns to `_result`.\n"
             "- To keep a record of an exploration (to turn it into a pytest later), call "
@@ -973,16 +983,19 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
         ctx: Context,
         layer_name: str,
         expression: str,
+        wait: bool = True,
         instance: InstanceArg = None,
     ) -> str | CallToolResult:
         """式に一致するフィーチャを選択する（QGIS の式構文）。
 
         例: "population" > 1000
+
+        wait は qgis_click_widget と同じ。wait=false では selected_count は返らない。
         """
         return await _call(
             ctx,
             "qgis_select_features",
-            {"layer_name": layer_name, "expression": expression},
+            _with_wait({"layer_name": layer_name, "expression": expression}, wait),
             instance=instance,
         )
 
@@ -1166,13 +1179,14 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
         ymin: float,
         xmax: float,
         ymax: float,
+        wait: bool = True,
         instance: InstanceArg = None,
     ) -> str | CallToolResult:
-        """キャンバス範囲を指定する。"""
+        """キャンバス範囲を指定する。wait は qgis_click_widget と同じ。"""
         return await _call(
             ctx,
             "qgis_set_canvas_extent",
-            {"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax},
+            _with_wait({"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax}, wait),
             instance=instance,
         )
 
@@ -1212,17 +1226,24 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
     async def qgis_click_widget(
         ctx: Context,
         selector: SelectorArg,
+        wait: bool = True,
         instance: InstanceArg = None,
     ) -> str | CallToolResult:
         """UI ウィジェットをクリックする。
 
         見つからない・複数一致・無効などは error コードで返る
         （widget_not_found / selector_ambiguous / widget_disabled）。
+
+        wait=false は処理を QGIS 側に積んですぐ返す（queued: true）。押すと確認
+        （QMessageBox.question など）を exec() で出す操作は、確認が閉じるまで
+        返らず時間切れになるので、wait=false にして確認には
+        qgis_register_dialog_handler（action="button"）で答える。積んだ処理の
+        失敗は qgis_get_recent_exceptions に残る。
         """
         return await _call(
             ctx,
             "qgis_click_widget",
-            {"selector": selector},
+            _with_wait({"selector": selector}, wait),
             instance=instance,
         )
 
@@ -1233,6 +1254,7 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
         ctx: Context,
         selector: SelectorArg,
         value: Any,
+        wait: bool = True,
         instance: InstanceArg = None,
     ) -> str | CallToolResult:
         """UI ウィジェットに値を設定する。
@@ -1240,11 +1262,14 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
         value は対象の種類に応じて解釈する（LineEdit は文字列、ComboBox は項目
         テキスト、CheckBox は真偽値など）。失敗は widget_readonly /
         combo_item_not_found などの error コードで返る。
+
+        wait は qgis_click_widget と同じ（値の変更に結ばれた処理が確認を出す場合用）。
+        wait=false でも prior_value は積む前の値を返す。
         """
         return await _call(
             ctx,
             "qgis_set_widget_value",
-            {"selector": selector, "value": value},
+            _with_wait({"selector": selector, "value": value}, wait),
             instance=instance,
         )
 
@@ -1261,8 +1286,9 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
         ctx: Context,
         name: str,
         predicate: DialogPredicateArg,
-        action: Literal["accept", "reject", "close"],
+        action: Literal["accept", "reject", "close", "button"],
         once: bool = False,
+        button: str | None = None,
         instance: InstanceArg = None,
     ) -> str | CallToolResult:
         """モーダルダイアログが出たときの自動処理を登録する。
@@ -1270,13 +1296,22 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
         以後、predicate に一致する modal が現れるたびに action を適用する。
         同じ name で登録し直すと上書きされる。once=true なら 1 度発火した
         時点で自動的に解除される。
+
+        action="button" は button のボタンを押す。button は標準ボタン名
+        （"Ok" / "Yes" / "No" / "Cancel" / "Save" / "Discard" など）か、ボタンの
+        文言。QMessageBox の「OK で進む」処理には accept ではなくこれを使う
+        （accept では exec() が Ok を返さない）。ボタンが無ければ何もせず、
+        qgis_get_recent_exceptions に残る。
         """
-        return await _call(
-            ctx,
-            "qgis_register_dialog_handler",
-            {"name": name, "predicate": predicate, "action": action, "once": once},
-            instance=instance,
-        )
+        params: dict[str, Any] = {
+            "name": name,
+            "predicate": predicate,
+            "action": action,
+            "once": once,
+        }
+        if button is not None:
+            params["button"] = button
+        return await _call(ctx, "qgis_register_dialog_handler", params, instance=instance)
 
     @mcp.tool(title="ダイアログ自動処理を解除", annotations=_MUTATE_SAFE, structured_output=False)
     async def qgis_unregister_dialog_handler(

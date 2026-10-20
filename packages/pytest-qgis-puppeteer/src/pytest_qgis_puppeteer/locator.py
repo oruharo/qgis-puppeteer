@@ -174,16 +174,25 @@ class Locator:
     # 操作系（auto-wait 内蔵）
     # ------------------------------------------------------------
 
-    def click(self, *, timeout_s: float | None = None) -> dict[str, Any]:
+    def click(self, *, timeout_s: float | None = None, wait: bool = True) -> dict[str, Any]:
         """actionable になるまで待ってから click。
 
         ``editable`` は要求しない。表示専用 (readOnly な) widget でも click は
         可能なため。
+
+        ``wait=False`` は click を QGIS 側に積んですぐ返す（#21）。押すと
+        ``exec()`` の確認を出すボタンは、確認が閉じるまで click が返らないので、
+        dialog handler（``action="button"``）と組み合わせる。他の操作の
+        ``wait`` も同じ意味。
         """
         self._wait_actionable(timeout_s=timeout_s)
-        return self._client.click_widget(self._effective_selector(), instance=self._instance)
+        return self._client.click_widget(
+            self._effective_selector(), wait=wait, instance=self._instance
+        )
 
-    def fill(self, value: Any, *, timeout_s: float | None = None) -> dict[str, Any]:
+    def fill(
+        self, value: Any, *, timeout_s: float | None = None, wait: bool = True
+    ) -> dict[str, Any]:
         """actionable + editable になるまで待ってから値を流し込む。
 
         ``editable`` を要求する: readOnly な input への ``setText`` は silent に
@@ -196,10 +205,12 @@ class Locator:
         """
         self._wait_actionable(timeout_s=timeout_s, require_editable=True)
         return self._client.set_widget_value(
-            self._effective_selector(), value, instance=self._instance
+            self._effective_selector(), value, wait=wait, instance=self._instance
         )
 
-    def select(self, value: Any, *, timeout_s: float | None = None) -> dict[str, Any]:
+    def select(
+        self, value: Any, *, timeout_s: float | None = None, wait: bool = True
+    ) -> dict[str, Any]:
         """actionable になるまで待ってから select（ComboBox / Tab / List）。
 
         ComboBox / Tab / List は ``isReadOnly`` を持たないため ``editable`` は
@@ -207,21 +218,21 @@ class Locator:
         """
         self._wait_actionable(timeout_s=timeout_s)
         return self._client.set_widget_value(
-            self._effective_selector(), value, instance=self._instance
+            self._effective_selector(), value, wait=wait, instance=self._instance
         )
 
-    def check(self, *, timeout_s: float | None = None) -> dict[str, Any]:
+    def check(self, *, timeout_s: float | None = None, wait: bool = True) -> dict[str, Any]:
         """actionable になるまで待ってから checked=True を設定。"""
         self._wait_actionable(timeout_s=timeout_s)
         return self._client.set_widget_value(
-            self._effective_selector(), True, instance=self._instance
+            self._effective_selector(), True, wait=wait, instance=self._instance
         )
 
-    def uncheck(self, *, timeout_s: float | None = None) -> dict[str, Any]:
+    def uncheck(self, *, timeout_s: float | None = None, wait: bool = True) -> dict[str, Any]:
         """actionable になるまで待ってから checked=False を設定。"""
         self._wait_actionable(timeout_s=timeout_s)
         return self._client.set_widget_value(
-            self._effective_selector(), False, instance=self._instance
+            self._effective_selector(), False, wait=wait, instance=self._instance
         )
 
     # ------------------------------------------------------------

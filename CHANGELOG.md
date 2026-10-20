@@ -8,6 +8,38 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Operations that return before the confirmation they open, and dialog
+  handlers that press a button** (#21). A button that opens a confirmation
+  with `exec()` (`QMessageBox.question` and the like) kept `qgis_click_widget`
+  from returning until the confirmation closed, so the call timed out: the
+  Worker runs each request on the GUI thread, and the host's code stopped
+  there. `qgis_click_widget`, `qgis_set_widget_value`, `qgis_select_features`
+  and `qgis_set_canvas_extent` take `wait` (default True, as before);
+  `wait=False` queues the operation with `QTimer.singleShot(0, ...)` and
+  returns at once with `queued: true`. What can be checked on the spot (the
+  widget is found, enabled, writable, of a supported type; the layer exists)
+  is still returned, `prior_value` is read before queueing, and a failure
+  inside the queued work is recorded in `qgis_get_recent_exceptions` as
+  `QueuedOperationFailed` (or the exception's type), so
+  `qgis_fail_on_uncaught_exception` fails the test. A target deleted before
+  the queued work runs is not touched, since a C++-owned widget's Python
+  wrapper does not notice and touching it crashes QGIS: the operation is
+  recorded as failed instead. The pytest client, the
+  Locator's `click` / `fill` / `select` / `check` / `uncheck` and the MCP tools
+  pass `wait` through, and send it only when it is False. A dialog handler's
+  `accept` did not count as pressing OK on a `QMessageBox` (`exec()` did not
+  return `Ok`), so `action="button"` with `button` was added: a standard button
+  name (`"Ok"`, `"Yes"`, `"No"`, ...) or the button's text, without `&` and a
+  trailing `(&N)` (`"いいえ"` matches `いいえ(&N)`), for a `QMessageBox` or any
+  dialog with a `QDialogButtonBox`. A missing button leaves the dialog open
+  and is recorded the same way. Dialog handler actions are queued too, so a
+  host's `reject()` that asks again no longer stops the polling; a modal that
+  closes before its queued action runs is left alone. Checked on
+  QGIS 3.34 (Japanese UI): a click, a combo box change, a selection and an
+  extent change that each open a confirmation returned at once (the click in
+  0.06 to 0.14 s) and their confirmations were answered by `button` handlers, by
+  standard name and by Japanese text.
+
 - **A hook to finish the host's own startup before startup messages are taken,
   and a marker that asks for a restart** (#19). A host plugin that shows a
   login dialog once the project opens is not ready when pytest takes the
@@ -333,6 +365,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (still JSON-formatted for Claude).
 
 ### Fixed
+
+- **A dialog handler fired again and again on a modal it did not close, and
+  could skip a new one** (#21). The handler tracked the modal it had handled
+  by `id()` of the Python wrapper, but PyQt may return a new wrapper for each
+  `activeModalWidget()` call, so the same modal looked new on every tick, and
+  a closed modal's address reused by the next one made that one look handled.
+  The modal now carries its own key in a dynamic property. Registering a
+  handler re-evaluates the modal that is open, which the changing `id()` used
+  to do by accident.
 
 - **A selector's `index` picked the first candidate when candidates looked
   alike** (#20). `_finalize_match` mapped the chosen summary back to its widget

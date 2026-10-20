@@ -13,6 +13,8 @@ import uuid
 from qgis.core import QgsProject
 from qgis.gui import QgisInterface
 
+from . import queued
+
 
 def take_screenshot(
     output_path: str | None = None,
@@ -170,6 +172,8 @@ def set_canvas_extent(
     xmax: float,
     ymax: float,
     iface: QgisInterface | None = None,
+    *,
+    wait: bool = True,
 ) -> dict:
     """Set the extent of the map canvas.
 
@@ -179,6 +183,9 @@ def set_canvas_extent(
         xmax: Maximum X coordinate
         ymax: Maximum Y coordinate
         iface: QGIS interface instance (required for GUI mode)
+        wait: False なら、範囲の変更を Qt のイベントループに積んですぐ返す（#21）。
+            ``extentsChanged`` に結ばれた処理が ``exec()`` の確認を出す場合用。
+            中で出た例外は recent_exceptions に残る。
 
     Returns:
         Dictionary with success status
@@ -194,10 +201,12 @@ def set_canvas_extent(
 
         canvas = iface.mapCanvas()
         extent = QgsRectangle(xmin, ymin, xmax, ymax)
-        canvas.setExtent(extent)
-        canvas.refresh()
 
-        return {
+        def apply() -> None:
+            canvas.setExtent(extent)
+            canvas.refresh()
+
+        result: dict = {
             "success": True,
             "extent": {
                 "xmin": xmin,
@@ -206,6 +215,12 @@ def set_canvas_extent(
                 "ymax": ymax,
             },
         }
+        if not wait:
+            queued.run_later(apply, what="qgis_set_canvas_extent", target=canvas)
+            result["queued"] = True
+            return result
+        apply()
+        return result
 
     except Exception as e:
         return {

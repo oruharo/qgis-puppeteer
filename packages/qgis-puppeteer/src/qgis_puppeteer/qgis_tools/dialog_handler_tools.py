@@ -8,7 +8,8 @@ ADR-0002 Roadmap "Dialog handler（グローバル auto-respond）" の Qt 接�
 - registry の **module-level singleton** を保持する（Worker / handler 群が共有）
 - ``register_dialog_handler`` 等の Tier 1 ハンドラ関数を提供
 - :func:`tick` が Qt の ``QApplication.activeModalWidget()`` を読み、発火
-  すべき handler の action を実行する
+  すべき handler の action を Qt のイベントループに積む（#21。action の中で
+  ホストのコードが ``exec()`` の確認を出しても、tick が止まらないように）
 
 singleton は QGIS プロセス中で 1 つに集約。複数 Worker (≒ 通常無い) でも
 QApplication は 1 つなので registry も 1 つで OK。
@@ -17,19 +18,28 @@ QApplication は 1 つなので registry も 1 つで OK。
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
-from qgis.PyQt.QtWidgets import QApplication, QDialog
+from qgis.PyQt.QtWidgets import QApplication, QDialog, QDialogButtonBox
 
 from qgis_puppeteer.dialog_handlers import (
     DialogHandlerError,
     DialogHandlerRegistry,
 )
+from qgis_puppeteer.qgis_tools import queued
 
 logger = logging.getLogger("qgis_puppeteer.qgis_tools.dialog_handler_tools")
 
 # Module-level singleton。テストでは ``get_registry().clear()`` で初期化する。
 _REGISTRY = DialogHandlerRegistry()
+
+# modal に振るキーを入れる dynamic property（`_modal_key`）
+_MODAL_KEY_PROPERTY = "_qpuppeteer_modal_key"
+_next_modal_key = 0
+
+# 日本語などの Qt が付ける「いいえ(&N)」のようなニーモニックの括弧
+_MNEMONIC_SUFFIX_RE = re.compile(r"\s*\(&.\)$")
 
 
 def get_registry() -> DialogHandlerRegistry:
@@ -49,8 +59,11 @@ def register_dialog_handler(params: dict, iface: Any = None) -> dict:
         - ``name`` (str): handler 識別名（既存名は上書き）
         - ``predicate`` (dict): modal の record と AND 一致比較する selector
           （``class`` / ``object_name`` / ``title`` を主に想定）
-        - ``action`` (str): ``"accept"`` / ``"reject"`` / ``"close"``
+        - ``action`` (str): ``"accept"`` / ``"reject"`` / ``"close"`` / ``"button"``
         - ``once`` (bool, optional): True で 1 度発火したら自動 unregister
+        - ``button`` (str, optional): ``action="button"`` で押すボタン。
+          ``QMessageBox`` / ``QDialogButtonBox`` の標準ボタン名（``"Ok"`` /
+          ``"Yes"`` / ``"No"`` / ``"Cancel"`` など）か、ボタンの文言
     """
     del iface  # unused
     try:
@@ -58,11 +71,12 @@ def register_dialog_handler(params: dict, iface: Any = None) -> dict:
         predicate = params["predicate"]
         action = params["action"]
         once = params.get("once", False)
+        button = params.get("button")
     except KeyError as exc:
         return {"success": False, "error": "missing_param", "param": exc.args[0]}
 
     try:
-        _REGISTRY.register(name, predicate, action, bool(once))
+        _REGISTRY.register(name, predicate, action, bool(once), button)
     except DialogHandlerError as exc:
         return {"success": False, "error": "invalid_argument", "message": str(exc)}
 
@@ -113,38 +127,112 @@ def _modal_to_record(modal: Any) -> dict | None:
     return record
 
 
-def _apply_action(modal: Any, action: str) -> bool:
-    """Modal に action を適用。成功なら True。"""
+def _modal_key(modal: Any) -> int:
+    """modal ごとに一意で、同じ modal なら変わらないキーを返す（#21）。
+
+    ``id(modal)`` は使えない。PyQt は ``activeModalWidget()`` のたびに別の Python
+    wrapper を返すことがあり、同じ modal でも tick ごとに変わる（action で閉じない
+    modal に handler が毎回発火する）。逆に、閉じた modal の wrapper の番地が次の
+    modal に使い回されると、新しい modal を処理済みと見なして飛ばす。キーは
+    modal 自身の dynamic property に置くので、modal と一緒に消える。
+    """
+    global _next_modal_key
+    key = modal.property(_MODAL_KEY_PROPERTY)
+    if key is None:
+        _next_modal_key += 1
+        key = _next_modal_key
+        modal.setProperty(_MODAL_KEY_PROPERTY, key)
+    return int(key)
+
+
+def _apply_action(modal: Any, spec: Any) -> bool:
+    """Modal への action を Qt のイベントループに積む。積めたら True。
+
+    その場で行うと、ホストが上書きした ``reject()`` の中で ``exec()`` の確認を出す
+    ような場合に tick が止まる。積んだ処理の失敗（押すボタンが無い、など）は
+    recent_exceptions に残る。
+    """
     if modal is None:
         return False
-    try:
-        if isinstance(modal, QDialog):
-            if action == "accept":
-                modal.accept()
-                return True
-            if action == "reject":
-                modal.reject()
-                return True
-            if action == "close":
-                modal.close()
-                return True
-        # 非 QDialog modal への fallback
-        if action == "close" and hasattr(modal, "close"):
-            modal.close()
-            return True
-    except Exception:  # noqa: BLE001
-        logger.exception("Failed to apply dialog action %r", action)
+    action = spec.action
+    if not (
+        isinstance(modal, QDialog)
+        or action == "button"
+        or (action == "close" and hasattr(modal, "close"))
+    ):
+        logger.warning("Cannot apply action %r to modal of type %s", action, type(modal).__name__)
         return False
-    logger.warning("Cannot apply action %r to modal of type %s", action, type(modal).__name__)
-    return False
+    queued.run_later(
+        lambda: _run_action(modal, action, spec.button),
+        what=f"dialog handler {spec.name!r} ({action})",
+        target=modal,
+        gone_is_failure=False,  # その間に閉じて消えたなら、することが無いだけ
+    )
+    return True
+
+
+def _run_action(modal: Any, action: str, button: str | None) -> dict:
+    """積んだ action の本体。modal が消えていれば、ここには来ない（``run_later``）。"""
+    if not modal.isVisible():
+        # 積んでから動くまでの間に閉じた（まだ消えてはいない）。することは無く、
+        # 失敗でもない
+        return {"success": True, "skipped": "modal_closed"}
+    if action == "button":
+        return _click_button(modal, button or "")
+    if isinstance(modal, QDialog) and action in ("accept", "reject"):
+        getattr(modal, action)()
+    else:
+        modal.close()
+    return {"success": True}
+
+
+def _click_button(modal: Any, button: str) -> dict:
+    """``button``（標準ボタン名か文言）に当たるボタンを押す。
+
+    ``QMessageBox`` は中に ``QDialogButtonBox`` を持つので、どちらも
+    ``QDialogButtonBox`` から探す。標準ボタン名を先に見て、無ければ文言で探す。
+    文言は ``&`` のニーモニックと、末尾の ``(&N)`` を除いても比べる（``"No"`` で
+    ``"&No"``、``"いいえ"`` で ``"いいえ(&N)"`` に当たる）。標準ボタンの文言は
+    QGIS の言語で変わるので、標準ボタンは名前で指すのがよい。押すと
+    ``QMessageBox`` の ``clickedButton()`` が決まり、``exec()`` がそのボタンを返す。
+    """
+    boxes = modal.findChildren(QDialogButtonBox)
+    standard = getattr(QDialogButtonBox.StandardButton, button, None)
+    if isinstance(standard, QDialogButtonBox.StandardButton):
+        for box in boxes:
+            target = box.button(standard)
+            if target is not None:
+                target.click()
+                return {"success": True}
+    available: list[str] = []
+    for box in boxes:
+        for target in box.buttons():
+            text = target.text()
+            available.append(text)
+            if button in _button_labels(text):
+                target.click()
+                return {"success": True}
+    return {
+        "success": False,
+        "error": "dialog_button_not_found",
+        "button": button,
+        "available": available,
+        "modal_class": type(modal).__name__,
+    }
+
+
+def _button_labels(text: str) -> tuple[str, ...]:
+    """ボタンの文言を、``button`` と比べる形にする（そのまま・ニーモニック抜き）。"""
+    return (text, text.replace("&", ""), _MNEMONIC_SUFFIX_RE.sub("", text).replace("&", ""))
 
 
 def tick(iface: Any = None) -> dict:
     """1 回分の polling サイクル。Worker 側 QTimer の timeout から呼ばれる。
 
     Returns:
-        ``{"applied": bool, "handler": str | None, "action": str | None,
-        "modal_class": str | None}``。発火が無かった場合 ``applied=False``。
+        ``{"applied": bool, "queued": bool, "handler": str | None,
+        "action": str | None, "modal_class": str | None}``。発火が無かった場合
+        ``applied=False``。action は積むだけなので、``applied`` は「積んだ」の意味。
 
     iface は handler 関数規約に合わせて受け取るが使わない。
     """
@@ -154,16 +242,17 @@ def tick(iface: Any = None) -> dict:
         return {"applied": False}
 
     modal = app.activeModalWidget()
-    modal_id = id(modal) if modal is not None else None
+    modal_id = _modal_key(modal) if modal is not None else None
     record = _modal_to_record(modal)
 
     spec = _REGISTRY.select_for_modal(modal_id, record)
     if spec is None:
         return {"applied": False}
 
-    success = _apply_action(modal, spec.action)
+    success = _apply_action(modal, spec)
     return {
         "applied": bool(success),
+        "queued": bool(success),
         "handler": spec.name,
         "action": spec.action,
         "modal_class": (record or {}).get("class"),

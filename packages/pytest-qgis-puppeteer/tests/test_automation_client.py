@@ -192,6 +192,28 @@ class TestCommandWiring:
             instance="x",
         )
 
+    def test_wait_false_is_sent_only_when_given(self) -> None:
+        """#21: 既定の呼び出しの形は変えず、``wait=False`` のときだけ足す。"""
+        e2e, inner = _make_client()
+        sel = {"object_name": "b"}
+        e2e.click_widget(sel, wait=False)
+        e2e.set_widget_value(sel, 1, wait=False)
+        e2e.select_features("layerA", "id = 1", wait=False)
+        e2e.set_canvas_extent(1.0, 2.0, 3.0, 4.0, wait=False)
+        sent = [(c.args[0], c.args[1]) for c in inner.call.await_args_list]
+        assert sent == [
+            ("qgis_click_widget", {"selector": sel, "wait": False}),
+            ("qgis_set_widget_value", {"selector": sel, "value": 1, "wait": False}),
+            (
+                "qgis_select_features",
+                {"layer_name": "layerA", "expression": "id = 1", "wait": False},
+            ),
+            (
+                "qgis_set_canvas_extent",
+                {"xmin": 1.0, "ymin": 2.0, "xmax": 3.0, "ymax": 4.0, "wait": False},
+            ),
+        ]
+
     def test_screenshot_no_args(self) -> None:
         e2e, inner = _make_client()
         e2e.screenshot()

@@ -44,6 +44,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from qgis_puppeteer.qgis_tools import queued
 from qgis_puppeteer.selector_match import (
     resolve_with_index,
 )
@@ -214,15 +215,19 @@ def _resolve_actionable_widget(selector: dict) -> tuple[QWidget | None, dict | N
     return widget, None
 
 
-def click_widget(selector: dict, iface=None) -> dict:
+def click_widget(selector: dict, iface=None, *, wait: bool = True) -> dict:
     """Click a widget located by selector.
 
     Args:
         selector: See ``_find_widget`` for selector syntax.
         iface: Unused; kept for handler signature consistency.
+        wait: False なら、click を Qt のイベントループに積んですぐ返す（#21）。
+            押すと ``exec()`` の確認を出すボタン用。widget の解決と「押せるか」は
+            その場で確かめ、click の中で出た失敗は recent_exceptions に残る。
 
     Returns:
-        Dictionary with success flag and widget metadata.
+        Dictionary with success flag and widget metadata. ``wait=False`` では
+        ``queued: True`` が付く。
     """
     del iface  # unused
     widget, error = _resolve_actionable_widget(selector)
@@ -230,11 +235,11 @@ def click_widget(selector: dict, iface=None) -> dict:
         return error
 
     if isinstance(widget, QAbstractButton):
-        widget.click()
+        press = widget.click
     elif isinstance(widget, QAction):
-        widget.trigger()
+        press = widget.trigger
     elif hasattr(widget, "click") and callable(widget.click):
-        widget.click()
+        press = widget.click
     else:
         return {
             "success": False,
@@ -242,10 +247,15 @@ def click_widget(selector: dict, iface=None) -> dict:
             "widget": _widget_summary(widget),
         }
 
-    return {"success": True, "widget": _widget_summary(widget)}
+    summary = _widget_summary(widget)
+    if not wait:
+        queued.run_later(press, what="qgis_click_widget", target=widget)
+        return {"success": True, "queued": True, "widget": summary}
+    press()
+    return {"success": True, "widget": summary}
 
 
-def set_widget_value(selector: dict, value: Any, iface=None) -> dict:
+def set_widget_value(selector: dict, value: Any, iface=None, *, wait: bool = True) -> dict:
     """Set a value on a widget located by selector.
 
     Handles common input widgets: QLineEdit, QTextEdit/QPlainTextEdit,
@@ -256,18 +266,23 @@ def set_widget_value(selector: dict, value: Any, iface=None) -> dict:
         selector: See ``_find_widget``.
         value: Value to set. Type interpretation depends on widget class.
         iface: Unused.
+        wait: False なら、値を入れる処理を Qt のイベントループに積んですぐ返す
+            （#21）。値の変更に結ばれた処理が ``exec()`` の確認を出す場合用。
+            ``prior_value`` は積む前に読む。値を入れる中で出た失敗（候補に無い値
+            など）は、戻り値ではなく recent_exceptions に残る。
 
     Returns:
         Dictionary with success flag, prior value, and widget metadata.
         For a password field (`_is_secret_widget`) ``prior_value`` is None and
         ``masked`` is True, so that callers that log calls can drop ``value``.
+        ``wait=False`` では ``queued: True`` が付く。
     """
     del iface
     widget, error = _resolve_actionable_widget(selector)
     if error is not None:
         return error
 
-    result = _apply_widget_value(widget, value)
+    result = _apply_widget_value(widget, value) if wait else _queue_widget_value(widget, value)
     if _is_secret_widget(widget):
         if "prior_value" in result:
             result["prior_value"] = None
@@ -289,16 +304,13 @@ def _apply_widget_value(widget: Any, value: Any) -> dict:
             "widget": _widget_summary(widget),
         }
 
-    prior: Any = None
     try:
+        prior = _read_prior(widget)
         if isinstance(widget, QLineEdit):
-            prior = widget.text()
             widget.setText(str(value))
         elif isinstance(widget, (QPlainTextEdit, QTextEdit)):
-            prior = widget.toPlainText()
             widget.setPlainText(str(value))
         elif isinstance(widget, QComboBox):
-            prior = widget.currentText()
             if isinstance(value, int):
                 widget.setCurrentIndex(value)
             else:
@@ -312,19 +324,15 @@ def _apply_widget_value(widget: Any, value: Any) -> dict:
                     }
                 widget.setCurrentIndex(idx)
         elif isinstance(widget, (QCheckBox, QRadioButton)):
-            prior = widget.isChecked()
             widget.setChecked(bool(value))
         elif isinstance(widget, QSpinBox):
-            prior = widget.value()
             widget.setValue(int(value))
         elif isinstance(widget, QDoubleSpinBox):
-            prior = widget.value()
             widget.setValue(float(value))
         elif isinstance(widget, QDateTimeEdit):
             # Also covers QDateEdit / QTimeEdit subclasses.
             from qgis.PyQt.QtCore import QDate, QDateTime, QTime
 
-            prior = widget.dateTime().toString("yyyy-MM-ddTHH:mm:ss")
             if isinstance(widget, QDateEdit) and not isinstance(widget, QDateTimeEdit):
                 widget.setDate(QDate.fromString(str(value), "yyyy-MM-dd"))
             elif isinstance(widget, QTimeEdit) and not isinstance(widget, QDateTimeEdit):
@@ -332,7 +340,6 @@ def _apply_widget_value(widget: Any, value: Any) -> dict:
             else:
                 widget.setDateTime(QDateTime.fromString(str(value), "yyyy-MM-ddTHH:mm:ss"))
         elif isinstance(widget, QTabWidget):
-            prior = widget.currentIndex()
             if isinstance(value, int):
                 widget.setCurrentIndex(value)
             else:
@@ -348,7 +355,6 @@ def _apply_widget_value(widget: Any, value: Any) -> dict:
                         "available": [widget.tabText(i) for i in range(widget.count())],
                     }
         elif isinstance(widget, QListWidget):
-            prior = widget.currentRow()
             if isinstance(value, int):
                 widget.setCurrentRow(value)
             else:
@@ -366,7 +372,6 @@ def _apply_widget_value(widget: Any, value: Any) -> dict:
                 return {"success": False, "error": "no_model"}
             if not isinstance(value, int):
                 return {"success": False, "error": "row_index_required"}
-            prior = widget.currentIndex().row()
             index = model.index(value, 0)
             widget.setCurrentIndex(index)
         else:
@@ -385,6 +390,74 @@ def _apply_widget_value(widget: Any, value: Any) -> dict:
 
     return {
         "success": True,
+        "widget": _widget_summary(widget),
+        "prior_value": prior,
+    }
+
+
+# `_apply_widget_value` が値を入れられる widget（下位クラスを含む）
+_VALUE_WIDGET_TYPES = (
+    QLineEdit,
+    QPlainTextEdit,
+    QTextEdit,
+    QComboBox,
+    QCheckBox,
+    QRadioButton,
+    QSpinBox,
+    QDoubleSpinBox,
+    QDateTimeEdit,
+    QTabWidget,
+    QListWidget,
+    QListView,
+    QTreeView,
+    QTableView,
+)
+
+
+def _read_prior(widget: Any) -> Any:
+    """値を入れる前の値（``prior_value``）を読む。対象外の widget は None。"""
+    if isinstance(widget, QLineEdit):
+        return widget.text()
+    if isinstance(widget, (QPlainTextEdit, QTextEdit)):
+        return widget.toPlainText()
+    if isinstance(widget, QComboBox):
+        return widget.currentText()
+    if isinstance(widget, (QCheckBox, QRadioButton)):
+        return widget.isChecked()
+    if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+        return widget.value()
+    if isinstance(widget, QDateTimeEdit):
+        return widget.dateTime().toString("yyyy-MM-ddTHH:mm:ss")
+    if isinstance(widget, QTabWidget):
+        return widget.currentIndex()
+    if isinstance(widget, QListWidget):
+        return widget.currentRow()
+    if isinstance(widget, (QListView, QTreeView, QTableView)):
+        return widget.currentIndex().row()
+    return None
+
+
+def _queue_widget_value(widget: Any, value: Any) -> dict:
+    """``wait=False`` の値の設定：その場で確かめられることを確かめてから積む。"""
+    if not _widget_is_writable(widget):
+        return {
+            "success": False,
+            "error": "widget_readonly",
+            "widget": _widget_summary(widget),
+        }
+    if not isinstance(widget, _VALUE_WIDGET_TYPES):
+        return {
+            "success": False,
+            "error": "unsupported_widget_type",
+            "widget": _widget_summary(widget),
+        }
+    prior = _read_prior(widget)
+    queued.run_later(
+        lambda: _apply_widget_value(widget, value), what="qgis_set_widget_value", target=widget
+    )
+    return {
+        "success": True,
+        "queued": True,
         "widget": _widget_summary(widget),
         "prior_value": prior,
     }

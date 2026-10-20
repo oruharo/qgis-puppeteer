@@ -793,6 +793,26 @@ outputs/diagnostics/test_login_20260430-093000/
 - 同じ modal instance を 2 回処理しないよう、modal の `id()` を内部状態として保持
 - `once=True` で 1 度発火したら自動 unregister
 
+> **2026-10-21 注（#21）**: 3 点変えた。
+>
+> 1. **action は積んで行う。** tick の中で `accept()` などをその場で呼ぶと、ホストが
+>    上書きした `reject()` の中で確認を `exec()` で出したとき tick が止まる。action
+>    は `QTimer.singleShot(0, ...)` で積み、積んだ処理の失敗は recent_exceptions に
+>    残す。同じ理由で、`qgis_click_widget` / `qgis_set_widget_value` /
+>    `qgis_select_features` / `qgis_set_canvas_extent` に `wait`（既定 True）を足した。
+>    `wait=False` は操作を積んですぐ返す。押すと確認を出すボタンは、これと
+>    dialog handler を組み合わせる。
+> 2. **`action="button"` を足した。** `accept` は `QMessageBox` の押されたボタンを
+>    決めないので、`exec()` が `Ok` / `Yes` を返さず、「OK のときだけ進む」処理が
+>    進まない。`button`（標準ボタン名か文言）のボタンを `click()` する。
+> 3. **modal は `id()` ではなく、modal に振ったキーで見る。** PyQt は
+>    `activeModalWidget()` のたびに別の Python wrapper を返しうるので、`id()` は同じ
+>    modal でも tick ごとに変わる（action で閉じない modal に毎回発火する）。閉じた
+>    modal の wrapper の番地が次の modal に使い回されると、新しい modal を飛ばす
+>    こともある。キーは modal の dynamic property に置く。あわせて、handler を登録
+>    したときは今開いている modal も見直す（これまでは `id()` が替わるせいで、
+>    登録より先に開いた modal にもたまたま効いていた）。
+
 #### 提供 Tier 1 ハンドラ
 
 | ハンドラ | 用途 |

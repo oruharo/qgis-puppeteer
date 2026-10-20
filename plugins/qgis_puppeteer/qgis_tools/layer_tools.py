@@ -8,6 +8,8 @@ QGIS プラグインの handler として公開する。戻り値はプロトコ
 from qgis.core import QgsProject, QgsVectorLayer
 from qgis.gui import QgisInterface
 
+from . import queued
+
 # QVariant（NULL フィールド）や QDate / QByteArray 等の Qt 型は
 # `protocol._coerce_leaf` が JSON 化直前にまとめて coerce する。
 # ここでは feature.attribute(...) の戻り値をそのまま辞書に入れてよい。
@@ -146,6 +148,8 @@ def select_features(
     layer_name: str,
     expression: str,
     iface: QgisInterface | None = None,
+    *,
+    wait: bool = True,
 ) -> dict:
     """Select features in a layer using an expression.
 
@@ -153,6 +157,10 @@ def select_features(
         layer_name: Name of the layer
         expression: QGIS expression to filter features
         iface: QGIS interface instance (optional)
+        wait: False なら、選択を Qt のイベントループに積んですぐ返す（#21）。
+            ``selectionChanged`` に結ばれた処理が ``exec()`` の確認を出す場合用。
+            レイヤの有無はその場で確かめ、選択の中で出た例外は recent_exceptions
+            に残る。``selected_count`` は返らない。
 
     Returns:
         Dictionary with selection results
@@ -173,6 +181,19 @@ def select_features(
             return {
                 "success": False,
                 "error": f"Layer '{layer_name}' is not a vector layer",
+            }
+
+        if not wait:
+            queued.run_later(
+                lambda: layer.selectByExpression(expression),
+                what="qgis_select_features",
+                target=layer,
+            )
+            return {
+                "success": True,
+                "queued": True,
+                "layer_name": layer_name,
+                "expression": expression,
             }
 
         # Select features
