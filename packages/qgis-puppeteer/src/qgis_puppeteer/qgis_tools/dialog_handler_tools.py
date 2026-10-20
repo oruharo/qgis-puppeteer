@@ -7,9 +7,11 @@ ADR-0002 Roadmap "Dialog handler（グローバル auto-respond）" の Qt 接�
 
 - registry の **module-level singleton** を保持する（Worker / handler 群が共有）
 - ``register_dialog_handler`` 等の Tier 1 ハンドラ関数を提供
-- :func:`tick` が Qt の ``QApplication.activeModalWidget()`` を読み、発火
-  すべき handler の action を Qt のイベントループに積む（#21。action の中で
-  ホストのコードが ``exec()`` の確認を出しても、tick が止まらないように）
+- :func:`tick` が Qt の ``QApplication.activePopupWidget()`` /
+  ``activeModalWidget()`` を読み、発火すべき handler の action を Qt のイベント
+  ループに積む（#21。action の中でホストのコードが ``exec()`` の確認を出しても、
+  tick が止まらないように）。ポップアップ（``QMenu.exec()`` のメニューなど）は、
+  predicate に ``"popup": true`` を書いた handler だけが扱う（#22）
 
 singleton は QGIS プロセス中で 1 つに集約。複数 Worker (≒ 通常無い) でも
 QApplication は 1 つなので registry も 1 つで OK。
@@ -18,16 +20,17 @@ QApplication は 1 つなので registry も 1 つで OK。
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any
 
-from qgis.PyQt.QtWidgets import QApplication, QDialog, QDialogButtonBox
+from qgis.PyQt.QtWidgets import QApplication, QDialog, QDialogButtonBox, QMenu
 
 from qgis_puppeteer.dialog_handlers import (
     DialogHandlerError,
     DialogHandlerRegistry,
 )
 from qgis_puppeteer.qgis_tools import queued
+from qgis_puppeteer.qgis_tools.ui_tools import activate_menu_action
+from qgis_puppeteer.selector_match import label_forms
 
 logger = logging.getLogger("qgis_puppeteer.qgis_tools.dialog_handler_tools")
 
@@ -37,9 +40,6 @@ _REGISTRY = DialogHandlerRegistry()
 # modal に振るキーを入れる dynamic property（`_modal_key`）
 _MODAL_KEY_PROPERTY = "_qpuppeteer_modal_key"
 _next_modal_key = 0
-
-# 日本語などの Qt が付ける「いいえ(&N)」のようなニーモニックの括弧
-_MNEMONIC_SUFFIX_RE = re.compile(r"\s*\(&.\)$")
 
 
 def get_registry() -> DialogHandlerRegistry:
@@ -63,7 +63,8 @@ def register_dialog_handler(params: dict, iface: Any = None) -> dict:
         - ``once`` (bool, optional): True で 1 度発火したら自動 unregister
         - ``button`` (str, optional): ``action="button"`` で押すボタン。
           ``QMessageBox`` / ``QDialogButtonBox`` の標準ボタン名（``"Ok"`` /
-          ``"Yes"`` / ``"No"`` / ``"Cancel"`` など）か、ボタンの文言
+          ``"Yes"`` / ``"No"`` / ``"Cancel"`` など）か、ボタンの文言。
+          ポップアップのメニューでは、選ぶ項目の文言
     """
     del iface  # unused
     try:
@@ -109,15 +110,23 @@ def clear_dialog_handlers(params: dict, iface: Any = None) -> dict:
 # ============================================================
 
 
-def _modal_to_record(modal: Any) -> dict | None:
-    """active modal を selector_match 用 record dict に変換する。"""
+def _modal_to_record(modal: Any, *, popup: bool = False) -> dict | None:
+    """active modal / popup を selector_match 用 record dict に変換する。
+
+    ポップアップには ``popup: True`` を付ける（handler の opt-in の判定用）。
+    ``QMenu`` の ``title`` はメニューの題名（``windowTitle`` は空のことが多い）。
+    """
     if modal is None:
         return None
     record: dict = {
         "class": type(modal).__name__,
         "object_name": modal.objectName() if hasattr(modal, "objectName") else "",
     }
-    if hasattr(modal, "windowTitle"):
+    if popup:
+        record["popup"] = True
+    if isinstance(modal, QMenu) and modal.title():
+        record["title"] = modal.title()
+    elif hasattr(modal, "windowTitle"):
         try:
             title = modal.windowTitle()
             if title:
@@ -178,6 +187,8 @@ def _run_action(modal: Any, action: str, button: str | None) -> dict:
         # 失敗でもない
         return {"success": True, "skipped": "modal_closed"}
     if action == "button":
+        if isinstance(modal, QMenu):
+            return _choose_menu_item(modal, button or "")
         return _click_button(modal, button or "")
     if isinstance(modal, QDialog) and action in ("accept", "reject"):
         getattr(modal, action)()
@@ -209,7 +220,7 @@ def _click_button(modal: Any, button: str) -> dict:
         for target in box.buttons():
             text = target.text()
             available.append(text)
-            if button in _button_labels(text):
+            if button in label_forms(text):
                 target.click()
                 return {"success": True}
     return {
@@ -221,9 +232,28 @@ def _click_button(modal: Any, button: str) -> dict:
     }
 
 
-def _button_labels(text: str) -> tuple[str, ...]:
-    """ボタンの文言を、``button`` と比べる形にする（そのまま・ニーモニック抜き）。"""
-    return (text, text.replace("&", ""), _MNEMONIC_SUFFIX_RE.sub("", text).replace("&", ""))
+def _choose_menu_item(menu: QMenu, item: str) -> dict:
+    """ポップアップのメニューで、文言が ``item`` の項目を選ぶ（#22）。
+
+    文言の比べ方はボタンと同じ（``&`` と末尾の ``(&N)`` を除いても比べる）。
+    選ぶと ``QMenu.exec()`` がその項目を返す（:func:`activate_menu_action`）。
+    """
+    available: list[str] = []
+    for action in menu.actions():
+        if action.isSeparator() or not action.isVisible():
+            continue
+        text = action.text()
+        available.append(text)
+        if action.isEnabled() and item in label_forms(text):
+            activate_menu_action(menu, action)
+            return {"success": True}
+    return {
+        "success": False,
+        "error": "menu_item_not_found",
+        "item": item,
+        "available": available,
+        "menu": menu.title() or menu.objectName(),
+    }
 
 
 def tick(iface: Any = None) -> dict:
@@ -241,9 +271,11 @@ def tick(iface: Any = None) -> dict:
     if app is None:
         return {"applied": False}
 
-    modal = app.activeModalWidget()
+    # ポップアップは、開いていれば一番上にある（モーダルの上に開くこともある）
+    popup = app.activePopupWidget()
+    modal = popup if popup is not None else app.activeModalWidget()
     modal_id = _modal_key(modal) if modal is not None else None
-    record = _modal_to_record(modal)
+    record = _modal_to_record(modal, popup=popup is not None)
 
     spec = _REGISTRY.select_for_modal(modal_id, record)
     if spec is None:

@@ -177,8 +177,10 @@ SelectorArg = Annotated[
         description=(
             "対象ウィジェットの指定。照合キーは object_name（最も確実）/ text / class / "
             "title / label / placeholder / role / text_contains / text_re / attr。"
-            "絞り込みは scope（既定 'modal'、ほかに 'active_window' / 'any'）/ "
+            "絞り込みは scope（既定 'modal'、ほかに 'active_window' / 'popup' / 'any'）/ "
             "root_object_name / index。qgis_snapshot_ui の出力から組み立てる。"
+            "scope='popup' は開いているメニュー（QMenu.exec() など）で、項目は "
+            "{'class': 'QAction', 'text': ...} で指し、click すると選ばれる。"
         )
     ),
 ]
@@ -200,6 +202,8 @@ DialogPredicateArg = Annotated[
         description=(
             "対象モーダルの条件。title / class / object_name を主に使い、書いたキーを "
             "すべて満たすものに一致する。空の {} はすべての modal に一致する。"
+            "開いているメニューなどのポップアップには、'popup': true を書いた条件だけが "
+            "一致する（title はメニューの題名）。"
         )
     ),
 ]
@@ -1204,8 +1208,10 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
     ) -> str | CallToolResult:
         """UI ウィジェットツリーの JSON スナップショットを返す。
 
-        既定ではモーダルと可視ダイアログのみ。QGIS 本体のツリーは巨大なので、
-        include_main_window=true のときだけ含む。selector を組み立てる材料にする。
+        既定ではモーダルと可視ダイアログ、開いているポップアップ（active_popup。
+        メニューなら menu_items に項目の文言・有効か・チェックを返す）のみ。QGIS 本体の
+        ツリーは巨大なので、include_main_window=true のときだけ含む。selector を
+        組み立てる材料にする。
         リスト・表・ツリーは中身も返す（items / columns / rows、先頭 100 行・50 列まで、
         超えたら truncated）。パスワード欄は文字を返さない（masked）。
         """
@@ -1302,6 +1308,10 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
         文言。QMessageBox の「OK で進む」処理には accept ではなくこれを使う
         （accept では exec() が Ok を返さない）。ボタンが無ければ何もせず、
         qgis_get_recent_exceptions に残る。
+
+        ポップアップ（QMenu.exec() のメニューなど）は predicate に "popup": true を
+        書いた handler だけが扱う。action は "button"（button に選ぶ項目の文言）か
+        "close"。
         """
         params: dict[str, Any] = {
             "name": name,

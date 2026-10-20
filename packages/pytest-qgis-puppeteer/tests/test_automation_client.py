@@ -622,6 +622,31 @@ class TestFindInSnapshot:
         assert node is not None
         assert node["object_name"] == "ok"
 
+    def test_finds_a_menu_item_of_the_active_popup(self) -> None:
+        """#22: 開いているメニューの項目（menu_items）も、`&` 抜きの文言で探す。"""
+        snap = {
+            "active_modal": None,
+            "active_popup": {
+                "class": "QMenu",
+                "object_name": "layerMenu",
+                "menu_items": [
+                    {"class": "QAction", "separator": True},
+                    {
+                        "class": "QAction",
+                        "object_name": "",
+                        "text": "&Copy",
+                        "enabled": True,
+                        "menu_item": True,
+                    },
+                ],
+            },
+            "visible_dialogs": [],
+            "active_window": None,
+        }
+        node = _find_in_snapshot(snap, {"class": "QAction", "text": "Copy"})
+        assert node is not None
+        assert node["enabled"] is True
+
     def test_returns_none_when_no_match(self) -> None:
         snap = {
             "active_modal": None,

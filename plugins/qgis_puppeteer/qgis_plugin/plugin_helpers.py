@@ -60,6 +60,8 @@ DEFAULT_HUB_PORT = 9876
 ENV_HUB_URL = "QPUPPETEER_HUB_URL"
 ENV_HUB_HOST = "QPUPPETEER_HUB_HOST"
 ENV_HUB_PORT = "QPUPPETEER_HUB_PORT"
+# 1 なら、テストの QGIS で OS のダイアログの代わりに Qt のダイアログを使う（#22）
+ENV_QT_DIALOGS = "QPUPPETEER_QT_DIALOGS"
 DEFAULT_HUB_HOST = "127.0.0.1"
 
 # subprocess の stdout/stderr を受ける既定ファイル名。
@@ -380,6 +382,24 @@ def discover_extensions(
 # 自分で閉じ始めてから、閉じきれずに自分を強制終了するまでの時間。閉じる手順
 # （app_tools.close_qgis）は約 10 秒で諦めるので、その少し後
 CLOSE_UNWANTED_QGIS_EXIT_MS = 12_000
+
+
+def wants_qt_dialogs(env: Mapping[str, str]) -> bool:
+    """OS のファイルダイアログの代わりに Qt のダイアログを使うか（#22）。
+
+    Windows で ``QFileDialog.getOpenFileName`` などを既定のまま呼ぶと、OS の
+    ダイアログが出る。Qt のウィジェットではないので、UI の一覧にも自動応答にも
+    見えず、E2E から答えられない。``Qt.AA_DontUseNativeDialogs`` を立てると Qt の
+    ダイアログになり、ほかのダイアログと同じように扱える。
+
+    見た目と挙動が変わるので、pytest-qgis-puppeteer が起こした QGIS
+    （``QPUPPETEER_LAUNCH_TOKEN`` が付く）で、``QPUPPETEER_QT_DIALOGS`` が
+    ``1`` / ``true`` / ``yes`` / ``on`` のときだけ。人が普通に起こした QGIS は
+    変えない。
+    """
+    if not env.get("QPUPPETEER_LAUNCH_TOKEN"):
+        return False
+    return env.get(ENV_QT_DIALOGS, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def should_close_after_register_failure(instance_id: str | None, env: Mapping[str, str]) -> bool:

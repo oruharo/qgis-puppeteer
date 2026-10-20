@@ -35,7 +35,9 @@ from typing import Any
 # `Worker` は PyQt5 依存のため top-level `qgis_puppeteer` からは export されない。
 # サブモジュール経由で import する（プラグイン実行時は QGIS 付属の PyQt5 が利用可）。
 from PyQt5.QtCore import (  # type: ignore[import-not-found]
+    QCoreApplication,
     QEventLoop,
+    Qt,
     QTimer,
 )
 
@@ -47,6 +49,7 @@ from .plugin_helpers import (
     ENV_HUB_PORT,
     ENV_HUB_PYTHON,
     ENV_HUB_URL,
+    ENV_QT_DIALOGS,
     _build_hub_spawn_command,
     _build_hub_spawn_env,
     _extract_port,
@@ -55,6 +58,7 @@ from .plugin_helpers import (
     _resolve_hub_url,
     discover_extensions,
     should_close_after_register_failure,
+    wants_qt_dialogs,
 )
 
 logger = logging.getLogger(__name__)
@@ -142,6 +146,12 @@ class QgisPuppeteerPlugin:
         が設定されている場合は Hub 所有者が外部にあるので、auto-spawn を完全に
         抑制して接続のみ試行する（E2E テスト / remote 運用）。
         """
+        if wants_qt_dialogs(os.environ):
+            # ファイルダイアログなどを OS のものではなく Qt のものにする（#22）。
+            # ダイアログを作るときに見られるので、起動後に立てても効く
+            QCoreApplication.setAttribute(Qt.AA_DontUseNativeDialogs, True)
+            logger.info("%s is set: using Qt dialogs instead of native ones", ENV_QT_DIALOGS)
+
         hub_url = _resolve_hub_url()
         origin = os.environ.get(ENV_HUB_ORIGIN, "http://localhost")
         label = os.environ.get(ENV_WORKER_LABEL) or None

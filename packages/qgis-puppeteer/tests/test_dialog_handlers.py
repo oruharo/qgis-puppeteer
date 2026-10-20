@@ -107,6 +107,24 @@ class TestRegisterValidation:
         assert spec.name == "h"
         assert reg.select_for_modal(7, record) is None  # 2 度目は発火しない
 
+    def test_popups_go_only_to_handlers_that_opt_in(self) -> None:
+        """#22: ポップアップは predicate に "popup": true を書いた handler だけ。
+
+        何にでも当たる ``{}`` が、コンボのドロップダウンなどを閉じないように。
+        """
+        reg = DialogHandlerRegistry()
+        reg.register("any-modal", {}, "close")
+        reg.register("menu", {"popup": True, "title": "Layer"}, "button", button="Copy")
+        popup = {"class": "QMenu", "title": "Layer", "popup": True}
+        spec = reg.select_for_modal(1, popup)
+        assert spec is not None
+        assert spec.name == "menu"
+        dropdown = {"class": "QComboBoxPrivateContainer", "popup": True}
+        assert reg.select_for_modal(2, dropdown) is None
+        spec = reg.select_for_modal(3, {"class": "QMessageBox", "title": "Layer"})
+        assert spec is not None
+        assert spec.name == "any-modal"
+
     def test_button_action_needs_a_button(self) -> None:
         reg = DialogHandlerRegistry()
         with pytest.raises(DialogHandlerError, match="needs button"):

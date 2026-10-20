@@ -8,6 +8,27 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Popup menus and file dialogs in E2E** (#22). A menu shown with
+  `QMenu.exec()` is not modal, so neither `qgis_snapshot_ui` nor dialog
+  handlers saw it. The snapshot has `active_popup` (`activePopupWidget()`;
+  a `QMenu` also lists `menu_items` with `text`, `enabled`, `checkable`,
+  `checked`, `separator` and `submenu`), and selectors take `scope="popup"`;
+  a menu item is matched by `text`, also without `&` and a trailing `(&N)`
+  (in the live tree and in snapshot lookups alike), and clicking it chooses
+  it the way a person does, so `exec()` returns it (`QAction.trigger()` did
+  not). Dialog handlers also answer popups, but only those whose predicate
+  says `"popup": true`, so a catch-all `{}` does not close a combo box's
+  drop-down; `action="button"` there chooses the item named by `button`.
+  Native file dialogs on Windows are not Qt widgets and could not be
+  answered: with `QPUPPETEER_QT_DIALOGS=1`, the plugin in a QGIS started by
+  pytest (it has a launch token) sets `Qt.AA_DontUseNativeDialogs`, so
+  `QFileDialog` and the like are Qt dialogs; a QGIS started by a person is
+  left as it is. Checked on QGIS 3.34 (Japanese UI): an item of QGIS's own
+  layer tree context menu was chosen by its text, a host menu item chosen
+  by a handler led to a confirmation answered by another, and with the
+  variable set a `QFileDialog` returned the file whose name was filled in;
+  without it the attribute stayed off.
+
 - **Operations that return before the confirmation they open, and dialog
   handlers that press a button** (#21). A button that opens a confirmation
   with `exec()` (`QMessageBox.question` and the like) kept `qgis_click_widget`

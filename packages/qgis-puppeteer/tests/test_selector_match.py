@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from qgis_puppeteer.selector_match import (
+    label_forms,
     record_matches_selector,
     resolve_with_index,
 )
@@ -229,3 +230,25 @@ class TestRole:
         rec = {"class": "QPushButton"}  # role 無し
         # role キーを selector に含めない場合は他キーだけで判定
         assert record_matches_selector(rec, {"class": "QPushButton"}) is True
+
+
+class TestMenuItemText:
+    """#22: メニューの項目の文言は、`&` と末尾の `(&N)` を除いても当てる。"""
+
+    def test_label_forms(self) -> None:
+        assert "No" in label_forms("&No")
+        assert "いいえ" in label_forms("いいえ(&N)")
+        assert "Save as new" in label_forms("Save as &new")
+        assert "Copy" not in label_forms("Copy all")
+
+    def test_menu_item_text_without_mnemonics(self) -> None:
+        item = {"class": "QAction", "text": "レイヤをコピー(&C)", "menu_item": True}
+        assert record_matches_selector(item, {"text": "レイヤをコピー"}) is True
+        assert record_matches_selector(item, {"text": "レイヤをコピー(&C)"}) is True
+        assert record_matches_selector(item, {"text": "コピー"}) is False
+
+    def test_other_text_stays_exact(self) -> None:
+        """メニューの項目でなければ、今までどおり完全一致。"""
+        button = {"class": "QPushButton", "text": "&No"}
+        assert record_matches_selector(button, {"text": "No"}) is False
+        assert record_matches_selector(button, {"text": "&No"}) is True

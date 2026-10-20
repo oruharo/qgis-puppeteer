@@ -10,6 +10,7 @@ pytest_qgis_puppeteer.automation_client._find_in_snapshot（snapshot DFS）が
 - ``record_matches_selector(record, selector)`` — 1 件の record を判定
 - ``resolve_with_index(records, selector)`` — match list から `index` /
   strict mode の解釈を含めて確定 record を返す
+- ``label_forms(text)`` — ボタン・メニュー項目の文言を、指定と比べる形にする
 
 ## record の形
 
@@ -23,6 +24,8 @@ dict で以下のキーを持つ（無いものは None / 欠落で OK）:
 - ``placeholder``: LineEdit の placeholderText() (str | None)
 - ``role``: ARIA / Qt accessible role 名 (str | None) — Worker 側 widget summary に
   ``QAccessibleInterface`` 経由で埋める想定（実 record 生成は次フェーズ）
+- ``menu_item``: 開いているメニューの項目なら True。``text`` を
+  :func:`label_forms` で比べる（``"Copy"`` で ``"&Copy"`` に当たる、#22）
 
 live tree 側では QWidget から record を抽出し、snapshot 側ではノード辞書を
 そのまま record として扱う。
@@ -32,6 +35,18 @@ from __future__ import annotations
 
 import re
 from typing import Any
+
+# 日本語などの Qt が付ける「いいえ(&N)」のようなニーモニックの括弧
+_MNEMONIC_SUFFIX_RE = re.compile(r"\s*\(&.\)$")
+
+
+def label_forms(text: str) -> tuple[str, ...]:
+    """ボタン・メニュー項目の文言を、指定と比べる形にする。
+
+    そのまま・``&`` のニーモニック抜き・末尾の ``(&N)`` 抜きの 3 つ（``"No"`` で
+    ``"&No"``、``"いいえ"`` で ``"いいえ(&N)"`` に当たる）。
+    """
+    return (text, text.replace("&", ""), _MNEMONIC_SUFFIX_RE.sub("", text).replace("&", ""))
 
 
 def record_matches_selector(record: dict[str, Any], selector: dict[str, Any]) -> bool:
@@ -57,8 +72,13 @@ def record_matches_selector(record: dict[str, Any], selector: dict[str, Any]) ->
     if obj is not None and record.get("object_name") != obj:
         return False
     text = selector.get("text")
-    if text is not None and record.get("text") != text:
-        return False
+    if text is not None:
+        rec_text = record.get("text")
+        if record.get("menu_item") and isinstance(rec_text, str):
+            if text not in label_forms(rec_text):
+                return False
+        elif rec_text != text:
+            return False
     title = selector.get("title")
     if title is not None and record.get("title") != title:
         return False

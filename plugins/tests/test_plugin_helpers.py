@@ -564,3 +564,22 @@ class TestShouldCloseAfterRegisterFailure:
 
         assert not should_close_after_register_failure(None, {})
         assert not should_close_after_register_failure(None, {"QPUPPETEER_LAUNCH_TOKEN": ""})
+
+
+class TestWantsQtDialogs:
+    """#22: テストの QGIS で、頼まれたときだけ Qt のダイアログにする。"""
+
+    @pytest.mark.parametrize("value", ["1", "true", "YES", " on "])
+    def test_asked_in_a_qgis_started_for_a_test(self, value: str) -> None:
+        env = {"QPUPPETEER_LAUNCH_TOKEN": "lt-1", ph.ENV_QT_DIALOGS: value}
+        assert ph.wants_qt_dialogs(env)
+
+    @pytest.mark.parametrize("value", ["", "0", "false", "no"])
+    def test_not_asked(self, value: str) -> None:
+        env = {"QPUPPETEER_LAUNCH_TOKEN": "lt-1", ph.ENV_QT_DIALOGS: value}
+        assert not ph.wants_qt_dialogs(env)
+        assert not ph.wants_qt_dialogs({"QPUPPETEER_LAUNCH_TOKEN": "lt-1"})
+
+    def test_a_qgis_started_by_a_person_keeps_native_dialogs(self) -> None:
+        """人が起こした QGIS は、環境変数が残っていても変えない。"""
+        assert not ph.wants_qt_dialogs({ph.ENV_QT_DIALOGS: "1"})

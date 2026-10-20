@@ -12,7 +12,8 @@ import re
 from collections.abc import Callable, Iterator
 from typing import Any
 
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import QEvent, Qt
+from qgis.PyQt.QtGui import QKeyEvent
 from qgis.PyQt.QtWidgets import (
     QAbstractButton,
     QAbstractItemView,
@@ -29,6 +30,7 @@ from qgis.PyQt.QtWidgets import (
     QLineEdit,
     QListView,
     QListWidget,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
     QRadioButton,
@@ -46,6 +48,7 @@ from qgis.PyQt.QtWidgets import (
 
 from qgis_puppeteer.qgis_tools import queued
 from qgis_puppeteer.selector_match import (
+    label_forms,
     resolve_with_index,
 )
 
@@ -76,6 +79,12 @@ def snapshot_ui(
     Returns:
         Dictionary with:
             - active_modal: Description of ``QApplication.activeModalWidget()``.
+            - active_popup: Description of ``QApplication.activePopupWidget()``
+              (a ``QMenu`` shown with ``exec()`` / ``popup()``, a combo box's
+              drop-down, ...). A ``QMenu`` also carries ``menu_items``: one node
+              per visible action (``text`` / ``enabled`` / ``checkable`` /
+              ``checked`` / ``separator`` / ``submenu``), selectable with
+              ``scope="popup"`` (#22).
             - visible_dialogs: Other visible top-level QDialog instances.
             - active_window: The currently focused top-level widget class/title.
             - main_window: QGIS main window tree (only if include_main_window).
@@ -95,6 +104,7 @@ def snapshot_ui(
     app = QApplication.instance()
     result: dict[str, Any] = {
         "active_modal": None,
+        "active_popup": None,
         "visible_dialogs": [],
         "active_window": None,
     }
@@ -103,6 +113,7 @@ def snapshot_ui(
         return result
 
     active_modal = app.activeModalWidget()
+    active_popup = app.activePopupWidget()
 
     # snapshot を「互いに素な root の森」にするため、個別 root として報告する
     # live widget を先に確定する。各 root の subtree からは「他の root」を除外し、
@@ -133,6 +144,8 @@ def snapshot_ui(
     exclude_ids: set[int] = {id(w) for w in dialog_widgets}
     if active_modal is not None:
         exclude_ids.add(id(active_modal))
+    if active_popup is not None:
+        exclude_ids.add(id(active_popup))
     if main_widget is not None:
         exclude_ids.add(id(main_widget))
 
@@ -145,6 +158,14 @@ def snapshot_ui(
             buddy_map=buddy_map,
             exclude_ids=exclude_ids,
         )
+
+    if active_popup is not None:
+        popup_node = _describe_widget(
+            active_popup, max_depth, include_invisible, exclude_ids=exclude_ids
+        )
+        if isinstance(active_popup, QMenu):
+            popup_node["menu_items"] = _menu_items(active_popup)
+        result["active_popup"] = popup_node
 
     active_window = app.activeWindow()
     if active_window is not None:
@@ -237,7 +258,15 @@ def click_widget(selector: dict, iface=None, *, wait: bool = True) -> dict:
     if isinstance(widget, QAbstractButton):
         press = widget.click
     elif isinstance(widget, QAction):
-        press = widget.trigger
+        menu = _menu_showing(widget)
+        if menu is not None:
+            # 開いているポップアップの項目は、メニューから選ぶ（#22）。trigger() では
+            # `QMenu.exec()` がその項目を返さないので、選んだ項目で分岐する処理が進まない
+            def press() -> None:
+                activate_menu_action(menu, widget)
+
+        else:
+            press = widget.trigger
     elif hasattr(widget, "click") and callable(widget.click):
         press = widget.click
     else:
@@ -461,6 +490,55 @@ def _queue_widget_value(widget: Any, value: Any) -> dict:
         "widget": _widget_summary(widget),
         "prior_value": prior,
     }
+
+
+def _menu_showing(action: Any) -> QMenu | None:
+    """``action`` を項目に持つ、いま開いているポップアップのメニュー（無ければ None）。"""
+    app = QApplication.instance()
+    popup = app.activePopupWidget() if app is not None else None
+    if isinstance(popup, QMenu) and any(a is action for a in popup.actions()):
+        return popup
+    return None
+
+
+def activate_menu_action(menu: QMenu, action: QAction) -> None:
+    """開いているメニューで ``action`` を選ぶ（人が選んだのと同じ形で、#22）。
+
+    ``action.trigger()`` では、メニューを ``exec()`` で出した側に、選ばれた項目が
+    返らない。項目をメニューの今の項目にして Return を送ると、``exec()`` がその
+    項目を返し、``triggered`` も出る。下位メニューを持つ項目なら、それが開く。
+    """
+    menu.setActiveAction(action)
+    QApplication.sendEvent(menu, QKeyEvent(QEvent.KeyPress, Qt.Key_Return, Qt.NoModifier))
+
+
+def _menu_items(menu: QMenu) -> list[dict]:
+    """snapshot 用：メニューの見えている項目を、selector で選べる node にする。"""
+    items: list[dict] = []
+    for action in menu.actions():
+        if not action.isVisible():
+            continue
+        if len(items) >= _DEFAULT_MAX_CHILDREN:
+            items.append({"_truncated": True, "remaining": "?"})
+            break
+        if action.isSeparator():
+            items.append({"class": "QAction", "separator": True})
+            continue
+        node: dict[str, Any] = {
+            "class": "QAction",
+            "object_name": action.objectName(),
+            "text": action.text(),
+            "enabled": action.isEnabled(),
+            # 文言を `&` や `(&N)` 抜きでも当てる印（実ツリー側と同じ比べ方）
+            "menu_item": True,
+        }
+        if action.isCheckable():
+            node["checkable"] = True
+            node["checked"] = action.isChecked()
+        if action.menu() is not None:
+            node["submenu"] = True
+        items.append(node)
+    return items
 
 
 def check_actionability(selector: dict, iface=None) -> dict:
@@ -695,6 +773,10 @@ def _find_widget(selector: dict) -> tuple[QWidget | None, dict]:
                of strict mode and pick the N-th match.
         scope: "modal" (default) — search only the active modal;
                "active_window" — search within ``activeWindow()``;
+               "popup" — search the open popup (``activePopupWidget()``, e.g. a
+               ``QMenu`` shown with ``exec()``). A menu's items are ``QAction``s
+               matched by ``text`` (also without ``&`` and a trailing ``(&N)``)
+               or ``object_name``; clicking one chooses it in the menu (#22);
                "any" — search all top-level widgets.
         root_object_name: If set, constrain search under the top-level
                widget whose objectName equals this value (e.g. "QgisApp").
@@ -800,6 +882,13 @@ def _find_widget(selector: dict) -> tuple[QWidget | None, dict]:
         win = app.activeWindow()
         if win is not None:
             roots.append(win)
+    elif scope == "popup":
+        # 開いているポップアップ（QMenu.exec() のメニューなど）。モーダルではないので
+        # "modal" では届かない（#22）
+        popup = app.activePopupWidget()
+        if popup is None:
+            return None, {"reason": "no_popup", "scope": scope}
+        roots.append(popup)
     elif scope == "any":
         roots = [w for w in app.topLevelWidgets() if w.isVisible()]
     else:
@@ -916,11 +1005,23 @@ def _collect_candidates(roots: list[QWidget], selector: dict) -> list[QWidget]:
             candidates.append(widget)
 
         if class_name in (None, "QAction") and (object_name is not None or text is not None):
-            for action in root.findChildren(QAction):
+            is_menu = isinstance(root, QMenu)
+            # メニューが根なら、その項目だけ（#22）。項目はメニューの子とは限らない
+            # （addAction(既存の action)）うえ、findChildren では下位メニューの項目
+            # まで拾い、開いていない項目と重なる
+            actions = (
+                [a for a in root.actions() if not a.isSeparator()]
+                if is_menu
+                else root.findChildren(QAction)
+            )
+            for action in actions:
                 if object_name is not None and action.objectName() != object_name:
                     continue
-                if text is not None and action.text() != text:
-                    continue
+                if text is not None:
+                    # メニューの項目は、表示どおりの文言（`&` や `(&N)` 抜き）でも当てる
+                    forms = label_forms(action.text()) if is_menu else (action.text(),)
+                    if text not in forms:
+                        continue
                 if class_name is not None and class_name != "QAction":
                     continue
                 candidates.append(action)

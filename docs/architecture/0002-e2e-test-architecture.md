@@ -813,6 +813,22 @@ outputs/diagnostics/test_login_20260430-093000/
 >    したときは今開いている modal も見直す（これまでは `id()` が替わるせいで、
 >    登録より先に開いた modal にもたまたま効いていた）。
 
+> **2026-10-21 注（#22）**: モーダルに近い 2 つを扱えるようにした。
+>
+> - **ポップアップ（`QMenu.exec()`）**: モーダルではないので `activeModalWidget()`
+>   に見えない。snapshot に `active_popup`（メニューなら `menu_items`）、selector に
+>   `scope="popup"` を足した。項目の click は `QAction.trigger()` ではなく、項目を
+>   メニューの今の項目にして Return を送る（`trigger()` では `exec()` が選ばれた項目を
+>   返さない）。tick はポップアップを先に見るが、答えるのは predicate に
+>   `"popup": true` を書いた handler だけにした。`{}` のような何にでも当たる handler
+>   が、コンボボックスのドロップダウン（これもポップアップ）まで閉じないように。
+>   ポップアップの `action="button"` は、`button` の文言の項目を選ぶ。
+> - **ネイティブのファイルダイアログ**: Windows の OS のダイアログは Qt の
+>   ウィジェットではなく、見えも答えもできない。pytest が起こした QGIS（launch token
+>   付き）で `QPUPPETEER_QT_DIALOGS=1` のときだけ、プラグインが
+>   `Qt.AA_DontUseNativeDialogs` を立てて Qt のダイアログにする。見た目と挙動が
+>   変わるのでオプトイン。
+
 #### 提供 Tier 1 ハンドラ
 
 | ハンドラ | 用途 |

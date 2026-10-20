@@ -1197,11 +1197,15 @@ class E2EAutomationClient:
 def _snapshot_roots(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     """snapshot 辞書から探索対象の root node 群を抽出する。
 
-    `active_modal` を最優先（モーダルがあればフォーカスはそこに集中している）、
+    `active_popup`（開いているメニューなど。モーダルより上にある、#22）を最優先、
+    次に `active_modal`（モーダルがあればフォーカスはそこに集中している）、
     続いて `visible_dialogs`（モードレスダイアログ）、最後に `main_window`
     （`include_main_window=True` のときのみ存在）。
     """
     roots: list[dict[str, Any]] = []
+    popup = snapshot.get("active_popup")
+    if isinstance(popup, dict):
+        roots.append(popup)
     modal = snapshot.get("active_modal")
     if isinstance(modal, dict):
         roots.append(modal)
@@ -1274,7 +1278,8 @@ def _find_first_in_subtree(
         node = stack.pop()
         if _node_matches(node, selector):
             matches.append(node)
-        children = node.get("children") or ()
+        # メニューの項目（`menu_items`、#22）も子としてたどる
+        children = [*(node.get("children") or ()), *(node.get("menu_items") or ())]
         for child in reversed(children):
             if isinstance(child, dict) and not child.get("_truncated"):
                 stack.append(child)

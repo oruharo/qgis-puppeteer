@@ -807,6 +807,9 @@ auto-wait で吸収されるか、対応する例外に変換される。
 - **`modal`**（既定）: `activeModalWidget()` 配下を検索。なければ
   `activeWindow()` にフォールバック（曖昧指定に寛容）
 - **`active_window`**: `activeWindow()` 配下のみ
+- **`popup`**: 開いているポップアップ（`activePopupWidget()`。`QMenu.exec()` の
+  メニューなど）。メニューはモーダルではないので `modal` では届かない。項目は
+  `{"class": "QAction", "text": ...}` で指す（下の「ポップアップのメニュー」）
 - **`any`**: 全 top-level widget。重い & strict mode と相性悪いので注意
 
 ### selector チートシート
@@ -826,7 +829,37 @@ auto-wait で吸収されるか、対応する例外に変換される。
 
 # 複数同名がある状況で 2 番目を選ぶ
 {"object_name": "row_btn", "index": 1}
+
+# 開いている右クリックメニューの項目
+{"scope": "popup", "class": "QAction", "text": "削除"}
 ```
+
+### ポップアップのメニュー（`QMenu.exec()`）
+
+右クリックのメニューやツールボタンのメニューを `QMenu.exec()` で出すと、選ばれるか
+閉じられるまで呼び出しが返らない。メニューはモーダルではないので、`scope="popup"`
+で扱う。
+
+- `qgis_snapshot_ui` の `active_popup` に、開いているポップアップが出る。メニュー
+  なら `menu_items` に項目（`text` / `enabled` / `checkable` / `checked` /
+  `separator` / `submenu`）が並ぶ
+- 項目を click すると、人が選んだのと同じ形で選ばれ、`exec()` がその項目を返す
+  （`QAction.trigger()` では返らないので、選んだ項目で分岐する処理が進まない）。
+  下位メニューを持つ項目なら、それが開く
+- 項目の文言は、`&` と末尾の `(&N)` を除いても当てる（`"削除"` で「削除(&D)」に
+  当たる。snapshot 経由の `wait_for_widget` でも同じ）
+- メニューを開く操作そのものが `exec()` で止まるので、開くほうは `wait=False` で
+  行う。右クリックの操作は無いので、右クリックのメニューは `qgis_execute_python`
+  のコードの中で `QTimer.singleShot(0, ...)` と積んで `QContextMenuEvent` を送る
+
+```python
+# メニュー付きのツールボタンを押してメニューを開き、項目を選ぶ
+qgis.locator({"object_name": "exportButton"}).click(wait=False)
+qgis.locator({"scope": "popup", "class": "QAction", "text": "削除"}).click()
+```
+
+決まった項目を毎回選ぶなら、dialog handler でも答えられる（「Dialog handler」の
+「ポップアップに答える」）。
 
 ---
 
@@ -1022,7 +1055,8 @@ expect(loc).to_have_text("Done", timeout_s=10.0)
 
 「想定外モーダル（Bad Layers / 認証失敗 / 古いプロジェクト警告 等）」を
 登録した条件で自動 dismiss する仕組み。Worker 側で 250ms 周期で
-`activeModalWidget()` を polling し、predicate にマッチすれば action を実行。
+`activePopupWidget()` / `activeModalWidget()` を polling し、predicate にマッチ
+すれば action を実行。
 action は Qt のイベントループに積んで行う（action の中でホストのコードが
 さらに確認を出しても、見回りが止まらない）。
 
@@ -1143,6 +1177,50 @@ await client.call("qgis_register_dialog_handler", {
     "once": True,  # 1 度だけ
 })
 ```
+
+### ポップアップに答える
+
+開いているメニューなどのポップアップには、predicate に `"popup": true` を書いた
+handler だけが答える（`{}` などの何にでも当たる handler が、コンボボックスの
+ドロップダウン（これもポップアップ）まで閉じないように）。`title` はメニューの題名。
+
+- `action="button"`: `button` の文言の項目を選ぶ（文言の比べ方はボタンと同じ）
+- `action="close"`: メニューを閉じる（`exec()` は何も返さない）
+
+```python
+automation_client.call("qgis_register_dialog_handler", {
+    "name": "layer-menu",
+    "predicate": {"popup": True, "title": "レイヤ"},
+    "action": "button",
+    "button": "削除",
+})
+```
+
+### ネイティブのファイルダイアログ
+
+Windows で `QFileDialog.getOpenFileName` などを既定のまま呼ぶと、OS のダイアログが
+出る。Qt のウィジェットではないので、UI の一覧にも dialog handler にも見えず、
+答えられない。pytest を `QPUPPETEER_QT_DIALOGS=1` を付けて回すと、pytest が
+起こした QGIS（launch token が付く）で、QGIS Puppeteer プラグインが
+`Qt.AA_DontUseNativeDialogs` を立て、Qt のダイアログ（`QFileDialog`）になる。
+人が普通に起こした QGIS は変わらない（見た目と挙動が変わるので、オプトイン）。
+
+Qt のダイアログなら、ファイル名を入れて「開く」を押せる:
+
+```python
+# ファイルを選ぶダイアログを開く操作（exec() で止まるので wait=False）
+qgis.locator({"object_name": "importButton"}).click(wait=False)
+qgis.locator({"object_name": "fileNameEdit"}).fill("data.gpkg")  # QFileDialog の欄
+automation_client.call("qgis_register_dialog_handler", {
+    "name": "open-file",
+    "predicate": {"class": "QFileDialog"},
+    "action": "button",
+    "button": "Open",  # 保存のダイアログなら "Save"
+    "once": True,
+})
+```
+
+ファイル名の欄は、そのダイアログのフォルダからの相対か、絶対パス。
 
 ### 注意点
 

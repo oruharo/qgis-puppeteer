@@ -16,6 +16,10 @@ QGIS 環境で「想定外のダイアログ（Bad Layers / 認証失敗 / 古�
   ``QMessageBox`` の「OK」を押したことにならない（``exec()`` が ``Ok`` を返さない）
   ので、押されたボタンで分岐する確認には ``button`` を使う（#21）
 - ``once=True`` で一度発火したら自動 unregister
+- ポップアップ（``QMenu.exec()`` のメニューなど、#22）は、predicate に
+  ``"popup": true`` を書いた handler だけが扱う。``{}`` などの何にでも当たる
+  handler が、コンボボックスのドロップダウン（これもポップアップ）まで閉じない
+  ように。ポップアップの ``button`` は選ぶ項目の文言
 
 ## tick の意味
 
@@ -178,7 +182,11 @@ class DialogHandlerRegistry:
         if modal_record is None:
             return None
 
+        is_popup = bool(modal_record.get("popup"))
         for handler in list(self._handlers.values()):
+            # ポップアップは opt-in（predicate の "popup": true）の handler だけ
+            if bool(handler.predicate.get("popup")) != is_popup:
+                continue
             if record_matches_selector(modal_record, handler.predicate):
                 if handler.once:
                     self._handlers.pop(handler.name, None)
