@@ -684,6 +684,83 @@ class TestSpawnQgisContextManager:
         assert processes.force_killed == [23456]
         assert mock_popen[0].terminated or mock_popen[0].killed
 
+    def _timeout_spawn(self, client: _FakeAutomationClient) -> None:
+        """登録待ちが時間切れになる spawn（ランチャーはすぐ終わる）。"""
+
+        def _timeout(*_args: Any, **_kwargs: Any) -> str:
+            raise TimeoutError("not usable in time")
+
+        client.wait_for_ready = _timeout  # type: ignore[method-assign]
+        with (
+            pytest.raises(WorkerRegisterTimeout),
+            spawn_qgis(
+                hub_port=9876,
+                automation_client=client,  # type: ignore[arg-type]
+                command=["launcher.bat"],
+                register_timeout_s=1.0,
+                graceful_shutdown_timeout_s=0.1,
+            ),
+        ):
+            pass
+
+    @pytest.mark.parametrize("state", ["active", "unresponsive"])
+    def test_qgis_registered_too_late_is_killed_after_the_timeout(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_popen: list[_FakePopen],
+        processes: _FakeProcesses,
+        state: str,
+    ) -> None:
+        """#16: 待ちが切れても、Hub に見えている自分の QGIS は pid で分かるので止める。
+
+        閉じるよう頼まない（GUI が塞がっていると、応答の上限まで待つことになる）。
+        """
+        monkeypatch.delenv("QPUPPETEER_E2E_USE_RUNNING_QGIS", raising=False)
+        client = _FakeAutomationClient()
+        client.bind_popens(mock_popen)
+        client.feed([_FakeInstance(instance_id="inst-late", pid=23456, state=state)])
+        processes.alive.add(23456)
+        self._timeout_spawn(client)
+        assert client.execute_python_calls == []
+        assert processes.force_killed == [23456]
+
+    def test_someone_elses_qgis_is_left_alone_after_the_timeout(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_popen: list[_FakePopen],
+        processes: _FakeProcesses,
+    ) -> None:
+        monkeypatch.delenv("QPUPPETEER_E2E_USE_RUNNING_QGIS", raising=False)
+        client = _FakeAutomationClient()
+        client.bind_popens(mock_popen)
+        client.feed([_FakeInstance(instance_id="other", pid=999, launch_token="lt-other")])
+        processes.alive.add(999)
+        self._timeout_spawn(client)
+        assert client.execute_python_calls == []
+        assert processes.force_killed == []
+
+    def test_rejected_registration_found_after_the_timeout_is_killed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_popen: list[_FakePopen],
+        processes: _FakeProcesses,
+    ) -> None:
+        monkeypatch.delenv("QPUPPETEER_E2E_USE_RUNNING_QGIS", raising=False)
+        client = _FakeAutomationClient()
+        client.bind_popens(mock_popen)
+        processes.alive.add(23456)
+        client.list_rejected = lambda: [  # type: ignore[attr-defined]
+            RejectedRegistration(
+                launch_token=client._current_token() or "",
+                pid=23456,
+                label="x",
+                code="label_conflict",
+                message="",
+            )
+        ]
+        self._timeout_spawn(client)
+        assert processes.force_killed == [23456]
+
     def test_launcher_exited_worker_is_asked_to_close(
         self,
         monkeypatch: pytest.MonkeyPatch,

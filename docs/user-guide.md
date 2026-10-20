@@ -551,10 +551,14 @@ def test_two_workers_compare(automation_client, hub_port, qgis_bin):
   待ち時間を待たずに `WorkerRegisterRejected` で失敗する。メッセージに断った理由が入り、
   断られた QGIS は止めてある。`WorkerRegisterTimeout` の下位型なので、既存の
   `except WorkerRegisterTimeout` でも拾える
-- QGIS が登録の要求すら送ってこない場合（プラグインが読み込まれない、など）は、
-  今までどおり `register_timeout_s` まで待ってから `WorkerRegisterTimeout` になる。
-  このときは QGIS の pid が分からないので、止めるのは起動したプロセスだけ。
-  ランチャーが QGIS を起こしてすぐ終わる場合は、QGIS が残ることがある
+- `register_timeout_s` までに使える状態にならなかったら `WorkerRegisterTimeout` に
+  なる。そのとき Hub に自分の QGIS が見えていれば（登録はされたがプロジェクトの
+  読み込みで塞がっている、断られた登録の記録にある）、その pid で止めてから失敗する。
+  閉じるよう頼まないのは、塞がった QGIS は応答しないため
+- QGIS が待ち時間内に登録の要求すら送ってこない場合（プラグインが読み込まれない、
+  起動がとても遅い、など）は、QGIS の pid が分からないので、止めるのは起動した
+  プロセスだけ。ランチャーが QGIS を起こしてすぐ終わる場合は、QGIS が残ることがある
+  （待ちが切れた後に遅れて登録してくる QGIS も同じ。#16 の案 2 で扱う予定）
 
 `launch_token` の Worker が register し、**かつ軽い read-only の往復が返る**
 まで待ってから返る（`wait_for_ready()`）。重いプロジェクトを開く QGIS では

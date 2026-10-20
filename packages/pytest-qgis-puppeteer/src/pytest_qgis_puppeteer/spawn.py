@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from qgis_puppeteer.client import RegistrationRejectedError
+from qgis_puppeteer.client import RegistrationRejectedError, find_rejection
 from qgis_puppeteer.hub_state import LABEL_MAX_LENGTH, validate_label
 from qgis_puppeteer.launcher import ENV_WORKER_LABEL, generate_launch_token, inject_launch_token
 from qgis_puppeteer.protocol import RejectedRegistration
@@ -205,7 +205,10 @@ def spawn_qgis(
         _join_drain_threads(drain_threads, timeout_s=2.0)
         raise
     except WorkerRegisterTimeout:
-        # register 失敗時はサブプロセスを片付けてから raise（dangling 防止）
+        # register 失敗時はサブプロセスを片付けてから raise（dangling 防止）。
+        # ランチャー経由だと proc はもう居ないので、Hub に QGIS が見えていれば
+        # そちらを止める（#16）
+        _stop_late_worker(automation_client, launch_token=launch_token)
         _terminate_worker(proc, graceful_timeout_s=graceful_shutdown_timeout_s)
         _join_drain_threads(drain_threads, timeout_s=2.0)
         raise
@@ -397,6 +400,54 @@ def _check_worker_label(label: str | None) -> None:
             f"({result.reason}). A label is 1-{LABEL_MAX_LENGTH} characters, "
             "not digits only, and does not start with '@'."
         )
+
+
+def _stop_late_worker(
+    automation_client: E2EAutomationClient,
+    *,
+    launch_token: str,
+) -> None:
+    """待ち時間が切れた後、Hub に見えている自分の QGIS を止める（#16、best-effort）。
+
+    待ちが切れても、QGIS が Hub に何も届けていないとは限らない:
+
+    - 登録はされたが、まだ使える状態でない（プロジェクトの読み込みで GUI が
+      塞がっている、待ち時間ぎりぎりで登録した）→ 一覧にいる
+    - 登録を断られた（#13 の記録）→ 断られた登録にいる
+
+    どちらでも pid が分かるので、pid で止める。閉じるよう頼まないのは、使える
+    状態にならなかった QGIS は GUI が塞がっていることが多く、頼むと応答の上限
+    （30 秒）まで待つことになるため。起動の途中の QGIS に守るべき作業は無い。
+    待ちが切れた後に登録してくる QGIS には効かない（#16 の案 2）。
+    """
+    pid: int | None = None
+    try:
+        for info in automation_client.list_instances():
+            if getattr(info, "launch_token", None) == launch_token:
+                pid = info.pid
+                break
+    except Exception:  # noqa: BLE001 - 片付けは best-effort
+        logger.warning("list_instances() failed after the register timeout", exc_info=True)
+    if pid is None:
+        list_rejected = getattr(automation_client, "list_rejected", None)
+        if list_rejected is not None:
+            try:
+                rejection = find_rejection(launch_token, list_rejected())
+            except Exception:  # noqa: BLE001
+                logger.warning("list_rejected() failed after the register timeout", exc_info=True)
+                rejection = None
+            if rejection is not None:
+                pid = rejection.pid
+    if pid is None or not _pid_alive(pid):
+        return
+    logger.warning(
+        "QGIS (launch_token=%s pid=%d) did not become usable in time; killing it",
+        launch_token,
+        pid,
+    )
+    _force_kill_pid(pid)
+    if not _wait_pid_dead(pid, timeout_s=2.0):
+        logger.warning("QGIS still alive after force kill (pid=%d)", pid)
 
 
 def _kill_rejected_worker(rejection: RejectedRegistration) -> None:

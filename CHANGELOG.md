@@ -301,6 +301,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A QGIS that did not become usable within the startup timeout was left
+  running** (#16, first part). On `WorkerRegisterTimeout` `spawn_qgis()` only
+  stopped the process it had started, which a launcher such as
+  `qgis-ltr.bat` has already left. It now looks once more for its own
+  `launch_token`: in the instance list (registered but still blocked, for
+  example by a slow project load) or among the Hub's refused registrations
+  (#13). If the QGIS is there its pid is known, and it is killed — not asked
+  to close, since a blocked GUI would only answer at the request timeout. A
+  QGIS that registers only after the wait gave up, or never registers, is
+  still out of reach.
+
 - **On Windows the Hub that pytest started stayed behind after the session**
   (#14). The Hub runs under `qgis_python`, by default `python-qgis-ltr.bat`, so
   the process pytest held was `cmd.exe` and the Hub's python its child;
