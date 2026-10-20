@@ -334,6 +334,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A selector's `index` picked the first candidate when candidates looked
+  alike** (#20). `_finalize_match` mapped the chosen summary back to its widget
+  with `list.index`, which finds the first equal summary, so two widgets with
+  the same class and object name (two unnamed `QTabWidget`s, one in a dock)
+  always resolved to the first whatever `index` said. It now maps by identity.
+  This was the only such lookup, but every widget RPC goes through it — click,
+  set_value, actionability and nested Locators. `root_object_name` also only
+  looked at top-level windows; when none has the name, a visible widget with
+  that object name inside a window (a dock, a panel) becomes the root, and
+  several such widgets are `selector_ambiguous`. Hidden widgets are left out,
+  so a closed dock or a closed window not yet deleted does not count.
+
 - **A QGIS that never sent a registration was left running** (#18). When the
   plugin does not load, the QGIS never reaches the Hub, so neither the
   instance list nor the refusal record gives its pid, and a launcher that has

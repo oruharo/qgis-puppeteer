@@ -625,6 +625,9 @@ def _find_widget(selector: dict) -> tuple[QWidget | None, dict]:
                "any" — search all top-level widgets.
         root_object_name: If set, constrain search under the top-level
                widget whose objectName equals this value (e.g. "QgisApp").
+               If no top-level widget has that name, a visible widget with that
+               objectName inside a window is used as the root (a dock or panel
+               in the main window, #20); more than one is ``selector_ambiguous``.
                Note: this walks ``findChildren`` from that root, which follows
                the ``QObject`` parent-child tree across window boundaries, so a
                modeless dialog parented to the root is reachable here. The
@@ -684,6 +687,18 @@ def _find_widget(selector: dict) -> tuple[QWidget | None, dict]:
         for top in app.topLevelWidgets():
             if top.objectName() == name:
                 roots.append(top)
+        if not roots:
+            # 一番上の窓に無ければ、窓の中の widget（ドック、パネルなど）を根にする（#20）
+            inner = _widgets_named(app, name)
+            if len(inner) > 1:
+                return None, {
+                    "reason": "selector_ambiguous",
+                    "root_object_name": name,
+                    "match_count": len(inner),
+                    "candidates": [_widget_summary(w) for w in inner[:10]],
+                    "hint": "root_object_name matches several widgets; use _scope_chain",
+                }
+            roots.extend(inner)
     elif scope == "modal":
         modal = app.activeModalWidget()
         if modal is not None:
@@ -722,6 +737,24 @@ def _find_widget(selector: dict) -> tuple[QWidget | None, dict]:
 
     candidates = _collect_candidates(roots, selector)
     return _finalize_match(candidates, selector, roots)
+
+
+def _widgets_named(app: Any, name: str) -> list[QWidget]:
+    """一番上の窓の中から、objectName が ``name`` の見えている widget を集める（重複なし）。
+
+    見えていないものは入れない。閉じたあとまだ消えていない窓の中の widget まで
+    拾うと、同じ名前が重なって ``selector_ambiguous`` になるため。
+    """
+    found: list[QWidget] = []
+    seen: set[int] = set()
+    for top in app.topLevelWidgets():
+        for widget in top.findChildren(QWidget, name):
+            if not widget.isVisible():
+                continue
+            if id(widget) not in seen:
+                seen.add(id(widget))
+                found.append(widget)
+    return found
 
 
 def _find_widget_within(root: QWidget, selector: dict) -> tuple[QWidget | None, dict]:
@@ -861,7 +894,10 @@ def _finalize_match(
 
     # records と candidates は同じ index 並びなので、確定 record の位置を取って
     # 元の widget を返す。`index` 未指定単一マッチも `index=N` 指定も対応できる。
-    chosen_index = records.index(chosen_record)
+    # 位置は同じオブジェクトかどうかで探す。`records.index()` は中身の等しい最初の
+    # 要素を返すので、要約（クラス・object_name）が同じ候補だと、`index=1` でも
+    # 1 つ目に戻っていた（#20）
+    chosen_index = next(i for i, record in enumerate(records) if record is chosen_record)
     return candidates[chosen_index], diagnostics
 
 
