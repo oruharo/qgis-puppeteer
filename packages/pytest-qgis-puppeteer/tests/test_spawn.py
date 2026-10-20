@@ -790,7 +790,8 @@ class TestSpawnQgisContextManager:
             mock_popen[0].returncode = 0  # ランチャーは QGIS を起こして終わった
         codes = [call["code"] for call in client.execute_python_calls]
         assert len(codes) == 1
-        assert "iface.mainWindow().close" in codes[0]
+        assert "close_qgis(iface)" in codes[0]  # モーダルを reject してから閉じる
+        assert "iface.mainWindow().close" in codes[0]  # 古いプラグイン向けの閉じ方
         assert "setDirty(False)" in codes[0]
         assert client.execute_python_calls[0]["instance"] == "inst-1"
         assert not any("exitQgis" in code for code in codes)

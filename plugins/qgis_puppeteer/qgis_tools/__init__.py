@@ -11,6 +11,7 @@ QGIS プラグイン（`qgis_plugin`）から `Worker` に登録される handle
 - `screenshot_tools`  : マップキャンバスに今映っている画像の保存
 - `render_tools`      : 範囲・サイズ・DPI を固定した地図の描画（スナップショット比較用）
 - `ui_tools`          : Qt ウィジェット snapshot / click / set value
+- `app_tools`         : QGIS を閉じる手順（モーダルを閉じてからメインウィンドウを閉じる）
 - `exception_recorder`: 未捕捉の Python 例外のリングバッファ
 - `message_recorder`  : QgsMessageLog（メッセージバー含む）のリングバッファ
 - `code_analyzer`     : `python_executor` が使うコード静的解析

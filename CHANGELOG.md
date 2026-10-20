@@ -301,6 +301,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Closing a QGIS that has a modal dialog open** (#16 design, used by #9 and
+  #11). The teardown and the session restart asked QGIS to close its main
+  window, which does nothing while a modal dialog runs its own `exec()` loop —
+  a host's login dialog shown while the project opens is enough — so they
+  waited 15 seconds and then killed the pid. QGIS now closes through
+  `qgis_puppeteer.qgis_tools.app_tools.close_qgis`: in rounds a fifth of a
+  second apart it discards changes (project dirty flag, edits in editable
+  layers, so no save prompt appears), rejects the topmost modal through a
+  queued `reject()` (a dialog whose `reject()` asks a question of its own does
+  not block the procedure, and the question is rejected in the next round),
+  and closes the main window once no modal is left. It gives up after about 10
+  seconds and leaves the kill to the caller, as before. A QGIS whose plugin
+  predates this is asked the old way. Checked on QGIS 3.34: with a modal open
+  a session restart took 8.9s instead of waiting out the 15s; with a dialog
+  that refuses to close, the kill still ended it.
+
 - **A QGIS that did not become usable within the startup timeout was left
   running** (#16, first part). On `WorkerRegisterTimeout` `spawn_qgis()` only
   stopped the process it had started, which a launcher such as

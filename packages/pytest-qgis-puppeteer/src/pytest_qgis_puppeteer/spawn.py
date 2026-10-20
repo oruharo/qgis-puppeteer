@@ -506,22 +506,32 @@ def _shutdown_worker_best_effort(
         _terminate_worker(proc, graceful_timeout_s=graceful_timeout_s)
 
 
-# QGIS に自分で閉じてもらうコード。プロジェクトの変更は捨てる（保存の確認
-# ダイアログで止まらないように）。``QTimer`` で 1 拍遅らせるのは、この
-# execute_python の応答を返してから閉じるため。
+# QGIS に自分で閉じてもらうコード。手順は QGIS 側の
+# ``qgis_puppeteer.qgis_tools.app_tools.close_qgis``：変更を捨て（保存の確認を
+# 出させない）、開いているモーダルを上から reject してから、メインウィンドウを
+# 閉じる。モーダルが開いていると、メインウィンドウを閉じるだけでは閉じない。
+# 手順は QTimer で進むので、この execute_python の応答はすぐ返る。
+#
+# それを持たない古いプラグインの QGIS には、前の閉じ方（変更を捨てて
+# メインウィンドウを閉じるだけ）で頼む。
 #
 # ``QgsApplication.exitQgis()`` は使わない。あれは終了処理の最後に呼ぶ後片付け
 # （プロバイダの破棄など）で、GUI が動いている最中に呼ぶと QGIS が落ちる。
-_CLOSE_QGIS_CODE = """\
-from qgis.core import QgsApplication, QgsProject
-from qgis.PyQt.QtCore import QTimer
-from qgis.utils import iface
+_CLOSE_QGIS_CODE = """from qgis.utils import iface
 
-QgsProject.instance().setDirty(False)
-if iface is not None and iface.mainWindow() is not None:
-    QTimer.singleShot(0, iface.mainWindow().close)
+try:
+    from qgis_puppeteer.qgis_tools.app_tools import close_qgis
+except ImportError:
+    from qgis.core import QgsApplication, QgsProject
+    from qgis.PyQt.QtCore import QTimer
+
+    QgsProject.instance().setDirty(False)
+    if iface is not None and iface.mainWindow() is not None:
+        QTimer.singleShot(0, iface.mainWindow().close)
+    else:
+        QTimer.singleShot(0, QgsApplication.instance().quit)
 else:
-    QTimer.singleShot(0, QgsApplication.instance().quit)
+    close_qgis(iface)
 """
 
 
