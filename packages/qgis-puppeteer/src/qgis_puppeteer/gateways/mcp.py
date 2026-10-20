@@ -612,6 +612,28 @@ def _with_wait(params: dict[str, Any], wait: bool) -> dict[str, Any]:
     return params if wait else {**params, "wait": False}
 
 
+def _present_widget_result(result: Any) -> str | CallToolResult:
+    """click / 値の設定の ``success: False`` を tool error にする（#23）。
+
+    これまでは失敗も普通の結果として返していたので、押せていない・入っていない
+    のに成功したように見えた。本文は他の tool error と同じ
+    ``{"error": {"code", "message", "details"}}``。
+    """
+    if isinstance(result, dict) and result.get("success") is False:
+        code = result.get("error")
+        details = {k: v for k, v in result.items() if k not in ("success", "error")}
+        return _error_result(
+            {
+                "error": {
+                    "code": code,
+                    "message": f"widget operation failed: {code}",
+                    "details": details,
+                }
+            }
+        )
+    return _format_result(result)
+
+
 def _present_with_image(result: Any) -> str | CallToolResult:
     """``{"success": True, "path": ...}`` の画像を ImageContent として添える。
 
@@ -1237,8 +1259,8 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
     ) -> str | CallToolResult:
         """UI ウィジェットをクリックする。
 
-        見つからない・複数一致・無効などは error コードで返る
-        （widget_not_found / selector_ambiguous / widget_disabled）。
+        見つからない・複数一致・無効などは tool error で返る
+        （code は widget_not_found / selector_ambiguous / widget_disabled）。
 
         wait=false は処理を QGIS 側に積んですぐ返す（queued: true）。押すと確認
         （QMessageBox.question など）を exec() で出す操作は、確認が閉じるまで
@@ -1251,6 +1273,7 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
             "qgis_click_widget",
             _with_wait({"selector": selector}, wait),
             instance=instance,
+            present=_present_widget_result,
         )
 
     @mcp.tool(
@@ -1261,22 +1284,31 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
         selector: SelectorArg,
         value: Any,
         wait: bool = True,
+        verify: bool = True,
         instance: InstanceArg = None,
     ) -> str | CallToolResult:
         """UI ウィジェットに値を設定する。
 
         value は対象の種類に応じて解釈する（LineEdit は文字列、ComboBox は項目
-        テキスト、CheckBox は真偽値など）。失敗は widget_readonly /
-        combo_item_not_found などの error コードで返る。
+        テキストか番号、CheckBox は true / false、日付は "yyyy-MM-dd"、時刻は
+        "HH:mm:ss"、日時は "yyyy-MM-ddTHH:mm:ss" など）。入れたあとの値を value_after
+        に返す。失敗は tool error で、code は widget_readonly / combo_item_not_found /
+        index_out_of_range / invalid_value など。入った値が頼んだ値と違えば（Qt が
+        黙って丸めた・切り詰めた・無視した）value_not_applied。verify=false で
+        比べない。
 
         wait は qgis_click_widget と同じ（値の変更に結ばれた処理が確認を出す場合用）。
         wait=false でも prior_value は積む前の値を返す。
         """
+        params: dict[str, Any] = {"selector": selector, "value": value}
+        if not verify:
+            params["verify"] = False
         return await _call(
             ctx,
             "qgis_set_widget_value",
-            _with_wait({"selector": selector, "value": value}, wait),
+            _with_wait(params, wait),
             instance=instance,
+            present=_present_widget_result,
         )
 
     # ------------------------------------------------------------

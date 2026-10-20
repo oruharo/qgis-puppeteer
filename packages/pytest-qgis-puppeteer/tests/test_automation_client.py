@@ -26,6 +26,7 @@ from pytest_qgis_puppeteer.automation_client import (
     ModalBlockedError,
     NonSerializableResultError,
     RequestError,
+    WidgetOperationError,
     WorkerCodeError,
     _find_in_snapshot,
     _raise_for_execute_result,
@@ -191,6 +192,35 @@ class TestCommandWiring:
             {"selector": sel, "value": "hello"},
             instance="x",
         )
+
+    def test_a_failed_widget_operation_raises(self) -> None:
+        """#23: success: false を黙って返さず、WidgetOperationError にする。"""
+        failure = {
+            "success": False,
+            "error": "value_not_applied",
+            "requested": 150,
+            "value_after": 99,
+            "widget": {"class": "QSpinBox", "object_name": "n"},
+        }
+        e2e, _inner = _make_client([failure, {"success": False, "error": "widget_disabled"}])
+        with pytest.raises(WidgetOperationError) as info:
+            e2e.set_widget_value({"object_name": "n"}, 150)
+        assert info.value.error == "value_not_applied"
+        assert info.value.widget == {"class": "QSpinBox", "object_name": "n"}
+        assert info.value.result["value_after"] == 99
+        assert "value_not_applied" in str(info.value)
+        with pytest.raises(WidgetOperationError, match="widget_disabled"):
+            e2e.click_widget({"object_name": "b"})
+
+    def test_verify_false_is_sent_only_when_given(self) -> None:
+        e2e, inner = _make_client([{"success": True}, {"success": True}])
+        e2e.set_widget_value({"object_name": "n"}, 1, verify=False)
+        e2e.set_widget_value({"object_name": "n"}, 1)
+        sent = [c.args[1] for c in inner.call.await_args_list]
+        assert sent == [
+            {"selector": {"object_name": "n"}, "value": 1, "verify": False},
+            {"selector": {"object_name": "n"}, "value": 1},
+        ]
 
     def test_wait_false_is_sent_only_when_given(self) -> None:
         """#21: 既定の呼び出しの形は変えず、``wait=False`` のときだけ足す。"""

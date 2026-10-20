@@ -70,6 +70,31 @@ class ModalBlockedError(RuntimeError):
         self.modal = modal
 
 
+class WidgetOperationError(RuntimeError):
+    """``click_widget`` / ``set_widget_value`` が ``success: false`` を返した（#23）。
+
+    これまでは失敗の dict をそのまま返していたので、戻り値を見ないと、押せて
+    いない・入っていないのに気付かずテストが進んだ。``error`` に Worker の
+    error コード（``widget_not_found`` / ``widget_disabled`` / ``index_out_of_range``
+    / ``value_not_applied`` など）、``widget`` に対象の要約、``result`` に
+    戻り値全体を持つ。
+    """
+
+    def __init__(self, command: str, result: dict[str, Any]) -> None:
+        self.command = command
+        self.result = result
+        self.error = result.get("error")
+        self.widget = result.get("widget")
+        details = {k: v for k, v in result.items() if k not in ("success", "error")}
+        super().__init__(f"{command} failed: {self.error} {details}")
+
+
+def _raise_for_widget_result(command: str, result: Any) -> None:
+    """``success: false`` なら :class:`WidgetOperationError` にする。"""
+    if isinstance(result, dict) and result.get("success") is False:
+        raise WidgetOperationError(command, result)
+
+
 @dataclass(frozen=True)
 class ExecResult:
     """``execute_python_detailed`` の戻り値（handler 応答の typed ビュー）。
@@ -660,10 +685,15 @@ class E2EAutomationClient:
         押すと ``exec()`` の確認（``QMessageBox.question`` など）を出すボタン用で、
         確認には dialog handler（``action="button"``）で答える。click の中で出た
         失敗は戻り値ではなく ``get_recent_exceptions()`` に残る。
+
+        Raises:
+            WidgetOperationError: 押せなかった（見つからない・無効など、#23）。
         """
-        return self.call(
+        result = self.call(
             "qgis_click_widget", _with_wait({"selector": selector}, wait), instance=instance
         )
+        _raise_for_widget_result("qgis_click_widget", result)
+        return result
 
     def set_widget_value(
         self,
@@ -671,18 +701,29 @@ class E2EAutomationClient:
         value: Any,
         *,
         wait: bool = True,
+        verify: bool = True,
         instance: str | None = None,
     ) -> dict[str, Any]:
         """`qgis_set_widget_value` を呼ぶ。
 
+        入れたあとの値は ``value_after`` に返る。頼んだ値と違えば（Qt が黙って
+        丸めた・切り詰めた・無視した）失敗になる（#23）。``verify=False`` で
+        比べない。
+
         ``wait=False`` は値を入れる処理を積んですぐ返す（#21）。値の変更に結ばれた
-        処理が ``exec()`` の確認を出す場合用。``prior_value`` は積む前の値。
+        処理が ``exec()`` の確認を出す場合用。``prior_value`` は積む前の値。入れる前に
+        分かる失敗（範囲外の番号など）だけが例外になり、入れたあとの失敗は
+        ``get_recent_exceptions()`` に残る。
+
+        Raises:
+            WidgetOperationError: 入れられなかった、または入った値が違った（#23）。
         """
-        return self.call(
-            "qgis_set_widget_value",
-            _with_wait({"selector": selector, "value": value}, wait),
-            instance=instance,
-        )
+        params: dict[str, Any] = {"selector": selector, "value": value}
+        if not verify:
+            params["verify"] = False
+        result = self.call("qgis_set_widget_value", _with_wait(params, wait), instance=instance)
+        _raise_for_widget_result("qgis_set_widget_value", result)
+        return result
 
     def screenshot(
         self,

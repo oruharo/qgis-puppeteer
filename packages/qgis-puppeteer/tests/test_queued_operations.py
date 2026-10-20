@@ -326,6 +326,24 @@ def test_set_value_wait_false_reads_the_prior_value_and_applies_later(env: dict[
 
 
 def test_set_value_wait_false_records_a_failure_found_while_applying(env: dict[str, Any]) -> None:
+    """入れたあとに分かる失敗（読み直した値が違う、#23）は記録に残る。"""
+    spin = QtWidgets.QSpinBox()
+    spin.setObjectName("count")
+    spin.setRange(0, 9)
+    _add(env, spin)
+
+    result = set_widget_value({"object_name": "count", "root_object_name": "host"}, 50, wait=False)
+
+    assert result["success"] is True
+    assert _pump_until(env["app"], lambda: bool(exception_recorder.get_recent()))
+    record = exception_recorder.get_recent()[0]
+    assert record["type"] == queued.QUEUED_FAILURE_TYPE
+    assert "qgis_set_widget_value" in record["message"]
+    assert "value_not_applied" in record["message"]
+
+
+def test_set_value_wait_false_returns_a_missing_item_at_once(env: dict[str, Any]) -> None:
+    """候補に無い文字は、入れる前に分かるのでその場で返る（#23）。"""
     combo = QtWidgets.QComboBox()
     combo.setObjectName("mode")
     combo.addItems(["a", "b"])
@@ -335,12 +353,8 @@ def test_set_value_wait_false_records_a_failure_found_while_applying(env: dict[s
         {"object_name": "mode", "root_object_name": "host"}, "missing", wait=False
     )
 
-    assert result["success"] is True
-    assert _pump_until(env["app"], lambda: bool(exception_recorder.get_recent()))
-    record = exception_recorder.get_recent()[0]
-    assert record["type"] == queued.QUEUED_FAILURE_TYPE
-    assert "qgis_set_widget_value" in record["message"]
-    assert "combo_item_not_found" in record["message"]
+    assert result["success"] is False
+    assert result["error"] == "combo_item_not_found"
 
 
 def test_set_value_wait_false_still_refuses_what_it_can_check_now(env: dict[str, Any]) -> None:

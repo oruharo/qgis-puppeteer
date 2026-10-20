@@ -284,12 +284,20 @@ def click_widget(selector: dict, iface=None, *, wait: bool = True) -> dict:
     return {"success": True, "widget": summary}
 
 
-def set_widget_value(selector: dict, value: Any, iface=None, *, wait: bool = True) -> dict:
+def set_widget_value(
+    selector: dict, value: Any, iface=None, *, wait: bool = True, verify: bool = True
+) -> dict:
     """Set a value on a widget located by selector.
 
     Handles common input widgets: QLineEdit, QTextEdit/QPlainTextEdit,
     QComboBox, QCheckBox/QRadioButton, QSpinBox/QDoubleSpinBox, date/time
     editors, QTabWidget (selects tab), list/tree/table views (selects row).
+
+    入れる前に確かめられることは確かめて断る（範囲外の番号は
+    ``index_out_of_range``、形の違う値は ``invalid_value``、候補に無い文字は
+    ``*_not_found``）。入れたあとは値を読み直して ``value_after`` に返し、頼んだ値と
+    違えば ``value_not_applied`` で失敗にする（Qt が黙って丸めた・切り詰めた・
+    無視した場合、#23）。
 
     Args:
         selector: See ``_find_widget``.
@@ -297,154 +305,273 @@ def set_widget_value(selector: dict, value: Any, iface=None, *, wait: bool = Tru
         iface: Unused.
         wait: False なら、値を入れる処理を Qt のイベントループに積んですぐ返す
             （#21）。値の変更に結ばれた処理が ``exec()`` の確認を出す場合用。
-            ``prior_value`` は積む前に読む。値を入れる中で出た失敗（候補に無い値
-            など）は、戻り値ではなく recent_exceptions に残る。
+            ``prior_value`` は積む前に読み、入れる前の確認の失敗はその場で返す。
+            入れたあとの失敗（``value_not_applied`` など）は、戻り値ではなく
+            recent_exceptions に残る。
+        verify: False なら、入れたあとに頼んだ値と比べない（``value_after`` は返す）。
+            比べるのは Qt の素のクラスだけで、下位クラス（``QgsFilterLineEdit``
+            など、値を自分で直すことがある）は比べない。
 
     Returns:
-        Dictionary with success flag, prior value, and widget metadata.
-        For a password field (`_is_secret_widget`) ``prior_value`` is None and
-        ``masked`` is True, so that callers that log calls can drop ``value``.
-        ``wait=False`` では ``queued: True`` が付く。
+        Dictionary with success flag, prior value, value after, and widget metadata.
+        For a password field (`_is_secret_widget`) ``prior_value`` and
+        ``value_after`` are None and ``masked`` is True, so that callers that log
+        calls can drop ``value``. ``wait=False`` では ``queued: True`` が付き、
+        ``value_after`` は無い。
     """
     del iface
     widget, error = _resolve_actionable_widget(selector)
     if error is not None:
         return error
-
-    result = _apply_widget_value(widget, value) if wait else _queue_widget_value(widget, value)
-    if _is_secret_widget(widget):
-        if "prior_value" in result:
-            result["prior_value"] = None
-        result["masked"] = True
-    return result
+    if wait:
+        return _apply_widget_value(widget, value, verify=verify)
+    return _queue_widget_value(widget, value, verify=verify)
 
 
-def _apply_widget_value(widget: Any, value: Any) -> dict:
-    """`set_widget_value` の本体：解決済みの widget に値を入れる。"""
-    # readOnly な input への setValue は Qt 側で no-op になる（例: QLineEdit の
-    # setText が値を変えない）が、テスト側からは「成功した」ように見えて
-    # silent な失敗になる。早期に明示エラーで返して原因を見える化する。
-    # `_widget_is_writable` は isReadOnly() を持たない widget には True を返す
-    # ので、QComboBox / QCheckBox 等は影響を受けない。
-    if not _widget_is_writable(widget):
-        return {
-            "success": False,
-            "error": "widget_readonly",
+# 入れたあとに読み直して比べる、Qt の素のクラス（#23）。下位クラスは値を自分で
+# 直すことがある（QgsFilterLineEdit の NULL 表示、QgsSpinBox の特別な値など）ので
+# 比べない
+_VERIFIED_TYPES = frozenset(
+    {
+        QLineEdit,
+        QPlainTextEdit,
+        QTextEdit,
+        QComboBox,
+        QCheckBox,
+        QRadioButton,
+        QSpinBox,
+        QDoubleSpinBox,
+        QDateEdit,
+        QTimeEdit,
+        QDateTimeEdit,
+        QTabWidget,
+        QListWidget,
+        QListView,
+        QTreeView,
+        QTableView,
+        QTreeWidget,
+        QTableWidget,
+    }
+)
+
+_DATE_FORMAT = "yyyy-MM-dd"
+_TIME_FORMAT = "HH:mm:ss"
+_DATETIME_FORMAT = "yyyy-MM-ddTHH:mm:ss"
+
+# チェックボックスに渡せる文字（#23。bool("false") は True なので、文字は決めた
+# ものだけ受ける）
+_BOOL_STRINGS = {"true": True, "false": False}
+
+
+def _apply_widget_value(widget: Any, value: Any, *, verify: bool = True) -> dict:
+    """`set_widget_value` の本体：解決済みの widget に値を入れ、読み直して確かめる。"""
+    prepared = _prepare_widget_value(widget, value)
+    if "error" in prepared:
+        return _masked(widget, prepared)
+    return _masked(widget, _set_and_verify(widget, value, prepared, verify=verify))
+
+
+def _queue_widget_value(widget: Any, value: Any, *, verify: bool = True) -> dict:
+    """``wait=False`` の値の設定：入れる前の確認だけその場で行い、残りを積む。"""
+    prepared = _prepare_widget_value(widget, value)
+    if "error" in prepared:
+        return _masked(widget, prepared)
+    prior = _read_value(widget)
+
+    def run() -> dict:
+        return _masked(widget, _set_and_verify(widget, value, prepared, verify=verify))
+
+    queued.run_later(run, what="qgis_set_widget_value", target=widget)
+    return _masked(
+        widget,
+        {
+            "success": True,
+            "queued": True,
             "widget": _widget_summary(widget),
-        }
+            "prior_value": prior,
+        },
+    )
 
+
+def _set_and_verify(widget: Any, value: Any, prepared: dict, *, verify: bool) -> dict:
+    """``prepared["apply"]`` で値を入れ、読み直して ``prepared["expected"]`` と比べる。"""
+    prior = _read_value(widget)
     try:
-        prior = _read_prior(widget)
-        if isinstance(widget, QLineEdit):
-            widget.setText(str(value))
-        elif isinstance(widget, (QPlainTextEdit, QTextEdit)):
-            widget.setPlainText(str(value))
-        elif isinstance(widget, QComboBox):
-            if isinstance(value, int):
-                widget.setCurrentIndex(value)
-            else:
-                idx = widget.findText(str(value))
-                if idx < 0:
-                    return {
-                        "success": False,
-                        "error": "combo_item_not_found",
-                        "value": value,
-                        "available": [widget.itemText(i) for i in range(widget.count())],
-                    }
-                widget.setCurrentIndex(idx)
-        elif isinstance(widget, (QCheckBox, QRadioButton)):
-            widget.setChecked(bool(value))
-        elif isinstance(widget, QSpinBox):
-            widget.setValue(int(value))
-        elif isinstance(widget, QDoubleSpinBox):
-            widget.setValue(float(value))
-        elif isinstance(widget, QDateTimeEdit):
-            # Also covers QDateEdit / QTimeEdit subclasses.
-            from qgis.PyQt.QtCore import QDate, QDateTime, QTime
-
-            if isinstance(widget, QDateEdit) and not isinstance(widget, QDateTimeEdit):
-                widget.setDate(QDate.fromString(str(value), "yyyy-MM-dd"))
-            elif isinstance(widget, QTimeEdit) and not isinstance(widget, QDateTimeEdit):
-                widget.setTime(QTime.fromString(str(value), "HH:mm:ss"))
-            else:
-                widget.setDateTime(QDateTime.fromString(str(value), "yyyy-MM-ddTHH:mm:ss"))
-        elif isinstance(widget, QTabWidget):
-            if isinstance(value, int):
-                widget.setCurrentIndex(value)
-            else:
-                for i in range(widget.count()):
-                    if widget.tabText(i) == str(value):
-                        widget.setCurrentIndex(i)
-                        break
-                else:
-                    return {
-                        "success": False,
-                        "error": "tab_not_found",
-                        "value": value,
-                        "available": [widget.tabText(i) for i in range(widget.count())],
-                    }
-        elif isinstance(widget, QListWidget):
-            if isinstance(value, int):
-                widget.setCurrentRow(value)
-            else:
-                items = widget.findItems(str(value), 0)
-                if not items:
-                    return {
-                        "success": False,
-                        "error": "list_item_not_found",
-                        "value": value,
-                    }
-                widget.setCurrentItem(items[0])
-        elif isinstance(widget, (QListView, QTreeView, QTableView, QTreeWidget, QTableWidget)):
-            model = widget.model()
-            if model is None:
-                return {"success": False, "error": "no_model"}
-            if not isinstance(value, int):
-                return {"success": False, "error": "row_index_required"}
-            index = model.index(value, 0)
-            widget.setCurrentIndex(index)
-        else:
-            return {
-                "success": False,
-                "error": "unsupported_widget_type",
-                "widget": _widget_summary(widget),
-            }
-    except Exception as exc:
+        prepared["apply"]()
+    except Exception as exc:  # noqa: BLE001 - Qt / 利用側の slot の失敗を返す
         return {
             "success": False,
             "error": "set_value_failed",
             "message": str(exc),
             "widget": _widget_summary(widget),
         }
-
-    return {
+    after = _read_value(widget)
+    result: dict[str, Any] = {
         "success": True,
         "widget": _widget_summary(widget),
         "prior_value": prior,
+        "value_after": after,
+    }
+    if isinstance(widget, QLineEdit) and widget.validator() is not None:
+        # setText は validator を通さない。入った文字が受け付けられる形かを添える
+        result["acceptable_input"] = widget.hasAcceptableInput()
+    expected = prepared["expected"]
+    if verify and type(widget) in _VERIFIED_TYPES and after != expected:
+        return {
+            "success": False,
+            "error": "value_not_applied",
+            "requested": value,
+            "expected": expected,
+            "value_after": after,
+            "prior_value": prior,
+            "widget": _widget_summary(widget),
+        }
+    return result
+
+
+def _masked(widget: Any, result: dict) -> dict:
+    """パスワード欄の結果から、値を外に出さないように伏せる。"""
+    if not _is_secret_widget(widget):
+        return result
+    for key in ("prior_value", "value_after", "expected"):
+        if key in result:
+            result[key] = None
+    result.pop("requested", None)
+    result["masked"] = True
+    return result
+
+
+def _prepare_widget_value(widget: Any, value: Any) -> dict:  # noqa: C901 - widget 種別の列挙
+    """入れる前の確認。``{"apply", "expected"}`` か、失敗の dict を返す。
+
+    ``expected`` は、入ったあとに :func:`_read_value` が返すはずの値。その場で
+    確かめられる失敗（読み取り専用・範囲外の番号・候補に無い文字・形の違う値）は
+    ここで返すので、``wait=False`` でも戻り値で分かる。
+    """
+    # readOnly な input への setValue は Qt 側で no-op になる（例: QLineEdit の
+    # setText が値を変えない）が、テスト側からは「成功した」ように見えて
+    # silent な失敗になる。早期に明示エラーで返して原因を見える化する。
+    # `_widget_is_writable` は isReadOnly() を持たない widget には True を返す
+    # ので、QComboBox / QCheckBox 等は影響を受けない。
+    if not _widget_is_writable(widget):
+        return {"success": False, "error": "widget_readonly", "widget": _widget_summary(widget)}
+
+    if isinstance(widget, QLineEdit):
+        text = str(value)
+        return {"apply": lambda: widget.setText(text), "expected": text}
+    if isinstance(widget, (QPlainTextEdit, QTextEdit)):
+        text = str(value)
+        return {"apply": lambda: widget.setPlainText(text), "expected": text}
+    if isinstance(widget, QComboBox):
+        texts = [widget.itemText(i) for i in range(widget.count())]
+        if _is_index(value):
+            if not 0 <= value < len(texts):
+                return _out_of_range(widget, value, len(texts))
+            idx = value
+        else:
+            # findText の既定は完全一致・大文字小文字を区別
+            idx = widget.findText(str(value))
+            if idx < 0:
+                return _not_found("combo_item_not_found", widget, value, texts)
+        return {"apply": lambda: widget.setCurrentIndex(idx), "expected": texts[idx]}
+    if isinstance(widget, (QCheckBox, QRadioButton)):
+        checked = _as_bool(value)
+        if checked is None:
+            return _invalid(widget, value, "true / false")
+        return {"apply": lambda: widget.setChecked(checked), "expected": checked}
+    if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+        integer = isinstance(widget, QSpinBox)
+        number = _as_number(value, integer=integer)
+        if number is None:
+            return _invalid(widget, value, "int" if integer else "float")
+        return {"apply": lambda: widget.setValue(number), "expected": number}
+    if isinstance(widget, QDateTimeEdit):
+        return _prepare_date_time(widget, value)
+    if isinstance(widget, QTabWidget):
+        texts = [widget.tabText(i) for i in range(widget.count())]
+        if _is_index(value):
+            if not 0 <= value < len(texts):
+                return _out_of_range(widget, value, len(texts))
+            idx = value
+        elif str(value) in texts:
+            idx = texts.index(str(value))
+        else:
+            return _not_found("tab_not_found", widget, value, texts)
+        return {"apply": lambda: widget.setCurrentIndex(idx), "expected": idx}
+    if isinstance(widget, QListWidget):
+        count = widget.count()
+        if _is_index(value):
+            if not 0 <= value < count:
+                return _out_of_range(widget, value, count)
+            row = value
+        else:
+            # 整数の 0 ではなく MatchFlag を渡す（PyQt は 0 を型で弾く、#23）
+            items = widget.findItems(str(value), Qt.MatchExactly)
+            if not items:
+                texts = [widget.item(i).text() for i in range(min(count, _MAX_ITEM_ROWS))]
+                return _not_found("list_item_not_found", widget, value, texts)
+            row = widget.row(items[0])
+        return {"apply": lambda: widget.setCurrentRow(row), "expected": row}
+    if isinstance(widget, (QListView, QTreeView, QTableView)):
+        model = widget.model()
+        if model is None:
+            return {"success": False, "error": "no_model", "widget": _widget_summary(widget)}
+        if not _is_index(value):
+            return {
+                "success": False,
+                "error": "row_index_required",
+                "widget": _widget_summary(widget),
+            }
+        count = model.rowCount()
+        if not 0 <= value < count:
+            return _out_of_range(widget, value, count)
+        row = value
+        return {
+            "apply": lambda: widget.setCurrentIndex(model.index(row, 0)),
+            "expected": row,
+        }
+    return {
+        "success": False,
+        "error": "unsupported_widget_type",
+        "widget": _widget_summary(widget),
     }
 
 
-# `_apply_widget_value` が値を入れられる widget（下位クラスを含む）
-_VALUE_WIDGET_TYPES = (
-    QLineEdit,
-    QPlainTextEdit,
-    QTextEdit,
-    QComboBox,
-    QCheckBox,
-    QRadioButton,
-    QSpinBox,
-    QDoubleSpinBox,
-    QDateTimeEdit,
-    QTabWidget,
-    QListWidget,
-    QListView,
-    QTreeView,
-    QTableView,
-)
+def _prepare_date_time(widget: Any, value: Any) -> dict:
+    """日付・時刻の欄。実際のクラスで形を決める（#23）。
+
+    ``QDateEdit`` / ``QTimeEdit`` は ``QDateTimeEdit`` の下位クラスなので、先に
+    見る（これまでは ``QDateTimeEdit`` の分岐に入り、日時の形で読んで失敗していた）。
+    形の違う文字は、入れる前に ``invalid_value`` で断る（無効な値を入れると Qt は
+    黙って無視する）。
+    """
+    from qgis.PyQt.QtCore import QDate, QDateTime, QTime
+
+    text = str(value)
+    if isinstance(widget, QDateEdit):
+        date = QDate.fromString(text, _DATE_FORMAT)
+        if not date.isValid():
+            return _invalid(widget, value, _DATE_FORMAT)
+        return {"apply": lambda: widget.setDate(date), "expected": date.toString(_DATE_FORMAT)}
+    if isinstance(widget, QTimeEdit):
+        time = QTime.fromString(text, _TIME_FORMAT)
+        if not time.isValid():
+            return _invalid(widget, value, _TIME_FORMAT)
+        return {"apply": lambda: widget.setTime(time), "expected": time.toString(_TIME_FORMAT)}
+    moment = QDateTime.fromString(text, _DATETIME_FORMAT)
+    if not moment.isValid():
+        return _invalid(widget, value, _DATETIME_FORMAT)
+    return {
+        "apply": lambda: widget.setDateTime(moment),
+        "expected": moment.toString(_DATETIME_FORMAT),
+    }
 
 
-def _read_prior(widget: Any) -> Any:
-    """値を入れる前の値（``prior_value``）を読む。対象外の widget は None。"""
+def _read_value(widget: Any) -> Any:
+    """今の値を読む（``prior_value`` / ``value_after``）。対象外の widget は None。
+
+    日付・時刻は、``set_widget_value`` に渡す形と同じ文字で返す。
+    """
     if isinstance(widget, QLineEdit):
         return widget.text()
     if isinstance(widget, (QPlainTextEdit, QTextEdit)):
@@ -455,8 +582,12 @@ def _read_prior(widget: Any) -> Any:
         return widget.isChecked()
     if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
         return widget.value()
+    if isinstance(widget, QDateEdit):
+        return widget.date().toString(_DATE_FORMAT)
+    if isinstance(widget, QTimeEdit):
+        return widget.time().toString(_TIME_FORMAT)
     if isinstance(widget, QDateTimeEdit):
-        return widget.dateTime().toString("yyyy-MM-ddTHH:mm:ss")
+        return widget.dateTime().toString(_DATETIME_FORMAT)
     if isinstance(widget, QTabWidget):
         return widget.currentIndex()
     if isinstance(widget, QListWidget):
@@ -466,29 +597,69 @@ def _read_prior(widget: Any) -> Any:
     return None
 
 
-def _queue_widget_value(widget: Any, value: Any) -> dict:
-    """``wait=False`` の値の設定：その場で確かめられることを確かめてから積む。"""
-    if not _widget_is_writable(widget):
-        return {
-            "success": False,
-            "error": "widget_readonly",
-            "widget": _widget_summary(widget),
-        }
-    if not isinstance(widget, _VALUE_WIDGET_TYPES):
-        return {
-            "success": False,
-            "error": "unsupported_widget_type",
-            "widget": _widget_summary(widget),
-        }
-    prior = _read_prior(widget)
-    queued.run_later(
-        lambda: _apply_widget_value(widget, value), what="qgis_set_widget_value", target=widget
-    )
+def _is_index(value: Any) -> bool:
+    """番号として扱う値か（``True`` / ``False`` は番号にしない）。"""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _as_bool(value: Any) -> bool | None:
+    """チェックの値。真偽値か ``"true"`` / ``"false"``（大文字小文字は問わない）だけ。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return _BOOL_STRINGS.get(value.strip().lower())
+    return None
+
+
+def _as_number(value: Any, *, integer: bool) -> int | float | None:
+    """数の欄の値。数か数の文字だけ受ける（真偽値は受けない）。
+
+    整数の欄に整数でない数を渡すと、``int()`` で黙って切り捨てて、読み直しても
+    一致してしまうので断る。
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        try:
+            value = float(value.strip())
+        except ValueError:
+            return None
+    if not isinstance(value, (int, float)):
+        return None
+    if integer:
+        if isinstance(value, float) and not value.is_integer():
+            return None
+        return int(value)
+    return float(value)
+
+
+def _out_of_range(widget: Any, value: int, count: int) -> dict:
     return {
-        "success": True,
-        "queued": True,
+        "success": False,
+        "error": "index_out_of_range",
+        "value": value,
+        "count": count,
         "widget": _widget_summary(widget),
-        "prior_value": prior,
+    }
+
+
+def _not_found(error: str, widget: Any, value: Any, available: list[str]) -> dict:
+    return {
+        "success": False,
+        "error": error,
+        "value": value,
+        "available": available,
+        "widget": _widget_summary(widget),
+    }
+
+
+def _invalid(widget: Any, value: Any, expected_form: str) -> dict:
+    return {
+        "success": False,
+        "error": "invalid_value",
+        "value": value,
+        "expected_form": expected_form,
+        "widget": _widget_summary(widget),
     }
 
 

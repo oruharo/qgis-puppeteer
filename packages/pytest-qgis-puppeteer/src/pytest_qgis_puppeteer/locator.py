@@ -184,6 +184,8 @@ class Locator:
         ``exec()`` の確認を出すボタンは、確認が閉じるまで click が返らないので、
         dialog handler（``action="button"``）と組み合わせる。他の操作の
         ``wait`` も同じ意味。
+
+        押せなければ ``WidgetOperationError``（#23）。
         """
         self._wait_actionable(timeout_s=timeout_s)
         return self._client.click_widget(
@@ -191,7 +193,12 @@ class Locator:
         )
 
     def fill(
-        self, value: Any, *, timeout_s: float | None = None, wait: bool = True
+        self,
+        value: Any,
+        *,
+        timeout_s: float | None = None,
+        wait: bool = True,
+        verify: bool = True,
     ) -> dict[str, Any]:
         """actionable + editable になるまで待ってから値を流し込む。
 
@@ -202,14 +209,23 @@ class Locator:
         `select` / `check` / `uncheck` との違いは API 呼び出し先ではなく、
         テストの「意図」を読みやすくするためのエイリアス。実体は同じ
         `qgis_set_widget_value`。
+
+        入れたあとに値を読み直し、頼んだ値と違えば（Qt が黙って丸めた・切り詰めた・
+        無視した）``WidgetOperationError``（#23）。``verify=False`` で比べない。
+        ほかの値の設定（``select`` / ``check`` / ``uncheck``）も同じ。
         """
         self._wait_actionable(timeout_s=timeout_s, require_editable=True)
         return self._client.set_widget_value(
-            self._effective_selector(), value, wait=wait, instance=self._instance
+            self._effective_selector(), value, wait=wait, verify=verify, instance=self._instance
         )
 
     def select(
-        self, value: Any, *, timeout_s: float | None = None, wait: bool = True
+        self,
+        value: Any,
+        *,
+        timeout_s: float | None = None,
+        wait: bool = True,
+        verify: bool = True,
     ) -> dict[str, Any]:
         """actionable になるまで待ってから select（ComboBox / Tab / List）。
 
@@ -218,21 +234,28 @@ class Locator:
         """
         self._wait_actionable(timeout_s=timeout_s)
         return self._client.set_widget_value(
-            self._effective_selector(), value, wait=wait, instance=self._instance
+            self._effective_selector(), value, wait=wait, verify=verify, instance=self._instance
         )
 
-    def check(self, *, timeout_s: float | None = None, wait: bool = True) -> dict[str, Any]:
+    def check(
+        self, *, timeout_s: float | None = None, wait: bool = True, verify: bool = True
+    ) -> dict[str, Any]:
         """actionable になるまで待ってから checked=True を設定。"""
         self._wait_actionable(timeout_s=timeout_s)
         return self._client.set_widget_value(
-            self._effective_selector(), True, wait=wait, instance=self._instance
+            self._effective_selector(), True, wait=wait, verify=verify, instance=self._instance
         )
 
-    def uncheck(self, *, timeout_s: float | None = None, wait: bool = True) -> dict[str, Any]:
-        """actionable になるまで待ってから checked=False を設定。"""
+    def uncheck(
+        self, *, timeout_s: float | None = None, wait: bool = True, verify: bool = True
+    ) -> dict[str, Any]:
+        """actionable になるまで待ってから checked=False を設定。
+
+        グループの中で排他のラジオボタンは、外せないので ``WidgetOperationError``。
+        """
         self._wait_actionable(timeout_s=timeout_s)
         return self._client.set_widget_value(
-            self._effective_selector(), False, wait=wait, instance=self._instance
+            self._effective_selector(), False, wait=wait, verify=verify, instance=self._instance
         )
 
     # ------------------------------------------------------------

@@ -63,11 +63,14 @@ class _FakeClient:
         value: Any,
         *,
         wait: bool = True,
+        verify: bool = True,
         instance: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"selector": selector, "value": value}
         if not wait:
             params["wait"] = False
+        if not verify:
+            params["verify"] = False
         self.calls.append(("qgis_set_widget_value", params, instance))
         return self._take("qgis_set_widget_value")
 

@@ -779,9 +779,12 @@ selector ambiguous は即時 abort される。
 
 ### `qgis_click_widget` / `qgis_set_widget_value` のエラーコード
 
-これらの低レベル RPC は失敗時に **例外を投げず** `{"success": false, "error": "<code>"}`
-を返す（呼び出し側で分岐する想定）。Locator (`click()` / `fill()` 等) を使う場合は
-auto-wait で吸収されるか、対応する例外に変換される。
+Worker は失敗時に `{"success": false, "error": "<code>", ...}` を返す。pytest の
+`E2EAutomationClient.click_widget()` / `set_widget_value()` と Locator の操作は、
+これを **`WidgetOperationError`** にする（`error` に code、`widget` に対象の要約、
+`result` に戻り値全体、#23）。MCP の `qgis_click_widget` / `qgis_set_widget_value`
+は tool error にする。これまでは失敗の dict がそのまま返り、戻り値を見ないと
+押せていない・入っていないのに気付かなかった。
 
 | `error` コード | 発生 RPC | 意味 | Locator での扱い |
 |---|---|---|---|
@@ -789,14 +792,45 @@ auto-wait で吸収されるか、対応する例外に変換される。
 | `selector_ambiguous` | 両方 | 複数マッチ + `index` 未指定（strict mode） | poll を続けず即 `SelectorAmbiguousError` |
 | `widget_disabled` | 両方 | `widget.isEnabled() == False` | poll で待機。timeout 内に enabled になれば成功 |
 | `widget_readonly` | set のみ | `isReadOnly() == True` の input への書き込み | `fill()` は `editable=True` を auto-wait |
-| `widget_not_clickable` | click のみ | `QAbstractButton` / `QAction` / `click()` 持ちのいずれでもない | 例外なくそのまま返る |
-| `combo_item_not_found` | set のみ | `QComboBox` に該当テキストが無い | 例外なくそのまま返る |
-| `tab_not_found` | set のみ | `QTabWidget` に該当タブが無い | 例外なくそのまま返る |
-| `list_item_not_found` | set のみ | `QListWidget` に該当アイテムが無い | 例外なくそのまま返る |
-| `unsupported_widget_type` | set のみ | 値設定に未対応の widget クラス | 例外なくそのまま返る |
-| `set_value_failed` | set のみ | setter 内部で例外（`message` フィールドに詳細） | 例外なくそのまま返る |
-| `row_index_required` | set のみ | View 系に int 以外の値を渡した | 例外なくそのまま返る |
-| `no_model` | set のみ | View に model が未設定 | 例外なくそのまま返る |
+| `widget_not_clickable` | click のみ | `QAbstractButton` / `QAction` / `click()` 持ちのいずれでもない | `WidgetOperationError` |
+| `combo_item_not_found` | set のみ | `QComboBox` に該当テキストが無い（`available` に候補） | `WidgetOperationError` |
+| `tab_not_found` | set のみ | `QTabWidget` に該当タブが無い | `WidgetOperationError` |
+| `list_item_not_found` | set のみ | `QListWidget` に該当アイテムが無い（完全一致） | `WidgetOperationError` |
+| `index_out_of_range` | set のみ | 番号が範囲外（`count` に数）。ComboBox / Tab / List / View | `WidgetOperationError` |
+| `invalid_value` | set のみ | 値の形が違う（`expected_form` に形）。下の「値の形」 | `WidgetOperationError` |
+| `value_not_applied` | set のみ | 入れたあとに読み直した値（`value_after`）が頼んだ値と違う。Qt が黙って丸めた・切り詰めた・無視した | `WidgetOperationError` |
+| `unsupported_widget_type` | set のみ | 値設定に未対応の widget クラス | `WidgetOperationError` |
+| `set_value_failed` | set のみ | setter 内部で例外（`message` フィールドに詳細） | `WidgetOperationError` |
+| `row_index_required` | set のみ | View 系に int 以外の値を渡した | `WidgetOperationError` |
+| `no_model` | set のみ | View に model が未設定 | `WidgetOperationError` |
+
+### 値の形と、入ったあとの確かめ（`qgis_set_widget_value`）
+
+| widget | 渡す値 |
+|---|---|
+| `QLineEdit` / `QTextEdit` / `QPlainTextEdit` | 文字 |
+| `QComboBox` / `QTabWidget` / `QListWidget` | 項目の文字（完全一致）か番号 |
+| `QListView` / `QTreeView` / `QTableView` | 行の番号 |
+| `QCheckBox` / `QRadioButton` | `true` / `false`、または文字の `"true"` / `"false"` |
+| `QSpinBox` | 整数（`3.7` は断る。黙って切り捨てるため） |
+| `QDoubleSpinBox` | 数 |
+| `QDateEdit` | `"yyyy-MM-dd"` |
+| `QTimeEdit` | `"HH:mm:ss"` |
+| `QDateTimeEdit` | `"yyyy-MM-ddTHH:mm:ss"` |
+
+- 入れたあとの値を `value_after` に返す（`prior_value` と同じ形）
+- 頼んだ値と違えば `value_not_applied`（範囲外の数・日付が丸められた、`maxLength`
+  で切り詰められた、グループの中で排他のラジオボタンが外れなかった、など）。
+  `verify=False`（Locator の `fill` / `select` / `check` / `uncheck` も受ける）で
+  比べない
+- 比べるのは Qt の素のクラスだけ。下位クラス（`QgsSpinBox` / `QgsFilterLineEdit`
+  など、QGIS の部品の多く）は値を自分で直すことがあるので比べない。
+  `value_after` は返るので、必要ならテストで確かめる
+- `QLineEdit.setText` は validator を通さない。validator がある欄は、入った文字が
+  受け付けられる形か（`acceptable_input`）を添える
+- パスワード欄は `prior_value` / `value_after` / `expected` を伏せる（`masked`）
+- `wait=False` のときは、入れる前に分かる失敗（読み取り専用・範囲外・候補に無い・
+  形の違う値）だけを返す。入れたあとの失敗は `qgis_get_recent_exceptions` に残る
 
 **重要**: `qgis_click_widget` を直接呼ぶとき disabled な widget は **即座に
 `widget_disabled` で返り、`click()` は呼ばれない**。リトライしないので、
@@ -954,7 +988,7 @@ timeout を超えると `WidgetNotActionableError`。strict mode で複数マッ
 - `get_text()` / `get_value()`：`None`
 - click / set_value / actionability の結果に入る widget の要約にも `text` は入らない
 - selector の `text` は、パスワード欄の中身とは一致しない
-- `qgis_set_widget_value` は入れられる。戻り値の `prior_value` は `null`、`masked` は `true`
+- `qgis_set_widget_value` は入れられる。戻り値の `prior_value` / `value_after` は `null`、`masked` は `true`（`value_not_applied` で失敗しても、頼んだ値と入った値は返さない）
 - 入れた値（`value`）は、pytest の `actions.jsonl` と MCP の操作記録では `"***"` に置き換える
 
 中身を確かめる必要があるテストは、`execute_python` で明示的に読む
@@ -2063,6 +2097,23 @@ client は起動時点で identity を取得できず当て推量に頼ってい
 2. `fill()` の前に readOnly を解除する操作を入れる
 3. Locator の `fill()` は auto-wait で `editable=True` を待つので、解除が
    遅れる程度なら timeout 内に通る
+
+### `value_not_applied`
+
+**症状**: `WidgetOperationError`（`error == "value_not_applied"`）。`result` に
+`requested`（頼んだ値）・`expected`（入るはずだった値）・`value_after`（実際の値）。
+
+**原因**: 入れたあとに読み直した値が違う。Qt が黙って変えた（範囲外の数・日付を
+最小・最大に丸めた、`maxLength` で切り詰めた、`QDoubleSpinBox` の桁数で丸めた、
+グループの中で排他のラジオボタンを外さなかった）か、値の変更に結ばれたホストの
+処理が値を戻した。
+
+**対処**:
+
+1. `value_after` を見て、範囲・桁数・`maxLength` を確かめる。頼んだ値が間違いなら
+   テストを直す
+2. ホストが値を直すのが正しい動きなら、`verify=False` を付けて `value_after` を
+   テストで確かめる
 
 ### Hub spawn 失敗
 

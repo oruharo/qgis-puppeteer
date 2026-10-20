@@ -423,6 +423,17 @@ Client 側の操作系 API（`click_widget`, `set_widget_value`, Locator メソ�
 
 いずれか満たさない場合は polling を続け、timeout で `widget_not_actionable` エラー。
 
+> **2026-10-21 注（#23）**: actionable になったあとの操作そのものの失敗も、黙って
+> 返さないようにした。`click_widget` / `set_widget_value`（と Locator の操作）は
+> `success: false` を `WidgetOperationError` にし、MCP は tool error にする。逃げ道の
+> 引数は付けない（失敗を見落とさないことが目的なので、確かめたいテストは例外を
+> 捕まえる）。値の設定は、入れる前に範囲外の番号（`index_out_of_range`）と形の違う値
+> （`invalid_value`）を断り、入れたあとに読み直して頼んだ値と違えば
+> `value_not_applied` にする。Qt は範囲外の数を丸め、長すぎる文字を切り詰め、無効な
+> 日付を無視して、どれも成功に見えていた。読み直して比べるのは Qt の素のクラス
+> だけで、下位クラス（QGIS の `QgsSpinBox` / `QgsFilterLineEdit` など）は値を自分で
+> 直すことがあるので比べない（`value_after` は返す）。`verify=False` で比べない。
+
 ##### Polling 戦略と RTT の考慮
 
 ADR-0001 §Performance の実測値では定常コマンドの RTT が 10〜140ms、最大 1170ms（list_layers の外れ値）に達します。Client 側で 4 項目を個別にコマンド発行して poll すると 1 操作が数秒〜数十秒に膨らむため、以下の戦略を採ります:

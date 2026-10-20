@@ -281,6 +281,35 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed (breaking)
 
+- **A click or value change that fails raises, and a value Qt changed on the
+  way in is a failure** (#23). `E2EAutomationClient.click_widget()` /
+  `set_widget_value()` and the Locator's `click` / `fill` / `select` /
+  `check` / `uncheck` returned a `success: false` dict, so a test went on
+  without noticing nothing was clicked or set; they now raise
+  `WidgetOperationError` (`error`, `widget`, `result`), and the MCP tools
+  return a tool error. There is deliberately no switch to get the dict back;
+  a test that expects a failure catches the exception. `qgis_set_widget_value`
+  also refuses what Qt would silently drop: an index out of range
+  (`index_out_of_range`, for combo boxes, tabs, lists and views), a value of
+  the wrong form (`invalid_value`: a date or time not in the editor's form, a
+  check box value other than true / false or `"true"` / `"false"`, since
+  `bool("false")` is true, or a non-integral number for a `QSpinBox`). After
+  setting, it reads the value back, returns it as `value_after`, and fails
+  with `value_not_applied` when it differs (a clamped number or date, a text
+  cut by `maxLength`, an exclusive radio button that stays checked); only
+  plain Qt classes are compared, since subclasses such as QGIS's
+  `QgsSpinBox` may adjust the value themselves, and `verify=False` skips the
+  comparison. With `wait=False`, only the checks made before setting come
+  back; the rest is recorded in recent_exceptions. A line edit with a
+  validator also reports `acceptable_input`, because `setText` bypasses the
+  validator. Also fixed: choosing a `QListWidget` item by text always failed
+  (`findItems` got the integer 0 instead of a match flag), and `QDateEdit` /
+  `QTimeEdit` were read in the date-time form and ignored their own;
+  `prior_value` for them is now `"yyyy-MM-dd"` / `"HH:mm:ss"`. Checked on
+  QGIS 3.34: a list item chosen by text, a clamped `QSpinBox` and a truncated
+  `QLineEdit` raised with `value_after`, `"false"` unchecked a check box, a
+  `QDateEdit` took `"2026-10-20"`, and a `QgsSpinBox` was not compared.
+
 - **The QGIS plugin is now a self-contained `qgis_puppeteer` folder, named
   "QGIS Puppeteer".** The plugin folder used to be `plugins/qgis_puppet`
   (display name "QGIS Puppet") and required `qgis-puppeteer` to be

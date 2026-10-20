@@ -695,6 +695,74 @@ class TestMcpGatewayRenderMap:
         assert "unknown crs" in _extract_text(result)
 
 
+class TestMcpGatewayWidgetFailures:
+    """#23: click / 値の設定の success: false は tool error になる。"""
+
+    @staticmethod
+    def _call(
+        tool: str, result: dict[str, Any], **args: Any
+    ) -> tuple[CallToolResult, dict[str, Any]]:
+        seen: dict[str, Any] = {}
+
+        async def run() -> CallToolResult:
+            async with fake_hub_server() as (_hub, hub_url):
+                worker = _FakeWorker(hub_url, label="a", pid=1)
+
+                def responder(req: dict[str, Any]) -> dict[str, Any]:
+                    seen.update(req["params"])
+                    return {"type": "response", "id": req["id"], "ok": True, "result": result}
+
+                worker.responder = responder
+                await worker.start()
+                await worker.ready.wait()
+                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                async with Client(gateway, raise_exceptions=True) as client:
+                    return await client.call_tool(tool, args)
+
+        return _run(run()), seen
+
+    def test_a_value_not_applied_is_a_tool_error(self) -> None:
+        result, seen = self._call(
+            "qgis_set_widget_value",
+            {"success": False, "error": "value_not_applied", "value_after": 99},
+            selector={"object_name": "n"},
+            value=150,
+            verify=True,
+        )
+        assert result.is_error
+        payload = json.loads(_extract_text(result))
+        assert payload["error"]["code"] == "value_not_applied"
+        assert payload["error"]["details"] == {"value_after": 99}
+        assert seen == {"selector": {"object_name": "n"}, "value": 150}
+
+    def test_verify_false_is_passed(self) -> None:
+        result, seen = self._call(
+            "qgis_set_widget_value",
+            {"success": True, "value_after": 99},
+            selector={"object_name": "n"},
+            value=150,
+            verify=False,
+        )
+        assert not result.is_error
+        assert seen["verify"] is False
+
+    def test_a_failed_click_is_a_tool_error(self) -> None:
+        result, _ = self._call(
+            "qgis_click_widget",
+            {"success": False, "error": "widget_disabled"},
+            selector={"object_name": "b"},
+        )
+        assert result.is_error
+        assert json.loads(_extract_text(result))["error"]["code"] == "widget_disabled"
+
+    def test_success_is_plain_text(self) -> None:
+        result, _ = self._call(
+            "qgis_click_widget", {"success": True}, selector={"object_name": "b"}
+        )
+        assert not result.is_error
+        assert json.loads(_extract_text(result)) == {"success": True}
+
+
 class TestMcpGatewayWorkerRecords:
     """例外・ログメッセージの照会ツールが Worker のコマンドにそのまま渡ること。"""
 

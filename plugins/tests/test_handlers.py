@@ -390,14 +390,16 @@ class TestUiHandlers:
         handlers["qgis_set_widget_value"]({"selector": selector, "value": "hello"})
         args, kwargs = fake_tools["ui"].set_widget_value.calls[0]
         assert args == (selector, "hello", None)
-        assert kwargs == {"wait": True}
+        assert kwargs == {"wait": True, "verify": True}
 
     def test_set_widget_value_forwards_wait(self, fake_tools: dict[str, Any]) -> None:
         build_handlers = _import_build_handlers()
         handlers = build_handlers(None)
-        handlers["qgis_set_widget_value"]({"selector": {"name": "x"}, "value": 1, "wait": False})
+        handlers["qgis_set_widget_value"](
+            {"selector": {"name": "x"}, "value": 1, "wait": False, "verify": False}
+        )
         _, kwargs = fake_tools["ui"].set_widget_value.calls[0]
-        assert kwargs == {"wait": False}
+        assert kwargs == {"wait": False, "verify": False}
 
     def test_check_actionability_forwards_selector_and_iface(
         self, fake_tools: dict[str, Any]
