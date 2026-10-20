@@ -1361,6 +1361,48 @@ setup でエラーになる（黙って判定が無効になることはない�
 失敗時の diagnostic bundle には、判定の有無に関わらず `qgis_messages.jsonl`
 （記録されているメッセージ全部）が入る。
 
+### QGIS の起動の間のメッセージ
+
+テスト本体の直前に記録を消去するので、QGIS の起動からそこまでに出たもの
+（プロジェクトの読み込みの失敗、プラグインの初期化のエラー、起動の間の処理の
+ログ）は、上の判定に入らない。そこで、その QGIS を初めて使うテストの `qgis`
+fixture の準備で、それまでの分を「起動の間のメッセージ」として取っておく。
+session の QGIS、起こし直した QGIS、`fresh_qgis` の QGIS のそれぞれで 1 回。
+
+- **読む**：fixture `qgis_startup_messages`（そのテストが動く QGIS の分。
+  `get_recent_messages()` と同じ形）。session の QGIS の分は、`qgis_process`
+  fixture の値（`SessionQgis`）の `startup_messages` にも入る
+
+  ```python
+  def test_auto_login_happened(qgis_startup_messages):
+      assert any(m["message"] == "Logged in automatically" for m in qgis_startup_messages)
+  ```
+
+- **判定**：`qgis_fail_on_message_level` が有効なら、同じレベルと ini の
+  `qgis_message_allowlist` で判定する。引っかかったものがあっても、**どのテストも
+  落とさない**（そのテストのせいではないため）。代わりに、pytest の最後のまとめに
+  「QGIS startup messages」の節を出して、テストが全部通っていても**終了コードを
+  失敗（1）にする**。CI はここで落ちる。マーカー（`qgis_allow_message`）は効かない
+  （どのテストのものでもないため）。外すなら ini の許可リストに書く
+- 起動の間の分には、QGIS の起動が終わった後、最初のテストの準備までに出たものも
+  入る（起動の後もプロジェクトの読み込みが続くことがあるため）
+- QGIS Puppeteer プラグインが読み込まれる前に出たメッセージは入らない
+  （プラグインは名前順に読まれる）
+- `qgis` を使わず `automation_client` だけを使うテストでは取らない。dev モードでは空
+
+自分で取ったメッセージを、テストと同じ規則で判定したいときは
+`unexpected_messages` を使う:
+
+```python
+from pytest_qgis_puppeteer import unexpected_messages
+
+bad = unexpected_messages(messages, request.config)                  # ini のレベルと許可リスト
+bad = unexpected_messages(messages, request.config, item=request.node, min_level="warning")
+```
+
+`item` を渡すとそのテストのマーカーも効く。`min_level` を省くと ini の
+`qgis_fail_on_message_level` を使い、それも無ければ `ValueError`。
+
 ### 手動 API / MCP
 
 ```python

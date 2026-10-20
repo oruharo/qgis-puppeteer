@@ -24,6 +24,7 @@ from qgis_puppeteer.client import (
 )
 
 from pytest_qgis_puppeteer._expect import expect
+from pytest_qgis_puppeteer._message_check import unexpected_messages
 from pytest_qgis_puppeteer.automation_client import E2EAutomationClient, ExecResult
 from pytest_qgis_puppeteer.locator import (
     Locator,
@@ -52,5 +53,6 @@ __all__ = [
     "WorkerRegisterTimeout",
     "expect",
     "spawn_qgis",
+    "unexpected_messages",
     "spawn_qgis_fixture",
 ]

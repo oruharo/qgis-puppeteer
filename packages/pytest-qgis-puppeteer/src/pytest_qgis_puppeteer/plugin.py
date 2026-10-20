@@ -310,6 +310,12 @@ _CONFIG_ATTR_PRIOR_TEST_FAILED = "_qgis_puppeteer_prior_test_failed"
 # #11: ``qgis_auto_fresh_after_failure = session`` のとき「session の QGIS を起こし
 # 直す」flag。次に ``qgis`` を使うテストの setup で読まれ、起こし直したらクリアされる。
 _CONFIG_ATTR_RESTART_SESSION_QGIS = "_qgis_puppeteer_restart_session_qgis"
+# #15: QGIS の起動の間に出たメッセージ（QGIS の key → メッセージ）と、判定に
+# 引っかかったもの（[{"qgis": 説明, "level": ..., "messages": [...]}]）。最後のまとめに出す
+_CONFIG_ATTR_STARTUP_MESSAGES = "_qgis_puppeteer_startup_messages"
+_CONFIG_ATTR_STARTUP_PROBLEMS = "_qgis_puppeteer_startup_problems"
+# #15: そのテストが動く QGIS の key（qgis_startup_messages fixture が読む）
+_STARTUP_KEY = pytest.StashKey[str]()
 # ADR-0003 Phase 3: 子側で test outcomes を集計するための buffer
 # (counts dict + failed_tests list + start time)。``pytest_sessionfinish`` で
 # ``_env_stats.json`` に書き出される。
@@ -658,6 +664,15 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     del exitstatus  # session.exitstatus を直接書き換えるので未使用
     config = session.config
     meta_envs: tuple[str, ...] | None = getattr(config, _CONFIG_ATTR_META_ENVS, None)
+
+    # #15: QGIS の起動の間に判定に引っかかったメッセージがあれば、テストが全部
+    # 通っていても session を失敗にする（中身は pytest_terminal_summary が出す）
+    if (
+        not meta_envs
+        and getattr(config, _CONFIG_ATTR_STARTUP_PROBLEMS, None)
+        and session.exitstatus == pytest.ExitCode.OK
+    ):
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
     # Phase 3: child 側 (single-env / meta-child) で _env_stats.json を書き出す
     if not meta_envs:
@@ -1490,12 +1505,15 @@ class SessionQgis:
 
     Attributes:
         worker: 今の session の QGIS。止めている間は None。
+        startup_messages: 今の QGIS の起動の間に出た QgsMessageLog のメッセージ
+            （#15）。最初に ``qgis`` fixture を使うテストの準備で入る。それまでは None。
     """
 
     def __init__(self, spawn: Callable[[], contextlib.AbstractContextManager[Any]]) -> None:
         self._spawn = spawn
         self._stack: contextlib.ExitStack | None = None
         self.worker: Any = None
+        self.startup_messages: list[dict[str, Any]] | None = None
 
     def start(self) -> None:
         """QGIS を起こし、コマンドを処理できるまで待つ。"""
@@ -1503,6 +1521,7 @@ class SessionQgis:
             return
         stack = contextlib.ExitStack()
         self.worker = stack.enter_context(self._spawn())
+        self.startup_messages = None
         self._stack = stack
 
     def stop(self) -> None:
@@ -1627,6 +1646,18 @@ def qgis(
             _restart_session_qgis(pytestconfig, qgis_process, request.node.nodeid)
     marker = request.node.get_closest_marker("fresh_qgis")
     if marker is None:
+        worker = getattr(qgis_process, "worker", None)
+        key = getattr(worker, "instance_id", None) or "session"
+        messages = _capture_startup_messages(
+            pytestconfig,
+            automation_client,
+            key=key,
+            description=f"session QGIS ({key})",
+            instance=None,
+        )
+        if isinstance(qgis_process, SessionQgis) and qgis_process.startup_messages is None:
+            qgis_process.startup_messages = messages
+        request.node.stash[_STARTUP_KEY] = key
         yield automation_client
         return
 
@@ -1688,11 +1719,112 @@ def qgis(
             worker.pid,
         )
         automation_client.use_instance(worker.instance_id)
+        _capture_startup_messages(
+            pytestconfig,
+            automation_client,
+            key=worker.instance_id,
+            description=f"fresh QGIS for {request.node.nodeid} (label={worker.label})",
+            instance=worker.instance_id,
+        )
+        request.node.stash[_STARTUP_KEY] = worker.instance_id
         try:
             yield automation_client
         finally:
             automation_client.use_instance(saved_default)
             active_fresh.pop(request.node.nodeid, None)
+
+
+def _capture_startup_messages(
+    config: pytest.Config,
+    client: E2EAutomationClient,
+    *,
+    key: str,
+    description: str,
+    instance: str | None,
+) -> list[dict[str, Any]]:
+    """その QGIS の起動の間に出たメッセージを、QGIS ごとに 1 回だけ取っておく（#15）。
+
+    テスト本体の直前に判定のため記録を空にするので、起動からそこまでの分は
+    ここで取らないと残らない。起動が終わった時点ではなく、その QGIS を初めて
+    使うテストの準備で取るのは、起動の後もプロジェクトの読み込みが続くことが
+    あるため。``qgis_fail_on_message_level`` が有効なら、同じレベルと ini の
+    許可リストで判定し、引っかかったものを最後のまとめ用に積む。
+    """
+    store: dict[str, list[dict[str, Any]]] | None = getattr(
+        config, _CONFIG_ATTR_STARTUP_MESSAGES, None
+    )
+    if store is None:
+        store = {}
+        setattr(config, _CONFIG_ATTR_STARTUP_MESSAGES, store)
+    if key in store:
+        return store[key]
+    if _is_dev_mode():
+        # 既に動いている QGIS の「起動の間」はもう過ぎている
+        store[key] = []
+        return store[key]
+    with client.unrecorded():
+        try:
+            messages = client.get_recent_messages(instance=instance)
+        except Exception as exc:  # noqa: BLE001 - 取れなくてもテストは進める
+            logger.warning(
+                "Could not read the startup messages of the %s: %s",
+                description,
+                exc,
+                exc_info=True,
+            )
+            messages = []
+    store[key] = messages
+    level = _resolve_fail_on_message_level(config)
+    if level is not None:
+        bad = _message_check.unexpected_messages(messages, config, min_level=level)
+        if bad:
+            problems: list[dict[str, Any]] = getattr(config, _CONFIG_ATTR_STARTUP_PROBLEMS, [])
+            problems.append({"qgis": description, "level": level, "messages": bad})
+            setattr(config, _CONFIG_ATTR_STARTUP_PROBLEMS, problems)
+            logger.warning(
+                "%d message(s) at level %s or above while the %s started; "
+                "the session will fail (see the summary)",
+                len(bad),
+                level,
+                description,
+            )
+    return messages
+
+
+@pytest.fixture
+def qgis_startup_messages(
+    request: pytest.FixtureRequest, qgis: E2EAutomationClient
+) -> list[dict[str, Any]]:
+    """そのテストが動く QGIS の、起動の間に出た QgsMessageLog のメッセージ（#15）。
+
+    起動から、その QGIS を初めて使うテストの準備までに出たもの（古い順、
+    ``get_recent_messages()`` と同じ形）。起動の間の処理が出したログを確かめる
+    ときに使う。dev モードでは空。QGIS Puppeteer プラグインが読み込まれる前の
+    メッセージは入らない。
+    """
+    del qgis
+    key = request.node.stash.get(_STARTUP_KEY, None)
+    store = getattr(request.config, _CONFIG_ATTR_STARTUP_MESSAGES, None) or {}
+    return list(store.get(key, []))
+
+
+def pytest_terminal_summary(terminalreporter: Any, exitstatus: int, config: pytest.Config) -> None:
+    """QGIS の起動の間に判定に引っかかったメッセージを、最後のまとめに出す（#15）。"""
+    del exitstatus
+    problems = getattr(config, _CONFIG_ATTR_STARTUP_PROBLEMS, None)
+    if not problems:
+        return
+    terminalreporter.section("QGIS startup messages", sep="=", red=True, bold=True)
+    for problem in problems:
+        terminalreporter.line(problem["qgis"] + ":")
+        text = _message_check.format_messages(
+            problem["messages"], problem["level"], phase="while QGIS started", markers=False
+        )
+        for line in text.splitlines():
+            terminalreporter.line("  " + line)
+    terminalreporter.line(
+        "No test failed because of these, but the session exit status is set to failed."
+    )
 
 
 def _fresh_label(item: pytest.Item) -> str:

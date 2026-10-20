@@ -304,3 +304,159 @@ class TestSetupValidatesMarkers:
         item = _Item(LEVEL, _Client(), [_Marker()])
         with pytest.raises(ValueError, match="needs a pattern"):
             plugin.pytest_runtest_setup(item)  # type: ignore[arg-type]
+
+
+# ============================================================
+# 起動の間のメッセージ（#15）
+# ============================================================
+
+WARNING = {"seq": 2, "level": "warning", "tag": "Startup", "message": "slow", "source": "log"}
+INFO = {"seq": 3, "level": "info", "tag": "MyPlugin", "message": "logged in", "source": "log"}
+SUCCESS = {"seq": 4, "level": "success", "tag": "MyPlugin", "message": "ok", "source": "log"}
+
+
+class TestUnexpectedMessages:
+    """公開の窓口 ``unexpected_messages``：テストと同じ規則で判定する。"""
+
+    def test_uses_the_ini_level_and_allowlist(self) -> None:
+        config = _Config(
+            {"qgis_fail_on_message_level": "warning", "qgis_message_allowlist": ["slow"]}
+        )
+        bad = mc.unexpected_messages([CRITICAL, WARNING, INFO], config)
+        assert bad == [CRITICAL]
+
+    def test_min_level_overrides_the_ini(self) -> None:
+        config = _Config({})
+        assert mc.unexpected_messages(
+            [CRITICAL, WARNING, INFO, SUCCESS], config, min_level="info"
+        ) == [
+            CRITICAL,
+            WARNING,
+            INFO,
+            SUCCESS,
+        ]
+
+    def test_success_ranks_with_info_not_above_critical(self) -> None:
+        assert mc.at_or_above([SUCCESS, CRITICAL], "warning") == [CRITICAL]
+
+    def test_markers_of_the_item_apply(self) -> None:
+        item = _Item(LEVEL, _Client(), [_Marker("boom")])
+        assert mc.unexpected_messages([CRITICAL], item.config, item=item) == []
+
+    def test_without_a_level_it_refuses(self) -> None:
+        with pytest.raises(ValueError, match="min_level"):
+            mc.unexpected_messages([CRITICAL], _Config({}))
+
+    def test_is_public(self) -> None:
+        import pytest_qgis_puppeteer
+
+        assert pytest_qgis_puppeteer.unexpected_messages is mc.unexpected_messages
+
+
+class _StartupClient(_Client):
+    def __init__(self, messages: list[dict[str, Any]] | None = None, *, fail: bool = False) -> None:
+        super().__init__(messages)
+        self.fail = fail
+        self.instances: list[str | None] = []
+        self.unrecorded_calls = 0
+
+    def get_recent_messages(  # type: ignore[override]
+        self, *, min_level: str | None = None, instance: str | None = None
+    ) -> list[dict[str, Any]]:
+        self.instances.append(instance)
+        if self.fail:
+            raise RuntimeError("old worker")
+        return super().get_recent_messages(min_level=min_level)
+
+    def unrecorded(self) -> Any:
+        import contextlib
+
+        self.unrecorded_calls += 1
+        return contextlib.nullcontext()
+
+
+class TestCaptureStartupMessages:
+    @pytest.fixture(autouse=True)
+    def _not_dev(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(plugin.ENV_DEV_MODE, raising=False)
+
+    def _capture(self, config: _Config, client: _StartupClient, key: str = "w-1") -> Any:
+        return plugin._capture_startup_messages(
+            config,  # type: ignore[arg-type]
+            client,  # type: ignore[arg-type]
+            key=key,
+            description=f"session QGIS ({key})",
+            instance=None,
+        )
+
+    def test_read_once_per_qgis_and_left_out_of_the_timeline(self) -> None:
+        config = _Config({})
+        client = _StartupClient([INFO])
+        assert self._capture(config, client) == [INFO]
+        assert self._capture(config, client) == [INFO]
+        assert client.instances == [None]  # 2 回目は読まない
+        assert client.unrecorded_calls == 1
+        self._capture(config, client, key="w-2")  # 起こし直した QGIS は別
+        assert client.instances == [None, None]
+
+    def test_problems_are_kept_for_the_summary_when_the_check_is_on(self) -> None:
+        config = _Config(
+            {"qgis_fail_on_message_level": "warning", "qgis_message_allowlist": ["slow"]}
+        )
+        self._capture(config, _StartupClient([CRITICAL, WARNING, INFO]))
+        [problem] = getattr(config, plugin._CONFIG_ATTR_STARTUP_PROBLEMS)
+        assert problem["messages"] == [CRITICAL]
+        assert problem["level"] == "warning"
+
+    def test_nothing_is_judged_when_the_check_is_off(self) -> None:
+        config = _Config({})
+        self._capture(config, _StartupClient([CRITICAL]))
+        assert getattr(config, plugin._CONFIG_ATTR_STARTUP_PROBLEMS, None) is None
+
+    def test_a_failed_read_does_not_stop_the_test(self, caplog: pytest.LogCaptureFixture) -> None:
+        config = _Config(LEVEL)
+        assert self._capture(config, _StartupClient(fail=True)) == []
+        assert "Could not read the startup messages" in caplog.text
+
+    def test_dev_mode_has_no_startup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(plugin.ENV_DEV_MODE, "1")
+        client = _StartupClient([CRITICAL])
+        assert self._capture(_Config(LEVEL), client) == []
+        assert client.instances == []
+
+
+pytest_plugins = ["pytester"]
+
+
+def test_startup_problems_fail_the_session_without_failing_a_test(
+    pytester: pytest.Pytester,
+) -> None:
+    """A の形：どのテストも落とさず、最後のまとめに出して終了コードを失敗にする。"""
+    pytester.makeconftest(
+        f"""
+        def pytest_configure(config):
+            setattr(config, {plugin._CONFIG_ATTR_STARTUP_PROBLEMS!r}, [
+                {{"qgis": "session QGIS (w-1)", "level": "warning",
+                  "messages": [{{"level": "critical", "tag": "Proj", "message": "could not open",
+                                 "ts": "t", "source": "log"}}]}}
+            ])
+        """
+    )
+    pytester.makeini("[pytest]\nqgis_fail_on_uncaught_exception = false\n")
+    pytester.makepyfile("def test_ok():\n    pass\n")
+    result = pytester.runpytest("-p", "no:cacheprovider")
+    result.assert_outcomes(passed=1)
+    assert result.ret == pytest.ExitCode.TESTS_FAILED
+    result.stdout.fnmatch_lines(
+        ["*QGIS startup messages*", "*session QGIS (w-1)*", "*could not open*", "*allowlist ini.*"]
+    )
+    # 起動の間の分にマーカーは効かないので、マーカーは案内しない
+    assert "qgis_allow_message" not in result.stdout.str()
+
+
+def test_no_startup_problems_keep_the_session_green(pytester: pytest.Pytester) -> None:
+    pytester.makeini("[pytest]\nqgis_fail_on_uncaught_exception = false\n")
+    pytester.makepyfile("def test_ok():\n    pass\n")
+    result = pytester.runpytest("-p", "no:cacheprovider")
+    assert result.ret == pytest.ExitCode.OK
+    assert "QGIS startup messages" not in result.stdout.str()

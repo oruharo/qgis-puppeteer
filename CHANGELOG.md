@@ -8,6 +8,23 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Messages logged while QGIS starts can be read and checked** (#15). The
+  message check clears the Worker's record right before each test body, so
+  what QGIS logged from startup until then (a project that failed to load, a
+  plugin's init error, a startup step's own log) was never judged and could
+  not be read. The first test that uses `qgis` on a QGIS now keeps those
+  messages first — once per QGIS: the session one, a restarted one, each
+  `fresh_qgis` one — and the new fixture `qgis_startup_messages` returns them
+  (`SessionQgis.startup_messages` too). With `qgis_fail_on_message_level` set,
+  they are checked against the same level and the ini allowlist; offending
+  ones fail no test (they are no test's fault) but are listed in a
+  "QGIS startup messages" section of the terminal summary, and the session
+  exit status becomes failed. Markers do not apply to them. The check is
+  public as `pytest_qgis_puppeteer.unexpected_messages(messages, config, *,
+  item=None, min_level=None)`, for conftests that read messages themselves.
+  Messages logged before the QGIS Puppeteer plugin loaded are still out of
+  reach. Checked on QGIS 3.34 with a plugin that logs at startup.
+
 - **`qgis_snapshot_ui` returns what lists, tables and trees show** (#12). It
   reported that a `QListWidget` or `QTableWidget` was there but not its
   contents, so tests read cells through `execute_python`. Item views now carry
