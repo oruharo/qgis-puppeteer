@@ -210,6 +210,11 @@ class E2EAutomationClient:
         client, loop = self._require_connected()
         return loop.run_until_complete(client.list_instances())
 
+    def abandon_launch(self, launch_token: str) -> None:
+        """この launch_token で起こした QGIS をもう待たない、と Hub に知らせる（#16）。"""
+        client, loop = self._require_connected()
+        loop.run_until_complete(client.abandon_launch(launch_token))
+
     def list_rejected(self) -> list[RejectedRegistration]:
         """Hub が断った Worker の登録を返す（#13）。旧 Hub では常に空。"""
         client, loop = self._require_connected()

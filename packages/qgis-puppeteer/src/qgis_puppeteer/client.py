@@ -36,6 +36,7 @@ import websockets
 from websockets.asyncio.client import ClientConnection, connect
 
 from qgis_puppeteer.protocol import (
+    AbandonLaunch,
     Error,
     ErrorCode,
     InstanceInfo,
@@ -441,6 +442,16 @@ class AutomationClient:
                 )
             )
         return list(msg.instances)
+
+    async def abandon_launch(self, launch_token: str) -> None:
+        """この launch_token で起こした QGIS をもう待たない、と Hub に知らせる（#16）。
+
+        Hub はこの token の登録を以後断り、その QGIS は自分で閉じる。応答は
+        待たない（古い Hub は読めずにエラーを返すが、知らない id の返事として
+        捨てられる）。
+        """
+        self._require_connected()
+        await self._send(AbandonLaunch(id=self._new_id(), launch_token=launch_token))
 
     async def list_rejected(self) -> list[RejectedRegistration]:
         """Hub が断った Worker の登録を返す（#13、`RejectedRegistration`）。

@@ -206,8 +206,10 @@ def spawn_qgis(
         raise
     except WorkerRegisterTimeout:
         # register 失敗時はサブプロセスを片付けてから raise（dangling 防止）。
-        # ランチャー経由だと proc はもう居ないので、Hub に QGIS が見えていれば
-        # そちらを止める（#16）
+        # まず Hub に「もう待たない」と知らせ、これから登録してくる QGIS には
+        # 自分で閉じてもらう。Hub に QGIS がもう見えていれば、そちらはここで
+        # 止める（#16）。ランチャー経由だと proc はもう居ない
+        _abandon_launch(automation_client, launch_token)
         _stop_late_worker(automation_client, launch_token=launch_token)
         _terminate_worker(proc, graceful_timeout_s=graceful_shutdown_timeout_s)
         _join_drain_threads(drain_threads, timeout_s=2.0)
@@ -400,6 +402,17 @@ def _check_worker_label(label: str | None) -> None:
             f"({result.reason}). A label is 1-{LABEL_MAX_LENGTH} characters, "
             "not digits only, and does not start with '@'."
         )
+
+
+def _abandon_launch(automation_client: E2EAutomationClient, launch_token: str) -> None:
+    """この token の QGIS をもう待たない、と Hub に知らせる（#16、best-effort）。"""
+    abandon = getattr(automation_client, "abandon_launch", None)
+    if abandon is None:
+        return
+    try:
+        abandon(launch_token)
+    except Exception:  # noqa: BLE001 - 片付けは best-effort
+        logger.warning("Could not tell the Hub to abandon %s", launch_token, exc_info=True)
 
 
 def _stop_late_worker(

@@ -19,7 +19,7 @@ import logging
 import os
 import sys
 import tempfile
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -371,3 +371,27 @@ def discover_extensions(
                 continue
             registered.append((name, command))
     return registered
+
+
+# ==============================================================
+# 登録を断られた QGIS（#16）
+# ==============================================================
+
+# 自分で閉じ始めてから、閉じきれずに自分を強制終了するまでの時間。閉じる手順
+# （app_tools.close_qgis）は約 10 秒で諦めるので、その少し後
+CLOSE_UNWANTED_QGIS_EXIT_MS = 12_000
+
+
+def should_close_after_register_failure(instance_id: str | None, env: Mapping[str, str]) -> bool:
+    """登録を断られたこの QGIS を、自分で閉じるべきか（#16）。
+
+    pytest-qgis-puppeteer が起こした QGIS（``QPUPPETEER_LAUNCH_TOKEN`` が付く）は、
+    登録されなければ誰にも使われない。起こした側はもう待っていない
+    （``launch_abandoned``）か、断られたことを知って pid で止めに来る。どちらでも
+    残しておく理由が無いので、理由を問わず閉じる。
+
+    ただし、一度でも登録できた QGIS は閉じない。つなぎ直しを断られた
+    （Hub が起動し直した後など）だけで、テストの途中の QGIS を閉じないため。
+    人が普通に起こした QGIS は token を持たないので、閉じない。
+    """
+    return instance_id is None and bool(env.get("QPUPPETEER_LAUNCH_TOKEN"))

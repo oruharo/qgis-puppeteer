@@ -724,6 +724,21 @@ class TestSpawnQgisContextManager:
         assert client.execute_python_calls == []
         assert processes.force_killed == [23456]
 
+    def test_the_hub_is_told_to_abandon_the_launch(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_popen: list[_FakePopen],
+        processes: _FakeProcesses,
+    ) -> None:
+        """#16 案 2: 遅れて登録してくる QGIS が自分で閉じるよう、Hub に知らせる。"""
+        monkeypatch.delenv("QPUPPETEER_E2E_USE_RUNNING_QGIS", raising=False)
+        client = _FakeAutomationClient()
+        client.bind_popens(mock_popen)
+        abandoned: list[str] = []
+        client.abandon_launch = abandoned.append  # type: ignore[attr-defined]
+        self._timeout_spawn(client)
+        assert abandoned == [mock_popen[0].env["QPUPPETEER_LAUNCH_TOKEN"]]
+
     def test_someone_elses_qgis_is_left_alone_after_the_timeout(
         self,
         monkeypatch: pytest.MonkeyPatch,

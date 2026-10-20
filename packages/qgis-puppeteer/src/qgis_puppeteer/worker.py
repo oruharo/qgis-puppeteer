@@ -58,6 +58,7 @@ from qgis_puppeteer.worker_state import (
     WorkerRegisterError,
     WorkerState,
     next_reconnect_delay_ms,
+    register_failure_reason,
 )
 
 logger = logging.getLogger("qgis_puppeteer.worker")
@@ -362,7 +363,7 @@ class Worker(QObject):
         try:
             self._state.on_register_ack(ack)
         except WorkerRegisterError as e:
-            reason = e.error.code.value if e.error is not None else "unknown"
+            reason = register_failure_reason(e.error)
             logger.warning("Register failed: %s", e)
             # 復帰不可能なエラー（label 衝突など）は close して再接続を抑止
             self._closing = True

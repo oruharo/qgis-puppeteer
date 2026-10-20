@@ -12,6 +12,7 @@ import json
 import pytest
 from qgis_puppeteer.protocol import (
     PROTOCOL_VERSION,
+    AbandonLaunch,
     Bye,
     Error,
     ErrorCode,
@@ -212,6 +213,10 @@ class TestRoundTrip:
                 )
             ],
         )
+        assert decode_message(encode_message(msg)) == msg
+
+    def test_abandon_launch_round_trip(self) -> None:
+        msg = AbandonLaunch(id="uuid-ab", launch_token="lt-late")
         assert decode_message(encode_message(msg)) == msg
 
     def test_old_hub_response_has_no_rejected(self) -> None:

@@ -262,6 +262,19 @@ token も label 規約も無い場合に限り、Hub は `registered_seq`（単�
 最初の 1 件」）。**これは racy と明記**し、同時起動時は曖昧になり得る旨を docs に
 警告として書く。U8 はあくまで最後の手段であり、helper 経由（U9）が正道。
 
+> **2026-10-20 追記（#13 / #16）**: `launch_token` は、起こした側と QGIS の間で
+> 「登録されなかった」ことを伝える鍵にも使う。
+>
+> - Hub は断った登録を token ごとに覚え、`list_instances(include_rejected=True)` で
+>   理由と QGIS の pid を返す（#13）。起こした側は待たずに失敗し、pid で止める
+> - 起こした側が登録を待ちきれなかったら、`abandon_launch`（Hub あて、応答なし）で
+>   token を知らせる。Hub はその token の登録を以後断る（コードは `label_conflict`、
+>   `details.reason = "launch_abandoned"`。古いプラグインが読めるコードのまま）（#16）
+> - QGIS Puppeteer プラグインは、token 付きで起こされ、まだ一度も登録できていない
+>   ときに登録を断られたら、理由を問わず自分で閉じる（閉じきれなければ約 12 秒後に
+>   強制終了し、理由を QgsMessageLog と stderr に残す）。一度でも登録できた QGIS は、
+>   つなぎ直しを断られても閉じない。token の無い（人が起こした）QGIS は対象外
+
 ## Review-driven amendments（Accepted・実装済み）
 
 multi-perspective レビュー（architect + code-reviewer）の指摘を受けた確定事項。

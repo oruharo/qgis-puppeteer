@@ -23,6 +23,7 @@ from pathlib import PurePosixPath, PureWindowsPath
 from urllib.parse import urlparse
 
 from qgis_puppeteer.protocol import (
+    ABANDONED_LAUNCH_REASON,
     Error,
     ErrorCode,
     InstanceInfo,
@@ -75,6 +76,10 @@ LABEL_MAX_LENGTH: int = 128
 
 # #13: 断った登録を launch_token ごとに覚えておく件数（古いものから捨てる）
 REJECTED_REGISTRATIONS_MAX: int = 64
+
+# #16: 起こした側がもう待っていない launch_token を覚えておく件数と時間
+ABANDONED_LAUNCHES_MAX: int = 64
+ABANDONED_LAUNCH_SECONDS: float = 1800.0
 
 # Origin 検証の許可ホスト（ADR-0001 §9.2）
 _ALLOWED_ORIGIN_HOSTS: frozenset[str] = frozenset({"localhost", "127.0.0.1"})
@@ -333,6 +338,8 @@ class HubState:
         # #13: 断った登録（launch_token → (記録, 断った時刻)）。起動した側が
         # 待たずに失敗し、起こした QGIS を片付けられるように
         self._rejected: OrderedDict[str, tuple[RejectedRegistration, float]] = OrderedDict()
+        # #16: 起こした側がもう待っていない launch_token（token → 知らされた時刻）
+        self._abandoned: OrderedDict[str, float] = OrderedDict()
 
     # ----- 登録 -----
 
@@ -362,6 +369,20 @@ class HubState:
                     code=ErrorCode.LABEL_CONFLICT,
                     message=f"Invalid launch_token: {tv.reason}",
                     details={"reason": tv.reason},
+                ),
+            )
+
+        # 2c. 起こした側がもう待っていない token（#16）。この QGIS は誰にも使われない
+        if req.launch_token and self.is_launch_abandoned(req.launch_token):
+            return self._reject(
+                req,
+                Error(
+                    code=ErrorCode.LABEL_CONFLICT,
+                    message=(
+                        "The side that started this QGIS (launch_token="
+                        f"{req.launch_token}) stopped waiting for it"
+                    ),
+                    details={"reason": ABANDONED_LAUNCH_REASON},
                 ),
             )
 
@@ -546,6 +567,28 @@ class HubState:
             while len(self._rejected) > REJECTED_REGISTRATIONS_MAX:
                 self._rejected.popitem(last=False)
         return RegisterOutcome(ok=False, error=error)
+
+    def abandon_launch(self, token: str) -> None:
+        """この launch_token の QGIS を、起こした側がもう待っていない（#16）。
+
+        以後この token の登録は断る。最近の ``ABANDONED_LAUNCHES_MAX`` 件を
+        ``ABANDONED_LAUNCH_SECONDS`` の間だけ覚える。形式の不正な token は無視する。
+        """
+        if not token or not validate_launch_token(token).ok:
+            return
+        self._abandoned.pop(token, None)
+        self._abandoned[token] = self._clock()
+        while len(self._abandoned) > ABANDONED_LAUNCHES_MAX:
+            self._abandoned.popitem(last=False)
+
+    def is_launch_abandoned(self, token: str) -> bool:
+        at = self._abandoned.get(token)
+        if at is None:
+            return False
+        if self._clock() - at > ABANDONED_LAUNCH_SECONDS:
+            del self._abandoned[token]
+            return False
+        return True
 
     def list_rejected(self) -> list[RejectedRegistration]:
         """断った登録を古い順に返す（#13）。``rejected_ago`` は今からの経過秒。"""

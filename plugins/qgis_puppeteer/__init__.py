@@ -46,6 +46,7 @@ from qgis_puppeteer.hub_state import (
 )
 from qgis_puppeteer.protocol import (
     PROTOCOL_VERSION,
+    AbandonLaunch,
     Error,
     ErrorCode,
     InstanceInfo,
@@ -181,6 +182,7 @@ __all__ = [
     # qgis_env（QGIS 環境探索）
     "find_qgis_python_launcher",
     # protocol
+    "AbandonLaunch",
     "Error",
     "ErrorCode",
     "InstanceInfo",

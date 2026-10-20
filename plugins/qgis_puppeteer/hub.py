@@ -53,6 +53,7 @@ from qgis_puppeteer.hub_state import (
     validate_origin,
 )
 from qgis_puppeteer.protocol import (
+    AbandonLaunch,
     Bye,
     Error,
     ErrorCode,
@@ -262,6 +263,8 @@ class Hub(QObject):
             self._handle_bye(conn_id, msg)
         elif isinstance(msg, UpdateInfo):
             self._handle_update_info(conn_id, msg)
+        elif isinstance(msg, AbandonLaunch):
+            self._handle_abandon_launch(conn_id, msg)
         else:
             # RegisterAck / ListInstancesResponse は Hub からの送信専用なので
             # inbound で来たら仕様違反。落とさず warning に留めて握り潰す。
@@ -421,6 +424,14 @@ class Hub(QObject):
     # ------------------------------------------------------------
     # update_info
     # ------------------------------------------------------------
+
+    def _handle_abandon_launch(self, conn_id: str, msg: AbandonLaunch) -> None:
+        """起こした側がもう待っていない launch_token を覚える（#16）。応答は無い。"""
+        if self._kinds.get(conn_id) is not _ConnectionKind.CLIENT:
+            logger.warning("abandon_launch from non-client connection %s ignored", conn_id)
+            return
+        logger.info("Launch abandoned by its starter: %s", msg.launch_token)
+        self._state.abandon_launch(msg.launch_token)
 
     def _handle_update_info(self, conn_id: str, msg: UpdateInfo) -> None:
         """Worker の自己申告情報（project）を差し替える。応答は無い。"""

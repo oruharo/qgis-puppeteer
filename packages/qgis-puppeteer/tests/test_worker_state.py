@@ -382,3 +382,16 @@ class TestIsRegistered:
         state.on_register_ack(RegisterAck(id="r", ok=True, instance_id="iid"))
         state.on_disconnect()
         assert state.is_registered is False
+
+
+class TestRegisterFailureReason:
+    """``register_failed`` に載せる理由（#16 でプラグインがログに残す）。"""
+
+    def test_reason_detail_is_added(self) -> None:
+        from qgis_puppeteer.protocol import Error, ErrorCode
+        from qgis_puppeteer.worker_state import register_failure_reason
+
+        err = Error(ErrorCode.LABEL_CONFLICT, "x", {"reason": "launch_abandoned"})
+        assert register_failure_reason(err) == "label_conflict: launch_abandoned"
+        assert register_failure_reason(Error(ErrorCode.LABEL_CONFLICT, "x")) == "label_conflict"
+        assert register_failure_reason(None) == "unknown"

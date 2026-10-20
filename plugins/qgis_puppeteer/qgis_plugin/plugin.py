@@ -42,6 +42,7 @@ from PyQt5.QtCore import (  # type: ignore[import-not-found]
 from qgis_puppeteer.worker import Worker
 
 from .plugin_helpers import (
+    CLOSE_UNWANTED_QGIS_EXIT_MS,
     ENV_HUB_HOST,
     ENV_HUB_PORT,
     ENV_HUB_PYTHON,
@@ -53,6 +54,7 @@ from .plugin_helpers import (
     _resolve_hub_python,
     _resolve_hub_url,
     discover_extensions,
+    should_close_after_register_failure,
 )
 
 logger = logging.getLogger(__name__)
@@ -533,6 +535,30 @@ class QgisPuppeteerPlugin:
     def _on_register_failed(self, reason: str) -> None:
         logger.warning("QGIS Puppeteer register failed: %s", reason)
         self._show_message(f"QGIS Puppeteer: register failed ({reason})", warning=True)
+        if should_close_after_register_failure(self._instance_id, os.environ):
+            self._close_unwanted_qgis(reason)
+
+    def _close_unwanted_qgis(self, reason: str) -> None:
+        """テストのために起こされたのに、登録を断られた QGIS を閉じる（#16）。
+
+        起こした側はもう待っていないか、断られたことを知っている。誰にも
+        使われない QGIS を残さない。閉じる手順は pytest の後片付けと同じ
+        （モーダルを閉じてからメインウィンドウ）。それでも閉じなければ、
+        ``CLOSE_UNWANTED_QGIS_EXIT_MS`` 後に自分を強制終了する。どちらも、
+        なぜ消えたかを後から追えるよう QgsMessageLog と stderr に残す。
+        """
+        token = os.environ.get(ENV_LAUNCH_TOKEN, "")
+        _note_exit(
+            f"QGIS Puppeteer: this QGIS was started for a test (launch_token={token}) "
+            f"but the Hub refused to register it ({reason}); closing it"
+        )
+        try:
+            from qgis_puppeteer.qgis_tools.app_tools import close_qgis
+
+            close_qgis(self.iface)
+        except Exception:  # noqa: BLE001 - 閉じられなくても下の強制終了がある
+            logger.exception("close_qgis failed")
+        QTimer.singleShot(CLOSE_UNWANTED_QGIS_EXIT_MS, lambda: _force_exit(reason))
 
     def _on_hub_startup_failed(self, detail: str) -> None:
         logger.warning("QGIS Puppeteer Hub startup failed: %s", detail)
@@ -550,3 +576,26 @@ class QgisPuppeteerPlugin:
             mbar().pushMessage("QGIS Puppeteer", text, level=level, duration=5)
         except Exception:  # pragma: no cover - ランタイム環境差
             logger.debug("Could not show message bar", exc_info=True)
+
+
+def _note_exit(text: str) -> None:
+    """QGIS が自分で閉じる理由を、QgsMessageLog と stderr に残す（#16）。"""
+    try:
+        from qgis.core import Qgis, QgsMessageLog  # type: ignore[import-not-found]
+
+        QgsMessageLog.logMessage(text, "QGIS Puppeteer", Qgis.Critical)
+    except Exception:  # pragma: no cover - ランタイム環境差
+        pass
+    with contextlib.suppress(Exception):
+        sys.stderr.write(text + "\n")
+        sys.stderr.flush()
+
+
+def _force_exit(reason: str) -> None:
+    """閉じきれなかった QGIS を強制終了する（#16）。待っている者はもういない。"""
+    _note_exit(
+        f"QGIS Puppeteer: this QGIS did not close within "
+        f"{CLOSE_UNWANTED_QGIS_EXIT_MS // 1000}s after its registration was refused "
+        f"({reason}); exiting"
+    )
+    os._exit(1)

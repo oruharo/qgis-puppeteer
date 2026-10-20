@@ -301,6 +301,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A QGIS that registered only after `spawn_qgis()` stopped waiting was left
+  running** (#16). When the wait gives up, `spawn_qgis()` now tells the Hub
+  that it abandoned the `launch_token` (new client-to-Hub message
+  `abandon_launch`; no reply, so an older Hub that cannot read it only answers
+  with an error the client drops). The Hub refuses that token's registrations
+  for the next 30 minutes with `label_conflict` and
+  `details.reason = "launch_abandoned"` (an existing code, so older plugins
+  can read it), and records them like other refusals. The QGIS Puppeteer
+  plugin closes its QGIS when it was started with a `launch_token`, has never
+  registered, and is refused for any reason; it uses `close_qgis`, falls back
+  to exiting after 12 seconds, and logs why to QgsMessageLog and stderr. A
+  QGIS that has registered once does not close on a refused reconnect, and a
+  QGIS started by hand has no token. `register_failed` now carries the
+  refusal's `details.reason` (`label_conflict: too_long`). Still out of reach:
+  a QGIS that tries to register after the Hub has stopped, and one that never
+  sends a registration (#18). Checked on QGIS 3.34: with a 2-second wait, the
+  late QGIS was refused and closed itself, and none was left.
+
 - **Closing a QGIS that has a modal dialog open** (#16 design, used by #9 and
   #11). The teardown and the session restart asked QGIS to close its main
   window, which does nothing while a modal dialog runs its own `exec()` loop —

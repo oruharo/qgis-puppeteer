@@ -10,6 +10,8 @@ Qt 配線側（QWebSocketServer の接続管理）は別テストで扱う。
 from __future__ import annotations
 
 from qgis_puppeteer.hub_state import (
+    ABANDONED_LAUNCH_SECONDS,
+    ABANDONED_LAUNCHES_MAX,
     GRACE_SECONDS,
     HEARTBEAT_TIMEOUT_SECONDS,
     IDLE_SHUTDOWN_DELAY_SECONDS,
@@ -934,6 +936,43 @@ class TestRejectedRegistrations:
         assert len(tokens) == REJECTED_REGISTRATIONS_MAX
         assert tokens[0] == "lt-5"
         assert tokens[-1] == f"lt-{REJECTED_REGISTRATIONS_MAX + 4}"
+
+
+class TestAbandonedLaunches:
+    """#16: 起こした側がもう待っていない launch_token の登録は断る。"""
+
+    def test_abandoned_token_is_refused_with_the_reason(self) -> None:
+        state = HubState(clock=FakeClock())
+        state.abandon_launch("lt-late")
+        out = state.register_worker("conn-1", _worker_req(label="fresh-x", launch_token="lt-late"))
+        assert out.ok is False
+        assert out.error.code == ErrorCode.LABEL_CONFLICT  # 古いプラグインも読めるコード
+        assert out.error.details["reason"] == "launch_abandoned"
+        # 断った記録にも残る（spawn が pid を知れる）
+        [rec] = state.list_rejected()
+        assert rec.launch_token == "lt-late"
+
+    def test_other_tokens_and_tokenless_workers_are_unaffected(self) -> None:
+        state = HubState(clock=FakeClock())
+        state.abandon_launch("lt-late")
+        assert state.register_worker("c1", _worker_req(label="a", launch_token="lt-ok")).ok
+        assert state.register_worker("c2", _worker_req(label="b", pid=2)).ok
+
+    def test_the_memory_expires(self) -> None:
+        clock = FakeClock()
+        state = HubState(clock=clock)
+        state.abandon_launch("lt-old")
+        clock.advance(ABANDONED_LAUNCH_SECONDS + 1)
+        assert state.register_worker("c1", _worker_req(launch_token="lt-old")).ok
+
+    def test_malformed_tokens_are_ignored_and_the_list_is_bounded(self) -> None:
+        state = HubState(clock=FakeClock())
+        state.abandon_launch("not-a-token")
+        assert not state.is_launch_abandoned("not-a-token")
+        for i in range(ABANDONED_LAUNCHES_MAX + 3):
+            state.abandon_launch(f"lt-{i}")
+        assert not state.is_launch_abandoned("lt-0")
+        assert state.is_launch_abandoned(f"lt-{ABANDONED_LAUNCHES_MAX + 2}")
 
 
 class TestLabelValidation:

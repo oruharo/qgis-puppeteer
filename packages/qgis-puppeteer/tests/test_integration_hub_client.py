@@ -291,6 +291,41 @@ class TestHubClientIntegration:
 
             _run(inner())
 
+    def test_abandoned_launch_is_refused_via_real_hub(self) -> None:
+        """#16: 起こした側が待つのをやめた token の登録は、理由付きで断られる。"""
+        port = _get_free_port()
+        with _hub_subprocess(port):
+
+            async def inner() -> None:
+                url = f"ws://127.0.0.1:{port}"
+                async with AutomationClient(url=url) as client:
+                    await client.abandon_launch("lt-gave-up")
+                    await asyncio.sleep(0.2)  # 応答は無いので、Hub が処理するのを待つ
+                    ws = await ws_connect(url, additional_headers={"Origin": "http://localhost"})
+                    try:
+                        await ws.send(
+                            json.dumps(
+                                {
+                                    "type": "register",
+                                    "id": "reg-late",
+                                    "role": "worker",
+                                    "protocol_version": 1,
+                                    "pid": 4321,
+                                    "label": "fresh-late",
+                                    "launch_token": "lt-gave-up",
+                                }
+                            )
+                        )
+                        ack = json.loads(await ws.recv())
+                    finally:
+                        await ws.close()
+                    assert ack["ok"] is False
+                    assert ack["error"]["details"]["reason"] == "launch_abandoned"
+                    # 接続は生きていて、続けて使える
+                    assert await client.list_instances() == []
+
+            _run(inner())
+
     def test_instance_not_found_via_real_hub(self) -> None:
         port = _get_free_port()
         with _hub_subprocess(port):

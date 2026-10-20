@@ -377,3 +377,15 @@ class WorkerState:
     @property
     def is_registered(self) -> bool:
         return self.instance_id is not None
+
+
+def register_failure_reason(error: Error | None) -> str:
+    """``register_failed`` に載せる理由。``details["reason"]`` があれば添える。
+
+    例: ``label_conflict`` / ``label_conflict: too_long`` /
+    ``label_conflict: launch_abandoned``（#16）。
+    """
+    if error is None:
+        return "unknown"
+    detail = error.details.get("reason") if isinstance(error.details, dict) else None
+    return f"{error.code.value}: {detail}" if detail else error.code.value

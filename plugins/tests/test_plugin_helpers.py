@@ -543,3 +543,24 @@ class TestResolveHubUrl:
         self._clear_env(monkeypatch)
         monkeypatch.setenv(ph.ENV_HUB_PORT, "4242")
         assert ph._resolve_hub_url() == "ws://127.0.0.1:4242"
+
+
+class TestShouldCloseAfterRegisterFailure:
+    """#16: pytest が起こし、まだ一度も登録できていない QGIS だけが自分で閉じる。"""
+
+    def test_started_for_a_test_and_never_registered(self) -> None:
+        from qgis_puppeteer.qgis_plugin.plugin_helpers import should_close_after_register_failure
+
+        assert should_close_after_register_failure(None, {"QPUPPETEER_LAUNCH_TOKEN": "lt-1"})
+
+    def test_a_refused_reconnect_does_not_close_a_qgis_in_use(self) -> None:
+        """Hub が起動し直した後のつなぎ直しを断られても、テストの途中の QGIS は閉じない。"""
+        from qgis_puppeteer.qgis_plugin.plugin_helpers import should_close_after_register_failure
+
+        assert not should_close_after_register_failure("w-1", {"QPUPPETEER_LAUNCH_TOKEN": "lt-1"})
+
+    def test_a_qgis_started_by_a_person_never_closes(self) -> None:
+        from qgis_puppeteer.qgis_plugin.plugin_helpers import should_close_after_register_failure
+
+        assert not should_close_after_register_failure(None, {})
+        assert not should_close_after_register_failure(None, {"QPUPPETEER_LAUNCH_TOKEN": ""})

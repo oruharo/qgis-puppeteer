@@ -56,6 +56,9 @@ class MessageType(str, Enum):
     # Worker → Hub: 登録後の自己申告情報の更新（project の読み込み・切替など）
     UPDATE_INFO = "update_info"
 
+    # Client → Hub: 起こした QGIS をもう待たない（#16）。応答は無い
+    ABANDON_LAUNCH = "abandon_launch"
+
 
 class ErrorCode(str, Enum):
     """エラーコード（ADR-0001 §3 "エラーコード初期セット"）。"""
@@ -312,6 +315,31 @@ class UpdateInfo:
         return MessageType.UPDATE_INFO
 
 
+@dataclass(frozen=True)
+class AbandonLaunch:
+    """Client → Hub: この ``launch_token`` で起こした QGIS をもう待たない（#16）。
+
+    ``spawn_qgis`` は登録を待ちきれなかったときに送る。Hub はこの token の登録を
+    以後断り（`ABANDONED_LAUNCH_REASON`）、その QGIS は QGIS Puppeteer
+    プラグインが自分で閉じる。待ちが切れた後に遅れて登録してくる QGIS を
+    残さないため。Hub は応答しない（古い Hub は読めずにエラーを返すが、
+    クライアントは知らない id の返事を捨てる）。
+    """
+
+    id: str
+    launch_token: str
+
+    @property
+    def type(self) -> MessageType:
+        return MessageType.ABANDON_LAUNCH
+
+
+# 見捨てた launch_token の登録を断るときの ``Error.details["reason"]``（#16）。
+# エラーコード自体は既存の ``label_conflict`` を使う（古いプラグインは新しい
+# コードを読めないため）
+ABANDONED_LAUNCH_REASON = "launch_abandoned"
+
+
 # Union 型：プロトコルで流通する全メッセージ型
 Message = (
     RegisterRequest
@@ -322,6 +350,7 @@ Message = (
     | ListInstancesResponse
     | Bye
     | UpdateInfo
+    | AbandonLaunch
 )
 
 
@@ -523,6 +552,9 @@ def _build_message(msg_type: MessageType, payload: dict[str, Any]) -> Message:
             instance_id=payload["instance_id"],
             project=payload.get("project"),
         )
+
+    if msg_type is MessageType.ABANDON_LAUNCH:
+        return AbandonLaunch(id=payload["id"], launch_token=str(payload["launch_token"]))
 
     # MessageType 列挙を網羅的に扱っているが、将来の追加に備えて保険
     raise ProtocolDecodeError(f"unhandled message type: {msg_type}")
