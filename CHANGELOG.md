@@ -8,6 +8,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A hook to finish the host's own startup before startup messages are taken,
+  and a marker that asks for a restart** (#19). A host plugin that shows a
+  login dialog once the project opens is not ready when pytest takes the
+  startup messages (#15), so what it logs while logging in was missed. The new
+  hookspec `pytest_qgis_ready(config, client, instance_id, kind)` is called
+  once per QGIS, right before its startup messages are taken, with `kind`
+  `"session"`, `"restart"` or `"fresh"`; a conftest waits there, and its calls
+  stay out of the test's `actions.jsonl`. An exception in it errors that test
+  and the hook runs again for the next test on that QGIS. It is not called in
+  dev mode. `@pytest.mark.qgis_restart_before` restarts the session QGIS
+  before the marked test regardless of `qgis_auto_fresh_after_failure` (not
+  for `fresh_qgis` tests), so host-specific restarts, such as before tests
+  that write to a database, need no conftest logic of their own;
+  `SessionQgis.start_count` tells a restart from the first start, and the
+  restart is logged with its reason. Checked on QGIS 3.34: the hook ran for
+  the session, the restarted and a fresh QGIS in turn, and a message logged
+  inside it was among each one's startup messages.
+
 - **pytest warns when the QGIS plugin and its own qgis-puppeteer differ** (#17).
   The plugin folder is a copy of the library with no version or commit, and
   the two are updated by different means (a lock file, a copy step, a uvx

@@ -530,6 +530,13 @@ qgis_auto_fresh_after_failure = "session"   # または "true"
   起こし直せないので、警告だけ出して何もしない
 - conftest から自分で起こし直すこともできる。`qgis_process` fixture の値
   （`SessionQgis`）の `restart()` を呼ぶ
+- 失敗の後でなくても、決まったテストの前に起こし直したいときは、印
+  `@pytest.mark.qgis_restart_before` を付ける（例: データベースに書くテストの前）。
+  `qgis_auto_fresh_after_failure` の設定に関わらず効く。`fresh_qgis` のテストでは
+  session の QGIS を使わないので起こし直さない。起こし直した QGIS では
+  `pytest_qgis_ready` が `kind="restart"` で呼ばれるので、ホスト固有の準備
+  （データベースを戻した後の確認、ログインを待つ、など）はそこに書く
+  （[QGIS の起動の間のメッセージ](#qgis-の起動の間のメッセージ)）
 
 ### 7. 任意のタイミングで QGIS を立てる: `spawn_qgis()`
 
@@ -1427,6 +1434,25 @@ session の QGIS、起こし直した QGIS、`fresh_qgis` の QGIS のそれぞ�
 - QGIS Puppeteer プラグインが読み込まれる前に出たメッセージは入らない
   （プラグインは名前順に読まれる）
 - `qgis` を使わず `automation_client` だけを使うテストでは取らない。dev モードでは空
+
+**ホストの準備を待ってから取る**: ホストのプラグインがプロジェクトを開いたあとに
+ログイン画面を出すなど、テストに使えるまでに準備が要るときは、conftest で
+フック `pytest_qgis_ready` を書く。上流は、その QGIS で起動の間のメッセージを取る
+直前に呼ぶので、準備の間に出たメッセージも起動の間の分に入る。
+
+```python
+# conftest.py
+def pytest_qgis_ready(config, client, instance_id, kind):
+    """kind は "session"（最初の QGIS）/ "restart"（起こし直し）/ "fresh"。"""
+    wait_until_logged_in(client)  # ホスト側の準備（例）
+```
+
+- その QGIS ごとに 1 回（session の最初、起こし直し、`fresh_qgis` のそれぞれ）。
+  `client` はその QGIS に届くよう切り替えてあり、ここでの呼び出しはテストの
+  操作記録に入らない
+- 例外を出すと、そのテストの準備のエラーになり、メッセージはまだ取らない。次に
+  その QGIS を使うテストで、もう一度呼ばれる
+- dev モードでは呼ばれない（起動の間はもう過ぎている）
 
 自分で取ったメッセージを、テストと同じ規則で判定したいときは
 `unexpected_messages` を使う:

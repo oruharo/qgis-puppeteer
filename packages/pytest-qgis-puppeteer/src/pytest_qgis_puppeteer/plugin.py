@@ -330,6 +330,13 @@ _SUMMARY_SCHEMA_VERSION = 1
 _ENV_META_CHILD = "QPUPPETEER_META_CHILD"
 
 
+def pytest_addhooks(pluginmanager: pytest.PytestPluginManager) -> None:
+    """``pytest_qgis_ready`` などのフックを登録する（#19、`hookspecs`）。"""
+    from pytest_qgis_puppeteer import hookspecs
+
+    pluginmanager.add_hookspecs(hookspecs)
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """marker 登録 + environments.toml ロード + active env 解決。
 
@@ -355,6 +362,12 @@ def pytest_configure(config: pytest.Config) -> None:
         "QgsMessageLog messages for qgis_fail_on_message_level in this test. "
         "pattern is a regex searched in the message; source is 'log' or "
         "'message_bar'.",
+    )
+    config.addinivalue_line(
+        "markers",
+        "qgis_restart_before: restart the session QGIS before this test (#19). "
+        "pytest_qgis_ready is then called with kind='restart'. No effect on "
+        "fresh_qgis tests, in dev mode, or with an overridden qgis_process.",
     )
     # 綴りを誤った ini で黙って判定が無効になるのを避け、起動時に止める
     try:
@@ -1515,6 +1528,8 @@ class SessionQgis:
         self._stack: contextlib.ExitStack | None = None
         self.worker: Any = None
         self.startup_messages: list[dict[str, Any]] | None = None
+        # 起こした回数。2 回目以降は起こし直し（pytest_qgis_ready の kind="restart"）
+        self.start_count = 0
 
     def start(self) -> None:
         """QGIS を起こし、コマンドを処理できるまで待つ。"""
@@ -1523,6 +1538,7 @@ class SessionQgis:
         stack = contextlib.ExitStack()
         self.worker = stack.enter_context(self._spawn())
         self.startup_messages = None
+        self.start_count += 1
         self._stack = stack
 
     def stop(self) -> None:
@@ -1690,20 +1706,29 @@ def qgis(
     先に session の QGIS を起こし直す（#11）。
     """
     del hub_ready  # session worker が register 済みであることを要求するだけ
+    marker = request.node.get_closest_marker("fresh_qgis")
+    reason = None
     if getattr(pytestconfig, _CONFIG_ATTR_RESTART_SESSION_QGIS, False):
+        reason = "prior test failed"
+    elif _wants_session_restart(pytestconfig, request.node, fresh=marker is not None):
+        reason = "marked qgis_restart_before"
+        setattr(pytestconfig, _CONFIG_ATTR_RESTART_SESSION_QGIS, True)
+    if reason is not None:
         # 起こし直しはこのテストの操作ではないので、操作記録に入れない
         with automation_client.unrecorded():
-            _restart_session_qgis(pytestconfig, qgis_process, request.node.nodeid)
-    marker = request.node.get_closest_marker("fresh_qgis")
+            _restart_session_qgis(pytestconfig, qgis_process, request.node.nodeid, reason=reason)
     if marker is None:
         worker = getattr(qgis_process, "worker", None)
-        key = getattr(worker, "instance_id", None) or "session"
+        instance_id = getattr(worker, "instance_id", None)
+        key = instance_id or "session"
         messages = _capture_startup_messages(
             pytestconfig,
             automation_client,
             key=key,
             description=f"session QGIS ({key})",
             instance=None,
+            ready_instance_id=instance_id,
+            kind="restart" if getattr(qgis_process, "start_count", 1) > 1 else "session",
         )
         if isinstance(qgis_process, SessionQgis) and qgis_process.startup_messages is None:
             qgis_process.startup_messages = messages
@@ -1775,6 +1800,8 @@ def qgis(
             key=worker.instance_id,
             description=f"fresh QGIS for {request.node.nodeid} (label={worker.label})",
             instance=worker.instance_id,
+            ready_instance_id=worker.instance_id,
+            kind="fresh",
         )
         request.node.stash[_STARTUP_KEY] = worker.instance_id
         try:
@@ -1791,8 +1818,14 @@ def _capture_startup_messages(
     key: str,
     description: str,
     instance: str | None,
+    ready_instance_id: str | None = None,
+    kind: str = "session",
 ) -> list[dict[str, Any]]:
     """その QGIS の起動の間に出たメッセージを、QGIS ごとに 1 回だけ取っておく（#15）。
+
+    取る前に ``pytest_qgis_ready`` を呼び、ホストの準備（ログインを待つ、など）を
+    済ませてもらう（#19）。フックが例外を出したら取らずにそのまま出す（次に
+    その QGIS を使うテストでもう一度呼ぶ）。
 
     テスト本体の直前に判定のため記録を空にするので、起動からそこまでの分は
     ここで取らないと残らない。起動が終わった時点ではなく、その QGIS を初めて
@@ -1813,6 +1846,11 @@ def _capture_startup_messages(
         store[key] = []
         return store[key]
     with client.unrecorded():
+        hook = getattr(config, "hook", None)
+        if hook is not None and hasattr(hook, "pytest_qgis_ready"):
+            hook.pytest_qgis_ready(
+                config=config, client=client, instance_id=ready_instance_id, kind=kind
+            )
         try:
             messages = client.get_recent_messages(instance=instance)
         except Exception as exc:  # noqa: BLE001 - 取れなくてもテストは進める
@@ -1929,7 +1967,18 @@ def _resolve_diag_capture_screenshots(config: pytest.Config) -> bool:
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
-def _restart_session_qgis(config: pytest.Config, session: Any, nodeid: str) -> None:
+def _wants_session_restart(config: pytest.Config, item: pytest.Item, *, fresh: bool) -> bool:
+    """``@pytest.mark.qgis_restart_before`` で、このテストの前に起こし直すか（#19）。
+
+    ``fresh_qgis`` のテストは session の QGIS を使わないので起こし直さない。
+    """
+    del config
+    return not fresh and item.get_closest_marker("qgis_restart_before") is not None
+
+
+def _restart_session_qgis(
+    config: pytest.Config, session: Any, nodeid: str, *, reason: str = "prior test failed"
+) -> None:
     """失敗の後、session の QGIS を起こし直す（#11）。
 
     起こし直せなければ flag を残す（次に ``qgis`` を使うテストでもう一度試す）。
@@ -1945,7 +1994,7 @@ def _restart_session_qgis(config: pytest.Config, session: Any, nodeid: str) -> N
             ENV_DEV_MODE,
         )
         return
-    logger.info("Auto-fresh: prior test failed, restarting the session QGIS before %s", nodeid)
+    logger.info("Restarting the session QGIS before %s (%s)", nodeid, reason)
     session.restart()
     setattr(config, _CONFIG_ATTR_RESTART_SESSION_QGIS, False)
 

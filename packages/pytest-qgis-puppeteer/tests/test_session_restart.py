@@ -147,3 +147,129 @@ def test_failure_sets_the_restart_flag_unless_the_test_ran_on_a_fresh_qgis(
     )
     result = pytester.runpytest("-p", "no:cacheprovider")
     result.assert_outcomes(passed=2, failed=2)
+
+
+# ============================================================
+# #19: pytest_qgis_ready フックと qgis_restart_before 印
+# ============================================================
+
+
+class TestReadyHookAndRestartMarker:
+    def test_start_count_tells_a_restart_from_the_first_start(self) -> None:
+        spawn = _FakeSpawn()
+        session = SessionQgis(spawn)
+        session.start()
+        assert session.start_count == 1
+        session.restart()
+        assert session.start_count == 2
+
+    def test_marker_asks_for_a_restart_unless_the_test_is_fresh(self) -> None:
+        from pytest_qgis_puppeteer.plugin import _wants_session_restart
+
+        class _Item:
+            def __init__(self, marked: bool) -> None:
+                self.marked = marked
+
+            def get_closest_marker(self, name: str) -> Any:
+                return object() if self.marked and name == "qgis_restart_before" else None
+
+        assert _wants_session_restart(None, _Item(True), fresh=False)  # type: ignore[arg-type]
+        assert not _wants_session_restart(None, _Item(True), fresh=True)  # type: ignore[arg-type]
+        assert not _wants_session_restart(None, _Item(False), fresh=False)  # type: ignore[arg-type]
+
+
+class _HookConfig:
+    """``config.hook.pytest_qgis_ready`` と ini を持つ config の代役。"""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.fail = fail
+        outer = self
+
+        class _Hook:
+            def pytest_qgis_ready(self, **kwargs: Any) -> None:
+                outer.calls.append(kwargs)
+                kwargs["client"].events.append("ready")
+                if outer.fail:
+                    raise RuntimeError("login screen did not go away")
+
+        self.hook = _Hook()
+
+    def getini(self, name: str) -> Any:
+        return [] if name == "qgis_message_allowlist" else ""
+
+
+class _Client:
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+    def unrecorded(self) -> Any:
+        return contextlib.nullcontext()
+
+    def get_recent_messages(self, *, instance: str | None = None) -> list[dict[str, Any]]:
+        self.events.append("read")
+        return [{"level": "info", "message": "logged in"}]
+
+
+def _capture(config: _HookConfig, client: _Client, kind: str = "restart") -> Any:
+    from pytest_qgis_puppeteer.plugin import _capture_startup_messages
+
+    return _capture_startup_messages(
+        config,  # type: ignore[arg-type]
+        client,  # type: ignore[arg-type]
+        key="w-2",
+        description="session QGIS (w-2)",
+        instance=None,
+        ready_instance_id="w-2",
+        kind=kind,
+    )
+
+
+def test_ready_hook_runs_once_before_the_startup_messages_are_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("QPUPPETEER_E2E_USE_RUNNING_QGIS", raising=False)
+    config, client = _HookConfig(), _Client()
+    assert _capture(config, client) == [{"level": "info", "message": "logged in"}]
+    assert client.events == ["ready", "read"]
+    assert config.calls == [
+        {"config": config, "client": client, "instance_id": "w-2", "kind": "restart"}
+    ]
+    _capture(config, client)  # 同じ QGIS では 2 回目は呼ばない
+    assert len(config.calls) == 1
+
+
+def test_a_failing_ready_hook_errors_the_test_and_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("QPUPPETEER_E2E_USE_RUNNING_QGIS", raising=False)
+    config, client = _HookConfig(fail=True), _Client()
+    with pytest.raises(RuntimeError, match="login screen"):
+        _capture(config, client)
+    assert client.events == ["ready"]  # フックは呼んだが、まだ取っていない
+    config.fail = False
+    _capture(config, client)  # 次のテストでもう一度呼ばれ、今度は取る
+    assert len(config.calls) == 2
+    assert client.events == ["ready", "ready", "read"]
+
+
+def test_conftest_can_implement_the_hook_and_use_the_marker(pytester: pytest.Pytester) -> None:
+    """フックと印が登録されている（未知のフック・未知の印として弾かれない）。"""
+    pytester.makeconftest(
+        """
+        def pytest_qgis_ready(config, client, instance_id, kind):
+            pass
+        """
+    )
+    pytester.makeini("[pytest]\nqgis_fail_on_uncaught_exception = false\n")
+    pytester.makepyfile(
+        """
+        import pytest
+
+        @pytest.mark.qgis_restart_before
+        def test_ok():
+            pass
+        """
+    )
+    result = pytester.runpytest("-p", "no:cacheprovider", "--strict-markers")
+    result.assert_outcomes(passed=1)
