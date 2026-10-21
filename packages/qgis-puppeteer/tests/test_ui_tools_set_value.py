@@ -240,19 +240,23 @@ def test_an_exclusive_radio_button_cannot_be_unchecked(host: Any) -> None:
     assert result["value_after"] is True
 
 
-def test_a_subclass_is_not_compared(host: Any) -> None:
-    """下位クラスは値を自分で直すことがあるので比べない（value_after は返す）。"""
+def test_a_subclass_is_compared_too(host: Any) -> None:
+    """ホストの部品（下位クラス）も比べる。クラスの一覧は持たない。
 
-    class HostLineEdit(QtWidgets.QLineEdit):
-        pass
+    値を自分で直す欄は、利用側が ``verify=False`` を付ける。
+    """
 
-    widget = _add(host, HostLineEdit())
-    widget.setMaxLength(3)
+    class HostDateEdit(QtWidgets.QLineEdit):
+        def setText(self, text: str) -> None:  # noqa: N802 - Qt の名前。表示用に整形する欄のつもり
+            super().setText(text.replace("-", "/"))
 
-    result = _set("abcdef")
+    _add(host, HostDateEdit())
 
-    assert result["success"] is True
-    assert result["value_after"] == "abc"
+    result = _set("2026-10-20")
+
+    assert result["error"] == "value_not_applied"
+    assert result["value_after"] == "2026/10/20"
+    assert _set("2026-10-20", verify=False)["success"] is True
 
 
 def test_a_password_field_does_not_leak_through_a_failure(host: Any) -> None:

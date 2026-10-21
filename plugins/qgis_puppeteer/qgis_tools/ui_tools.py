@@ -36,13 +36,11 @@ from qgis.PyQt.QtWidgets import (
     QRadioButton,
     QSpinBox,
     QTableView,
-    QTableWidget,
     QTabWidget,
     QTextEdit,
     QTimeEdit,
     QToolButton,
     QTreeView,
-    QTreeWidget,
     QWidget,
 )
 
@@ -309,8 +307,9 @@ def set_widget_value(
             入れたあとの失敗（``value_not_applied`` など）は、戻り値ではなく
             recent_exceptions に残る。
         verify: False なら、入れたあとに頼んだ値と比べない（``value_after`` は返す）。
-            比べるのは Qt の素のクラスだけで、下位クラス（``QgsFilterLineEdit``
-            など、値を自分で直すことがある）は比べない。
+            値を自分で直す欄（表示用に日付を整形する ``QLineEdit`` の派生など）に
+            使う。比べるかどうかをクラスでは分けない：部品ごとの一覧を持つと、
+            部品の増減や版ごとの違いに追われるので、ホストの部品の知識は利用側に置く。
 
     Returns:
         Dictionary with success flag, prior value, value after, and widget metadata.
@@ -327,32 +326,6 @@ def set_widget_value(
         return _apply_widget_value(widget, value, verify=verify)
     return _queue_widget_value(widget, value, verify=verify)
 
-
-# 入れたあとに読み直して比べる、Qt の素のクラス（#23）。下位クラスは値を自分で
-# 直すことがある（QgsFilterLineEdit の NULL 表示、QgsSpinBox の特別な値など）ので
-# 比べない
-_VERIFIED_TYPES = frozenset(
-    {
-        QLineEdit,
-        QPlainTextEdit,
-        QTextEdit,
-        QComboBox,
-        QCheckBox,
-        QRadioButton,
-        QSpinBox,
-        QDoubleSpinBox,
-        QDateEdit,
-        QTimeEdit,
-        QDateTimeEdit,
-        QTabWidget,
-        QListWidget,
-        QListView,
-        QTreeView,
-        QTableView,
-        QTreeWidget,
-        QTableWidget,
-    }
-)
 
 _DATE_FORMAT = "yyyy-MM-dd"
 _TIME_FORMAT = "HH:mm:ss"
@@ -416,7 +389,7 @@ def _set_and_verify(widget: Any, value: Any, prepared: dict, *, verify: bool) ->
         # setText は validator を通さない。入った文字が受け付けられる形かを添える
         result["acceptable_input"] = widget.hasAcceptableInput()
     expected = prepared["expected"]
-    if verify and type(widget) in _VERIFIED_TYPES and after != expected:
+    if verify and after != expected:
         return {
             "success": False,
             "error": "value_not_applied",

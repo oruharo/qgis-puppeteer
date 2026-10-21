@@ -823,9 +823,11 @@ Worker は失敗時に `{"success": false, "error": "<code>", ...}` を返す。
   で切り詰められた、グループの中で排他のラジオボタンが外れなかった、など）。
   `verify=False`（Locator の `fill` / `select` / `check` / `uncheck` も受ける）で
   比べない
-- 比べるのは Qt の素のクラスだけ。下位クラス（`QgsSpinBox` / `QgsFilterLineEdit`
-  など、QGIS の部品の多く）は値を自分で直すことがあるので比べない。
-  `value_after` は返るので、必要ならテストで確かめる
+- QGIS やホストの部品（Qt のクラスの派生）も同じように比べる。値を自分で直す欄
+  （表示用に日付を整形する欄など）は `value_not_applied` になるので、頼む値を
+  整形後のものにするか、その欄だけ `verify=False` を付ける。どの部品が値を直すかの
+  一覧は持たない（部品の増減や版ごとの違いに追われるため）。ホストの部品の知識は
+  利用側の conftest に置く
 - `QLineEdit.setText` は validator を通さない。validator がある欄は、入った文字が
   受け付けられる形か（`acceptable_input`）を添える
 - パスワード欄は `prior_value` / `value_after` / `expected` を伏せる（`masked`）

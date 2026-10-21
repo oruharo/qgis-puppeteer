@@ -296,10 +296,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bool("false")` is true, or a non-integral number for a `QSpinBox`). After
   setting, it reads the value back, returns it as `value_after`, and fails
   with `value_not_applied` when it differs (a clamped number or date, a text
-  cut by `maxLength`, an exclusive radio button that stays checked); only
-  plain Qt classes are compared, since subclasses such as QGIS's
-  `QgsSpinBox` may adjust the value themselves, and `verify=False` skips the
-  comparison. With `wait=False`, only the checks made before setting come
+  cut by `maxLength`, an exclusive radio button that stays checked).
+  Subclasses, QGIS's and the host's, are compared like the Qt classes they
+  derive from: the read-back uses the base class's API, so no list of
+  widgets has to follow QGIS versions; a field that reshapes its value takes
+  `verify=False` on the caller's side. With `wait=False`, only the checks made before setting come
   back; the rest is recorded in recent_exceptions. A line edit with a
   validator also reports `acceptable_input`, because `setText` bypasses the
   validator. Also fixed: choosing a `QListWidget` item by text always failed
@@ -308,7 +309,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `prior_value` for them is now `"yyyy-MM-dd"` / `"HH:mm:ss"`. Checked on
   QGIS 3.34: a list item chosen by text, a clamped `QSpinBox` and a truncated
   `QLineEdit` raised with `value_after`, `"false"` unchecked a check box, a
-  `QDateEdit` took `"2026-10-20"`, and a `QgsSpinBox` was not compared.
+  `QDateEdit` took `"2026-10-20"`, and a clamped `QgsSpinBox` raised too.
 
 - **The QGIS plugin is now a self-contained `qgis_puppeteer` folder, named
   "QGIS Puppeteer".** The plugin folder used to be `plugins/qgis_puppet`
