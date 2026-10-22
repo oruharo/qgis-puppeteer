@@ -615,6 +615,8 @@ class TestMcpGatewayToolInventory:
             "qgis_render_map",
             "qgis_get_canvas_extent",
             "qgis_set_canvas_extent",
+            "qgis_canvas_mouse",
+            "qgis_canvas_key",
             # ui
             "qgis_snapshot_ui",
             "qgis_click_widget",
@@ -1185,6 +1187,9 @@ class TestMcpGatewayToolDescriptors:
             "qgis_execute_with_permission",
             "qgis_click_widget",
             "qgis_set_widget_value",
+            # 地図のマップツールが何をするかは呼び出し次第（#26）
+            "qgis_canvas_mouse",
+            "qgis_canvas_key",
         }
 
     def test_no_tool_declares_an_output_schema(self) -> None:

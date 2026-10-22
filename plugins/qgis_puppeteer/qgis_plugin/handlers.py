@@ -50,6 +50,7 @@ def build_handlers(iface: Any | None = None) -> dict[str, Handler]:
     """
     try:
         from qgis_puppeteer.qgis_tools import (  # type: ignore[import-not-found]
+            canvas_tools,
             dialog_handler_tools,
             exception_recorder,
             layer_tools,
@@ -152,6 +153,10 @@ def build_handlers(iface: Any | None = None) -> dict[str, Handler]:
         iface,
         wait=params.get("wait", True),
     )
+
+    # キャンバスへのマウスとキー（#26）。引数は params のまま渡す
+    handlers["qgis_canvas_mouse"] = lambda params: canvas_tools.canvas_mouse(params, iface)
+    handlers["qgis_canvas_key"] = lambda params: canvas_tools.canvas_key(params, iface)
 
     # ------------------------------------------------------------
     # UI Tools（iface 不要：QApplication をグローバル探索）

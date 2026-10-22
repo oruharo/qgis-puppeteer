@@ -705,6 +705,9 @@ def build_gateway(
             "connection dropped; grace_expires_in says how long the Hub still waits for it "
             "to reconnect (QGIS auto-reconnects when it can).\n"
             "- UI tools take a selector dict; build it from qgis_snapshot_ui output.\n"
+            "- Map tools (digitizing, moving, selecting) are driven with qgis_canvas_mouse and "
+            "qgis_canvas_key, in map coordinates of the canvas CRS; read the range with "
+            "qgis_get_canvas_extent first.\n"
             "- A click or value change that opens a confirmation (QMessageBox.question and "
             "the like) does not return until the confirmation closes, and times out. Pass "
             "wait=false so it returns at once, and answer the confirmation with "
@@ -1214,6 +1217,105 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
             "qgis_set_canvas_extent",
             _with_wait({"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax}, wait),
             instance=instance,
+        )
+
+    @mcp.tool(
+        title="キャンバスをマウスで操作", annotations=_MUTATE_ARBITRARY, structured_output=False
+    )
+    async def qgis_canvas_mouse(
+        ctx: Context,
+        action: Literal["click", "double", "press", "release", "move", "drag", "wheel"] = "click",
+        point: list[float] | None = None,
+        points: list[list[float]] | None = None,
+        button: Literal["left", "right", "middle"] = "left",
+        modifiers: list[Literal["shift", "ctrl", "alt", "meta"]] | None = None,
+        crs: str | None = None,
+        pixel: bool = False,
+        steps: int | None = None,
+        delta: int | None = None,
+        canvas: dict[str, Any] | None = None,
+        wait: bool = True,
+        instance: InstanceArg = None,
+    ) -> str | CallToolResult:
+        """地図のキャンバスにマウスの操作を送る（マップツールが受け取る、人の操作と同じ形）。
+
+        point は地図の座標 [x, y]（既定はキャンバスの CRS。crs を付ければその CRS、
+        pixel=true なら viewport の画素）。範囲は qgis_get_canvas_extent で見てから決める。
+        click はその位置へ動かしてから押して離す。double / press / release / move も
+        同じ point を取る。drag は points（2 点以上）で、間を steps 回（既定 5）動かす。
+        wheel は delta ノッチ（正で拡大）。地図の外の点は point_outside_canvas。
+        戻り値の map_point は、マップツールが受け取る地図の点（画素に丸めるので、
+        頼んだ点から map_units_per_pixel の半分までずれる）。map_tool は今のマップ
+        ツール。右クリックで作図を終えると属性のフォームを exec() で出すツールが
+        あるので、そのときは wait=false にし、qgis_register_dialog_handler で答える。
+        canvas はメイン以外のキャンバスの selector。
+        """
+        params: dict[str, Any] = {"action": action}
+        for name, value in (
+            ("point", point),
+            ("points", points),
+            ("modifiers", modifiers),
+            ("crs", crs),
+            ("steps", steps),
+            ("delta", delta),
+            ("canvas", canvas),
+        ):
+            if value is not None:
+                params[name] = value
+        if button != "left":
+            params["button"] = button
+        if pixel:
+            params["pixel"] = True
+        return await _call(
+            ctx,
+            "qgis_canvas_mouse",
+            _with_wait(params, wait),
+            instance=instance,
+            present=_present_widget_result,
+        )
+
+    @mcp.tool(
+        title="キャンバスなどにキーを送る", annotations=_MUTATE_ARBITRARY, structured_output=False
+    )
+    async def qgis_canvas_key(
+        ctx: Context,
+        key: str | None = None,
+        text: str | None = None,
+        action: Literal["tap", "press", "release"] = "tap",
+        modifiers: list[Literal["shift", "ctrl", "alt", "meta"]] | None = None,
+        target: Literal["canvas", "focus"] | dict[str, Any] = "canvas",
+        canvas: dict[str, Any] | None = None,
+        wait: bool = True,
+        instance: InstanceArg = None,
+    ) -> str | CallToolResult:
+        """キーを送る（既定は地図のキャンバスへ。マップツールの keyPressEvent が受ける）。
+
+        key は Qt のキーの名前（"Escape" / "Backspace" / "Delete" / "Return" / "Tab" /
+        "Space" / "Left" / "F2" など）か 1 文字。text は打つ文字で、1 文字ずつ送る
+        （回転のツールの角度の欄に "90" を打つ、など）。key と text はどちらか一方。
+        action="press" / "release" で押しっぱなしにできる（QGIS のスペースキーを
+        押している間のパンなど）。target は "canvas"（既定）/ "focus"（フォーカスの
+        ある widget）/ selector。
+        """
+        params: dict[str, Any] = {}
+        for name, value in (
+            ("key", key),
+            ("text", text),
+            ("modifiers", modifiers),
+            ("canvas", canvas),
+        ):
+            if value is not None:
+                params[name] = value
+        if action != "tap":
+            params["action"] = action
+        if target != "canvas":
+            params["target"] = target
+        return await _call(
+            ctx,
+            "qgis_canvas_key",
+            _with_wait(params, wait),
+            instance=instance,
+            present=_present_widget_result,
         )
 
     # ------------------------------------------------------------

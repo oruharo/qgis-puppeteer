@@ -20,15 +20,16 @@ selector・Locator・dialog handler 等の機能リファレンスをまとめ�
 6. [Dialog handler（想定外モーダルの自動応答）](#dialog-handler)
 7. [Signal spy / wait_for_signal](#signal-spy--wait_for_signal)
 8. [E2E カバレッジ計測](#e2e-カバレッジ計測)
-9. [地図の画像スナップショット（`qgis_render_map`）](#map-image-snapshot)
-10. [Uncaught Qt/Python 例外と test fail linkage](#uncaught-exceptions)
-11. [QgsMessageLog の記録と判定](#message-log)
-12. [MCP の操作記録](#mcp-recording)
-13. [複数 QGIS（multi-instance）](#multi-instance)
-14. [Permissions / 信頼モード](#permissions)
-15. [環境変数リファレンス](#環境変数リファレンス)
-16. [Troubleshooting](#troubleshooting)
-17. [Roadmap](#roadmap)
+9. [地図のキャンバスの操作（マウスとキー）](#map-canvas-input)
+10. [地図の画像スナップショット（`qgis_render_map`）](#map-image-snapshot)
+11. [Uncaught Qt/Python 例外と test fail linkage](#uncaught-exceptions)
+12. [QgsMessageLog の記録と判定](#message-log)
+13. [MCP の操作記録](#mcp-recording)
+14. [複数 QGIS（multi-instance）](#multi-instance)
+15. [Permissions / 信頼モード](#permissions)
+16. [環境変数リファレンス](#環境変数リファレンス)
+17. [Troubleshooting](#troubleshooting)
+18. [Roadmap](#roadmap)
 
 ---
 
@@ -1435,6 +1436,75 @@ E2E テストは **2 プロセス**で動く:
   `COVERAGE_PROCESS_START`（と `COVERAGE_FILE`）付きで起動するか、wrapper で forward する。
 
 詳細手順とテンプレ本体は [`examples/coverage/README.md`](../examples/coverage/README.md)。
+---
+
+<a id="map-canvas-input"></a>
+
+## 地図のキャンバスの操作（マウスとキー）
+
+QGIS のマップツール（作図・移動・選択など）は、キャンバスが受けたマウスとキーの
+イベントで動く。`qgis.canvas()` で、それを人の操作と同じ形で送る（#26）。
+
+```python
+canvas = qgis.canvas()                       # メインのキャンバス
+qgis.locator({"object_name": "mActionAddFeature", "root_object_name": "QgisApp"}).click()
+canvas.click((-40800.0, 11200.0))            # 頂点を置く（地図の座標）
+canvas.click((-40200.0, 11200.0))
+canvas.click((-40900.0, 11900.0))            # 間違えた
+canvas.press_key("Backspace")                # 最後の頂点を取り消す
+canvas.click((-40200.0, 11800.0))
+canvas.right_click((-40200.0, 11800.0))      # 作図を終える
+canvas.press_key("Escape")                   # 作図を中止する
+canvas.wheel((-40500.0, 11500.0), 1)         # その位置で拡大
+```
+
+| 道具 | 送るもの |
+|---|---|
+| `click(point, button=)` | その位置へ動かす → 押す → 離す（`right_click` は右ボタン） |
+| `dblclick(point)` | press → release → doubleClick → release |
+| `press(point)` / `release(point)` / `move(point)` | 1 つずつ（長押しや、押したまま別の操作をするとき） |
+| `drag(points, steps=5)` | 最初の点で押し、点から点へ `steps` 回ずつ動かして、最後の点で離す |
+| `wheel(point, delta)` | ホイールを `delta` ノッチ（正で奥へ＝拡大） |
+| `press_key(key, action=)` | キー（`"Escape"` / `"Backspace"` / `"Return"` / `"Space"` / `"F2"` など Qt のキーの名前か 1 文字）。`action="press"` / `"release"` で押しっぱなし（スペースキーを押している間のパンなど） |
+| `type_text(text)` | 文字を 1 文字ずつ（既定はフォーカスのある widget へ）。マップツールがキャンバスの上に出す数値の欄など、キーのイベントでしか入らない欄用 |
+
+- 座標は**地図の座標**で、既定はキャンバスの CRS。`qgis.canvas(crs="EPSG:4326")` で
+  別の CRS、`pixel=True`（`canvas_mouse`）で viewport の画素
+- 画素への変換は、**実際に送る時点**の地図で行う（積んだあとに地図が動いても、その
+  時点の位置に送る）
+- click の前にその位置へ動かすので、スナップの表示や輪郭の線、移動のツールで付いて
+  くる地物が、人の操作と同じに更新される
+- 戻り値の `map_point` は、**マップツールが受け取る地図の点**。画素に丸めるので、
+  頼んだ点から最大で半画素（`map_units_per_pixel` の半分）ずれる。作った地物の座標を
+  比べるときはその幅で比べるか、スナップに頼る。`map_tool` は今のマップツールの
+  クラス名（思ったツールになっていないときの切り分け用）。`extent` は送ったあとの範囲
+- どの操作も `modifiers=["shift", "ctrl", "alt"]` と `wait=False`（#21）を受ける
+- 地図の外（viewport の外）の点は、送る前に `point_outside_canvas` で断る（人には
+  押せないので）。失敗は `WidgetOperationError`
+- ダイアログの中の小さなキャンバスなどは `qgis.canvas({"object_name": ...})` で指す
+- キーの送り先は `target` で変えられる（`"canvas"` 既定 / `"focus"` / selector）。
+  表の行を選んで Enter、なども `press_key("Return", target={"object_name": ...})` で送れる
+
+### 作図を終えたあとのフォーム
+
+QGIS 3.34 の標準の作図ツールでは、作図を終えたあとの属性のフォームは**モーダルでは
+ない**（`visible_dialogs` に出る）ので、dialog handler は答えない。フォームの OK を
+Locator で押す:
+
+```python
+form = qgis.wait_for_widget({"title": "道路 - 地物属性", "scope": "any"})
+qgis.locator({"title": form["title"], "scope": "any"}).locator(
+    {"class": "QPushButton", "text": "OK"}).click()
+```
+
+ホストのマップツールが作図を終えるところでフォームを `exec()` で開くなら、右クリックを
+`wait=False` にして、dialog handler（`action="button"`）で答える。
+
+### MCP
+
+`qgis_canvas_mouse` / `qgis_canvas_key` で同じことができる。エージェントは
+`qgis_get_canvas_extent` で範囲を見てから座標を決める。
+
 ---
 
 <a id="map-image-snapshot"></a>

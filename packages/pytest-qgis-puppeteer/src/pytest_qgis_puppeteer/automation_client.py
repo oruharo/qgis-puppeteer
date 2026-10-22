@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -1046,6 +1047,101 @@ class E2EAutomationClient:
         通常はこれを直接呼ばず `Locator` 経由で auto-wait する。
         """
         return self.call("qgis_check_actionability", {"selector": selector}, instance=instance)
+
+    def canvas_mouse(
+        self,
+        action: str = "click",
+        point: Sequence[float] | None = None,
+        *,
+        points: Sequence[Sequence[float]] | None = None,
+        button: str = "left",
+        modifiers: Sequence[str] | None = None,
+        crs: str | None = None,
+        pixel: bool = False,
+        steps: int | None = None,
+        delta: int | None = None,
+        canvas: dict[str, Any] | None = None,
+        wait: bool = True,
+        instance: str | None = None,
+    ) -> dict[str, Any]:
+        """`qgis_canvas_mouse` を呼ぶ（#26）。ふだんは :meth:`canvas` の道具から使う。
+
+        Raises:
+            WidgetOperationError: 送れなかった（地図の外の点、キャンバスが無い、など）。
+        """
+        params: dict[str, Any] = {"action": action}
+        if point is not None:
+            params["point"] = list(point)
+        if points is not None:
+            params["points"] = [list(p) for p in points]
+        if button != "left":
+            params["button"] = button
+        if modifiers:
+            params["modifiers"] = list(modifiers)
+        if crs is not None:
+            params["crs"] = crs
+        if pixel:
+            params["pixel"] = True
+        if steps is not None:
+            params["steps"] = steps
+        if delta is not None:
+            params["delta"] = delta
+        if canvas is not None:
+            params["canvas"] = canvas
+        result = self.call("qgis_canvas_mouse", _with_wait(params, wait), instance=instance)
+        _raise_for_widget_result("qgis_canvas_mouse", result)
+        return result
+
+    def canvas_key(
+        self,
+        key: str | None = None,
+        *,
+        text: str | None = None,
+        action: str = "tap",
+        modifiers: Sequence[str] | None = None,
+        target: str | dict[str, Any] = "canvas",
+        canvas: dict[str, Any] | None = None,
+        wait: bool = True,
+        instance: str | None = None,
+    ) -> dict[str, Any]:
+        """`qgis_canvas_key` を呼ぶ（#26）。ふだんは :meth:`canvas` の道具から使う。
+
+        Raises:
+            WidgetOperationError: 送れなかった（知らないキー、送り先が無い、など）。
+        """
+        params: dict[str, Any] = {}
+        if key is not None:
+            params["key"] = key
+        if text is not None:
+            params["text"] = text
+        if action != "tap":
+            params["action"] = action
+        if modifiers:
+            params["modifiers"] = list(modifiers)
+        if target != "canvas":
+            params["target"] = target
+        if canvas is not None:
+            params["canvas"] = canvas
+        result = self.call("qgis_canvas_key", _with_wait(params, wait), instance=instance)
+        _raise_for_widget_result("qgis_canvas_key", result)
+        return result
+
+    def canvas(
+        self,
+        selector: dict[str, Any] | None = None,
+        *,
+        crs: str | None = None,
+        instance: str | None = None,
+    ) -> Any:
+        """地図のキャンバスを操作する道具 :class:`~pytest_qgis_puppeteer.canvas.Canvas`（#26）。
+
+        ``selector`` を省くと QGIS のメインのキャンバス。ダイアログの中の小さな
+        キャンバスなどは selector で指す。``crs`` を付けると、その道具に渡す座標を
+        その CRS で読む（既定はキャンバスの CRS）。
+        """
+        from pytest_qgis_puppeteer.canvas import Canvas
+
+        return Canvas(self, selector, crs=crs, instance=instance)
 
     def locator(
         self,

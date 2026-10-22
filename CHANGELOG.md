@@ -8,6 +8,32 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Mouse and keys on the map canvas** (#26). QGIS's map tools (digitizing,
+  moving, selecting) act on the mouse and key events the canvas receives,
+  and there was no way to send them; tests built `QMouseEvent`s by hand
+  through `qgis_execute_python`. `qgis_canvas_mouse` sends a click, double
+  click, press, release, move, drag (with the button held through `steps`
+  moves between points) or wheel to the canvas's viewport, and
+  `qgis_canvas_key` sends a key (by Qt key name or a character; tap, or
+  press and release apart for held keys) or types text character by
+  character, to the canvas, the focused widget or a selector. Points are
+  map coordinates in the canvas's CRS by default (another CRS with `crs`,
+  viewport pixels with `pixel`), turned into pixels with the map transform
+  at the moment of sending; a click moves to the point first so snapping
+  indicators and rubber bands update as for a person; a point outside the
+  viewport is refused before anything is sent (`point_outside_canvas`).
+  The result gives the pixel, the `map_point` the map tool receives (up to
+  half a pixel off the requested point), `map_units_per_pixel`, the current
+  `map_tool` and the `extent` after sending. Both take `modifiers`, `wait`
+  and a `canvas` selector for a canvas other than the main one. pytest gets
+  `qgis.canvas()` with `click`, `right_click`, `dblclick`, `press`,
+  `release`, `move`, `drag`, `wheel`, `press_key` and `type_text`, and the
+  MCP gateway exposes both tools. Checked on QGIS 3.34: with the standard
+  "Add Polygon Feature" tool, three clicks, a Backspace that removed a wrong
+  vertex and a right click made one polygon whose vertices were within a
+  pixel of the requested points, Escape cancelled a second one, and a wheel
+  notch halved the extent's width.
+
 - **A path can be set on QGIS's `QgsFileWidget`** (#25). The file / folder
   picker was `unsupported_widget_type`, so tests reached into its line edit
   by a class name read off the live widget, which a QGIS version could

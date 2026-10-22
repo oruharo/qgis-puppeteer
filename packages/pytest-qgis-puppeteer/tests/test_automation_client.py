@@ -212,6 +212,54 @@ class TestCommandWiring:
         with pytest.raises(WidgetOperationError, match="widget_disabled"):
             e2e.click_widget({"object_name": "b"})
 
+    def test_canvas_sends_mouse_and_key_params(self) -> None:
+        """#26: Canvas の道具は既定の引数を送らず、指定したものだけ送る。"""
+        e2e, inner = _make_client([{"success": True}] * 8)
+        canvas = e2e.canvas()
+        canvas.click((1.0, 2.0))
+        canvas.right_click((1.0, 2.0), wait=False)
+        canvas.dblclick((1, 2), modifiers=["shift"])
+        canvas.drag([(0, 0), (5, 5)], steps=2)
+        canvas.wheel((1, 2), -2)
+        canvas.press_key("Escape")
+        canvas.press_key("Space", action="press")
+        canvas.type_text("90")
+        sent = [(c.args[0], c.args[1]) for c in inner.call.await_args_list]
+        assert sent == [
+            ("qgis_canvas_mouse", {"action": "click", "point": [1.0, 2.0]}),
+            (
+                "qgis_canvas_mouse",
+                {"action": "click", "point": [1.0, 2.0], "button": "right", "wait": False},
+            ),
+            ("qgis_canvas_mouse", {"action": "double", "point": [1, 2], "modifiers": ["shift"]}),
+            ("qgis_canvas_mouse", {"action": "drag", "points": [[0, 0], [5, 5]], "steps": 2}),
+            ("qgis_canvas_mouse", {"action": "wheel", "point": [1, 2], "delta": -2}),
+            ("qgis_canvas_key", {"key": "Escape"}),
+            ("qgis_canvas_key", {"key": "Space", "action": "press"}),
+            ("qgis_canvas_key", {"text": "90", "target": "focus"}),
+        ]
+
+    def test_canvas_passes_its_selector_and_crs(self) -> None:
+        e2e, inner = _make_client([{"success": True}, {"success": True}])
+        mini = e2e.canvas({"object_name": "mini"}, crs="EPSG:4326")
+        mini.click((139.7, 35.6))
+        mini.press_key("Escape")
+        sent = [c.args[1] for c in inner.call.await_args_list]
+        assert sent == [
+            {
+                "action": "click",
+                "point": [139.7, 35.6],
+                "crs": "EPSG:4326",
+                "canvas": {"object_name": "mini"},
+            },
+            {"key": "Escape", "canvas": {"object_name": "mini"}},
+        ]
+
+    def test_a_failed_canvas_operation_raises(self) -> None:
+        e2e, _inner = _make_client([{"success": False, "error": "point_outside_canvas"}])
+        with pytest.raises(WidgetOperationError, match="point_outside_canvas"):
+            e2e.canvas().click((1e9, 0))
+
     def test_kind_and_cell_are_sent_only_when_given(self) -> None:
         """#24: 既定の呼び出しの形は変えず、kind が左以外・cell があるときだけ足す。"""
         e2e, inner = _make_client([{"success": True}] * 3)
