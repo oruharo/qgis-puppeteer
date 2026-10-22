@@ -820,6 +820,7 @@ Worker は失敗時に `{"success": false, "error": "<code>", ...}` を返す。
 | `QDateEdit` | `"yyyy-MM-dd"` |
 | `QTimeEdit` | `"HH:mm:ss"` |
 | `QDateTimeEdit` | `"yyyy-MM-ddTHH:mm:ss"` |
+| `QgsFileWidget`（QGIS のファイル・フォルダ選択） | パスの文字（1 つ）。`setFilePath()` で入れ、`filePath()` で読み直す。まだ無い場所も入れる。区切り（`\` と `/`）や末尾の区切りの違いは失敗にしない |
 
 - 入れたあとの値を `value_after` に返す（`prior_value` と同じ形）
 - 頼んだ値と違えば `value_not_applied`（範囲外の数・日付が丸められた、`maxLength`
@@ -1298,6 +1299,10 @@ automation_client.call("qgis_register_dialog_handler", {
 ```
 
 ファイル名の欄は、そのダイアログのフォルダからの相対か、絶対パス。
+
+QGIS のファイル・フォルダ選択の部品（`QgsFileWidget`）なら、ダイアログを開かずに
+`fill(パス)` で直接入れられる（#25）。snapshot には `file_path` と `storage_mode`
+（`GetFile` / `GetDirectory` / `SaveFile` / `GetMultipleFiles`）が出る。
 
 ### 注意点
 

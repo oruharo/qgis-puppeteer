@@ -8,6 +8,7 @@ Qt ウィジェットツリー（active modal / 可視ダイアログ / メイ�
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Callable, Iterator
 from typing import Any
@@ -511,7 +512,8 @@ def set_widget_value(
     editors, QTabWidget (selects tab), list/tree/table views (selects a row:
     by number, or ``{"text": セルの文字, "column": 見出し}``; the whole row is
     selected and ``currentChanged`` / ``selectionChanged`` fire as for a
-    person, #24).
+    person, #24), and QGIS's QgsFileWidget (a path, through ``setFilePath()``;
+    #25).
 
     入れる前に確かめられることは確かめて断る（範囲外の番号は
     ``index_out_of_range``、形の違う値は ``invalid_value``、候補に無い文字は
@@ -611,7 +613,8 @@ def _set_and_verify(widget: Any, value: Any, prepared: dict, *, verify: bool) ->
         # setText は validator を通さない。入った文字が受け付けられる形かを添える
         result["acceptable_input"] = widget.hasAcceptableInput()
     expected = prepared["expected"]
-    if verify and after != expected:
+    same = prepared.get("same", lambda a, b: a == b)
+    if verify and not same(after, expected):
         return {
             "success": False,
             "error": "value_not_applied",
@@ -651,6 +654,8 @@ def _prepare_widget_value(widget: Any, value: Any) -> dict:  # noqa: C901 - widg
     if not _widget_is_writable(widget):
         return {"success": False, "error": "widget_readonly", "widget": _widget_summary(widget)}
 
+    if _is_file_widget(widget):
+        return _prepare_file_path(widget, value)
     if isinstance(widget, QLineEdit):
         text = str(value)
         return {"apply": lambda: widget.setText(text), "expected": text}
@@ -753,11 +758,85 @@ def _prepare_date_time(widget: Any, value: Any) -> dict:
     }
 
 
+_file_widget_class: Any = None  # 未調査は None、無ければ False、あればクラス
+
+
+def _is_file_widget(widget: Any) -> bool:
+    """QGIS のファイル・フォルダ選択の部品 ``QgsFileWidget`` か（#25）。
+
+    ``qgis.gui`` は QGIS の中でしか無いので、ここで初めて import する（Qt だけの
+    環境では常に False）。
+    """
+    global _file_widget_class
+    if _file_widget_class is None:
+        try:
+            from qgis.gui import QgsFileWidget
+
+            _file_widget_class = QgsFileWidget
+        except ImportError:
+            _file_widget_class = False
+    return bool(_file_widget_class) and isinstance(widget, _file_widget_class)
+
+
+# QgsFileWidget.StorageMode の番号 → 名前（enum の .name が PyQt5 では無いことがある）
+_STORAGE_MODES = {0: "GetFile", 1: "GetDirectory", 2: "GetMultipleFiles", 3: "SaveFile"}
+
+
+def _storage_mode(widget: Any) -> str:
+    try:
+        mode = int(widget.storageMode())
+    except Exception:  # noqa: BLE001 - 補助情報なので落とさない
+        return "?"
+    return _STORAGE_MODES.get(mode, str(mode))
+
+
+def _prepare_file_path(widget: Any, value: Any) -> dict:
+    """``QgsFileWidget`` にパスを入れる（#25）。
+
+    ``setFilePath()`` で入れ、読み直しは ``filePath()``。どちらも QGIS の公開 API
+    なので、中の入力欄の作りには依存しない。まだ無いパスも入れる（保存先や出力先の
+    フォルダはこれから作る場所を指す）。複数ファイル（``GetMultipleFiles``）の
+    list は受けない：まずは 1 つのパスだけ。
+    """
+    # QgsFileWidget は isReadOnly() を持たないので、_widget_is_writable では見えない。
+    # setReadOnly() は（3.34 では）中の入力欄とボタンを無効にするだけで、部品自身は
+    # 有効なまま。そこで中の入力欄（lineEdit() は公開 API）が無効か読み取り専用かで
+    # 見る。readOnly() の getter がある版ならそれを使う
+    try:
+        getter = getattr(widget, "readOnly", None)
+        if callable(getter):
+            read_only = bool(getter())
+        else:
+            line = widget.lineEdit()
+            read_only = not line.isEnabled() or bool(line.isReadOnly())
+    except Exception:  # noqa: BLE001 - 判定できなければ入れてみる
+        read_only = False
+    if read_only:
+        return {"success": False, "error": "widget_readonly", "widget": _widget_summary(widget)}
+    if not isinstance(value, str):
+        return _invalid(widget, value, "a single path (str)")
+    path = value
+
+    def same(after: Any, expected: Any) -> bool:
+        # 区切り（\ と /）や末尾の区切りなど、同じ場所を指す表記の違いは失敗にしない
+        if after == expected:
+            return True
+        if not isinstance(after, str):
+            return False
+        return os.path.normcase(os.path.normpath(after)) == os.path.normcase(
+            os.path.normpath(expected)
+        )
+
+    return {"apply": lambda: widget.setFilePath(path), "expected": path, "same": same}
+
+
 def _read_value(widget: Any) -> Any:
     """今の値を読む（``prior_value`` / ``value_after``）。対象外の widget は None。
 
     日付・時刻は、``set_widget_value`` に渡す形と同じ文字で返す。
     """
+    if _is_file_widget(widget):
+        return widget.filePath()
     if isinstance(widget, QLineEdit):
         return widget.text()
     if isinstance(widget, (QPlainTextEdit, QTextEdit)):
@@ -1601,6 +1680,10 @@ def _describe_widget(
 
 def _populate_widget_value(widget: QWidget, info: dict) -> None:
     """Attach value/state fields based on widget class."""
+    if _is_file_widget(widget):
+        info["file_path"] = widget.filePath()
+        info["storage_mode"] = _storage_mode(widget)
+        return
     handlers: list[tuple[type, Callable[[QWidget, dict], None]]] = [
         (QPushButton, _fill_button),
         (QToolButton, _fill_button),

@@ -8,6 +8,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A path can be set on QGIS's `QgsFileWidget`** (#25). The file / folder
+  picker was `unsupported_widget_type`, so tests reached into its line edit
+  by a class name read off the live widget, which a QGIS version could
+  break. `qgis_set_widget_value` / `Locator.fill()` now take a single path
+  string for it, set through `setFilePath()` and read back with
+  `filePath()`, both public QGIS API; a path that does not exist yet is
+  accepted (a save target or an output folder), and a spelling difference
+  of the same place (`\` or `/`, a trailing separator) is not
+  `value_not_applied`. A list of paths is refused (`invalid_value`), and so
+  is a widget made read-only with `setReadOnly()`, which in QGIS 3.34
+  disables the inner line edit while the widget itself stays enabled and
+  has no `readOnly()` getter, so the inner line edit is looked at. The
+  snapshot shows `file_path` and `storage_mode`. `qgis.gui` is imported
+  only when a widget is looked at, so the module still loads in a Qt-only
+  environment. Checked on QGIS 3.34: a `SaveFile`, `GetDirectory` and
+  `GetFile` widget took paths with either separator, `filePath()` returned
+  them unchanged, and the snapshot showed the path and the mode.
+
 - **Table rows by cell text, double-click and right-click** (#24).
   `qgis_set_widget_value` on a table, tree or list view takes, besides a
   row number, `{"row": N}` or `{"text": cell text, "column": header name
