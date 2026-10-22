@@ -212,6 +212,20 @@ class TestCommandWiring:
         with pytest.raises(WidgetOperationError, match="widget_disabled"):
             e2e.click_widget({"object_name": "b"})
 
+    def test_kind_and_cell_are_sent_only_when_given(self) -> None:
+        """#24: 既定の呼び出しの形は変えず、kind が左以外・cell があるときだけ足す。"""
+        e2e, inner = _make_client([{"success": True}] * 3)
+        sel = {"object_name": "t"}
+        e2e.click_widget(sel)
+        e2e.click_widget(sel, kind="double", cell={"text": "beta", "column": "名前"})
+        e2e.click_widget(sel, kind="right", cell=2, wait=False)
+        sent = [c.args[1] for c in inner.call.await_args_list]
+        assert sent == [
+            {"selector": sel},
+            {"selector": sel, "kind": "double", "cell": {"text": "beta", "column": "名前"}},
+            {"selector": sel, "kind": "right", "cell": 2, "wait": False},
+        ]
+
     def test_verify_false_is_sent_only_when_given(self) -> None:
         e2e, inner = _make_client([{"success": True}, {"success": True}])
         e2e.set_widget_value({"object_name": "n"}, 1, verify=False)

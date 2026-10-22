@@ -1255,6 +1255,8 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
         ctx: Context,
         selector: SelectorArg,
         wait: bool = True,
+        kind: Literal["left", "double", "right"] = "left",
+        cell: dict[str, Any] | None = None,
         instance: InstanceArg = None,
     ) -> str | CallToolResult:
         """UI ウィジェットをクリックする。
@@ -1262,16 +1264,28 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
         見つからない・複数一致・無効などは tool error で返る
         （code は widget_not_found / selector_ambiguous / widget_disabled）。
 
+        kind は left（既定）/ double / right。cell は表・ツリー・リストの行で、
+        {"row": N} か {"text": セルの文字, "column": 見出しの名前か番号}（column を
+        省くと全列から探す）。cell 付きならそのセルの位置に、kind が左以外なら Qt の
+        マウスのイベントで押す。right は customContextMenuRequested も出す。右クリック
+        で開くメニューは exec() で止まるので wait=false にし、scope='popup' で項目を
+        選ぶ。
+
         wait=false は処理を QGIS 側に積んですぐ返す（queued: true）。押すと確認
         （QMessageBox.question など）を exec() で出す操作は、確認が閉じるまで
         返らず時間切れになるので、wait=false にして確認には
         qgis_register_dialog_handler（action="button"）で答える。積んだ処理の
         失敗は qgis_get_recent_exceptions に残る。
         """
+        params: dict[str, Any] = {"selector": selector}
+        if kind != "left":
+            params["kind"] = kind
+        if cell is not None:
+            params["cell"] = cell
         return await _call(
             ctx,
             "qgis_click_widget",
-            _with_wait({"selector": selector}, wait),
+            _with_wait(params, wait),
             instance=instance,
             present=_present_widget_result,
         )

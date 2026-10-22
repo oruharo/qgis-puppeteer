@@ -677,6 +677,8 @@ class E2EAutomationClient:
         selector: dict[str, Any],
         *,
         wait: bool = True,
+        kind: str = "left",
+        cell: dict[str, Any] | int | None = None,
         instance: str | None = None,
     ) -> dict[str, Any]:
         """`qgis_click_widget` を呼ぶ。selector 仕様は `ui_tools._find_widget`。
@@ -686,12 +688,21 @@ class E2EAutomationClient:
         確認には dialog handler（``action="button"``）で答える。click の中で出た
         失敗は戻り値ではなく ``get_recent_exceptions()`` に残る。
 
+        ``kind`` は ``"left"``（既定）/ ``"double"`` / ``"right"``、``cell`` は表・
+        ツリー・リストの行（``{"row": N}`` か ``{"text": セルの文字, "column": 見出し}``、
+        #24）。``cell`` 付きならそのセルの位置に、``kind`` が左以外なら Qt のマウスの
+        イベントで押す。右クリックで開くメニューは ``wait=False`` で積み、
+        ``scope="popup"`` で項目を選ぶ。
+
         Raises:
             WidgetOperationError: 押せなかった（見つからない・無効など、#23）。
         """
-        result = self.call(
-            "qgis_click_widget", _with_wait({"selector": selector}, wait), instance=instance
-        )
+        params: dict[str, Any] = {"selector": selector}
+        if kind != "left":
+            params["kind"] = kind
+        if cell is not None:
+            params["cell"] = cell
+        result = self.call("qgis_click_widget", _with_wait(params, wait), instance=instance)
         _raise_for_widget_result("qgis_click_widget", result)
         return result
 

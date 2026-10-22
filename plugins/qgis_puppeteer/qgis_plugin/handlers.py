@@ -164,7 +164,11 @@ def build_handlers(iface: Any | None = None) -> dict[str, Handler]:
     )
 
     handlers["qgis_click_widget"] = lambda params: ui_tools.click_widget(
-        params["selector"], iface, wait=params.get("wait", True)
+        params["selector"],
+        iface,
+        wait=params.get("wait", True),
+        kind=params.get("kind", "left"),
+        cell=params.get("cell"),
     )
 
     handlers["qgis_set_widget_value"] = lambda params: ui_tools.set_widget_value(

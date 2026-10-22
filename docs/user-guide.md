@@ -801,7 +801,10 @@ Worker は失敗時に `{"success": false, "error": "<code>", ...}` を返す。
 | `value_not_applied` | set のみ | 入れたあとに読み直した値（`value_after`）が頼んだ値と違う。Qt が黙って丸めた・切り詰めた・無視した | `WidgetOperationError` |
 | `unsupported_widget_type` | set のみ | 値設定に未対応の widget クラス | `WidgetOperationError` |
 | `set_value_failed` | set のみ | setter 内部で例外（`message` フィールドに詳細） | `WidgetOperationError` |
-| `row_index_required` | set のみ | View 系に int 以外の値を渡した | `WidgetOperationError` |
+| `row_not_found` / `row_ambiguous` | set / click | 表・ツリーのセルの文字に当たる行が無い / 複数ある（`rows` に番号）。`column` で絞るか `row` で指す | `WidgetOperationError` |
+| `row_hidden` | set / click | `setRowHidden` で隠した行を `row` で指した | `WidgetOperationError` |
+| `column_not_found` | set / click | `column` の見出しの名前か番号が無い（`available` に見出し） | `WidgetOperationError` |
+| `cell_needs_a_view` | click のみ | 表・ツリー・リストでない widget に `cell` を付けた | `WidgetOperationError` |
 | `no_model` | set のみ | View に model が未設定 | `WidgetOperationError` |
 
 ### 値の形と、入ったあとの確かめ（`qgis_set_widget_value`）
@@ -810,7 +813,7 @@ Worker は失敗時に `{"success": false, "error": "<code>", ...}` を返す。
 |---|---|
 | `QLineEdit` / `QTextEdit` / `QPlainTextEdit` | 文字 |
 | `QComboBox` / `QTabWidget` / `QListWidget` | 項目の文字（完全一致）か番号 |
-| `QListView` / `QTreeView` / `QTableView` | 行の番号 |
+| `QTableWidget` / `QTableView` / `QTreeWidget` / `QTreeView` / `QListView` | 行の番号、または `{"row": N}` / `{"text": セルの文字, "column": 見出しの名前か番号}`（下の「表の行」） |
 | `QCheckBox` / `QRadioButton` | `true` / `false`、または文字の `"true"` / `"false"` |
 | `QSpinBox` | 整数（`3.7` は断る。黙って切り捨てるため） |
 | `QDoubleSpinBox` | 数 |
@@ -830,6 +833,20 @@ Worker は失敗時に `{"success": false, "error": "<code>", ...}` を返す。
   利用側の conftest に置く
 - `QLineEdit.setText` は validator を通さない。validator がある欄は、入った文字が
   受け付けられる形か（`acceptable_input`）を添える
+
+#### 表の行（`QTableWidget` / `QTableView` / ツリー / リスト）
+
+- 行は番号か、`{"text": セルの文字, "column": 見出しの名前か番号}` で指す
+  （`column` を省くと全列から探す。文字は表示値との完全一致）。複数の行に当たれば
+  `row_ambiguous`（当たった行の番号付き）なので、`column` で絞るか番号で指す
+- **行全体が選ばれる**（`QTableView.selectRow()` 相当。`selectionBehavior` に
+  関わらず）。`currentChanged` と `selectionChanged` が人の操作と同じ形で出るので、
+  行の選択で動くホストの処理（選んだ行の地物に地図を移す、など）が進む
+- 行の番号は**今、画面に並んでいる順**（並べ替えた `QTableWidget` なら並べ替え後の
+  行。`QTableView` に代理のモデルがあれば代理のモデルの行）
+- `setRowHidden` で隠した行は、文字の候補から外す。番号で指せば `row_hidden`
+- ツリーは一番上の階層だけ
+- 読み直し（`value_after`）は選ばれた行の番号
 - パスワード欄は `prior_value` / `value_after` / `expected` を伏せる（`masked`）
 - `wait=False` のときは、入れる前に分かる失敗（読み取り専用・範囲外・候補に無い・
   形の違う値）だけを返す。入れたあとの失敗は `qgis_get_recent_exceptions` に残る
@@ -908,7 +925,8 @@ qgis.locator({"scope": "popup", "class": "QAction", "text": "削除"}).click()
 
 | メソッド | 用途 | 待機条件 |
 |---|---|---|
-| `click()` | クリック | actionable |
+| `click()` | クリック。`kind="right"` で右クリック、`cell=` で表の行のセル | actionable |
+| `dblclick()` | ダブルクリック（`cell=` で表の行のセル） | actionable |
 | `fill(value)` | LineEdit / TextEdit / SpinBox 等への書き込み | actionable + **editable** |
 | `select(value)` | ComboBox / Tab / List の選択 | actionable |
 | `check()` | CheckBox / RadioButton を True に | actionable |
@@ -917,6 +935,29 @@ qgis.locator({"scope": "popup", "class": "QAction", "text": "削除"}).click()
 どれも `wait=False` を受ける。押すと確認を `exec()` で出す操作を、待たずに
 QGIS 側へ積んですぐ返す（[Dialog handler](#dialog-handler) の「確認を出す操作は
 `wait=False` と組み合わせる」）。
+
+#### ダブルクリック・右クリック・セルのクリック
+
+`click(kind=...)` の `kind` は `"left"`（既定）/ `"double"` / `"right"`。`dblclick()` は
+`kind="double"` の糖衣。既定の左クリックは今までどおり `click()` / `trigger()` で押し、
+それ以外（と `cell` 付き）は Qt のマウスのイベントを widget（表・ツリーなら viewport）に
+送る。
+
+- `cell` は表・ツリー・リストの行（「表の行」と同じ `{"row": N}` /
+  `{"text": ..., "column": ...}`）。そのセルの位置に送るので、ダブルクリックの最初の
+  押しで行が選ばれ（`currentChanged`）、それから `doubleClicked` /
+  `cellDoubleClicked` が出る。戻り値に `cell: {"row", "column"}` が付く
+- `kind="right"` は右ボタンの押し・離しのあと `QContextMenuEvent` も送るので、
+  `customContextMenuRequested` が出る。開いたメニューは `exec()` で止まるので、
+  `wait=False` で積み、`scope="popup"` で項目を選ぶ
+
+```python
+results = qgis.locator({"object_name": "resultTable"})
+results.select({"text": "大通り", "column": "名前"})  # 行を選ぶ（地図が移る）
+results.dblclick(cell={"text": "大通り", "column": "名前"})  # フォームを開く
+results.click(kind="right", cell={"row": 0}, wait=False)  # 右クリックのメニュー
+qgis.locator({"scope": "popup", "class": "QAction", "text": "削除"}).click()
+```
 
 #### actionable とは（auto-wait チェック項目）
 

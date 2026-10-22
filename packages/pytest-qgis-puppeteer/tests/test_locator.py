@@ -49,11 +49,21 @@ class _FakeClient:
         return self._take("qgis_check_actionability")
 
     def click_widget(
-        self, selector: dict[str, Any], *, wait: bool = True, instance: str | None = None
+        self,
+        selector: dict[str, Any],
+        *,
+        wait: bool = True,
+        kind: str = "left",
+        cell: Any = None,
+        instance: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"selector": selector}
         if not wait:
             params["wait"] = False
+        if kind != "left":
+            params["kind"] = kind
+        if cell is not None:
+            params["cell"] = cell
         self.calls.append(("qgis_click_widget", params, instance))
         return self._take("qgis_click_widget")
 
@@ -181,6 +191,38 @@ class TestAutoWaitClick:
             {"selector": {"object_name": "ok"}, "wait": False},
             {"selector": {"object_name": "ok"}, "value": True, "wait": False},
             {"selector": {"object_name": "ok"}},
+        ]
+
+    def test_dblclick_and_right_click_forward_kind_and_cell(self) -> None:
+        """#24: dblclick は kind="double"、click(kind="right") は右クリック。"""
+        ready = {
+            "exists": True,
+            "visible": True,
+            "enabled": True,
+            "not_covered": True,
+            "actionable": True,
+        }
+        client = _FakeClient(
+            {
+                "qgis_check_actionability": [ready] * 2,
+                "qgis_click_widget": [
+                    {"success": True, "cell": {"row": 1, "column": 0}},
+                    {"success": True, "queued": True},
+                ],
+            }
+        )
+        loc = Locator(client, {"object_name": "table"})
+        assert loc.dblclick(cell={"text": "beta"})["cell"] == {"row": 1, "column": 0}
+        loc.click(kind="right", cell={"row": 2}, wait=False)
+        sent = [c[1] for c in client.calls if c[0] == "qgis_click_widget"]
+        assert sent == [
+            {"selector": {"object_name": "table"}, "kind": "double", "cell": {"text": "beta"}},
+            {
+                "selector": {"object_name": "table"},
+                "wait": False,
+                "kind": "right",
+                "cell": {"row": 2},
+            },
         ]
 
     def test_click_polls_until_actionable(self, monkeypatch: pytest.MonkeyPatch) -> None:

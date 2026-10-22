@@ -8,6 +8,31 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Table rows by cell text, double-click and right-click** (#24).
+  `qgis_set_widget_value` on a table, tree or list view takes, besides a
+  row number, `{"row": N}` or `{"text": cell text, "column": header name
+  or index}` (any column when omitted; several matching rows are
+  `row_ambiguous`), and selects the whole row through the selection model
+  regardless of `selectionBehavior`, so `currentChanged` and
+  `selectionChanged` fire as they do for a person. Row numbers follow the
+  displayed order, hidden rows are skipped when matching text and refused
+  by number (`row_hidden`), and trees are matched at the top level.
+  `qgis_click_widget` takes `kind` (`left`, `double`, `right`) and `cell`
+  (the same row forms): with either, it sends Qt mouse events to the
+  widget or the view's viewport at the cell's centre, press / release /
+  double-click / release for a double click so the first press selects the
+  row before `doubleClicked` / `cellDoubleClicked`, and a
+  `QContextMenuEvent` after a right click so `customContextMenuRequested`
+  fires; a menu opened that way is answered with `wait=False` and
+  `scope="popup"`. The default left click still uses `click()` /
+  `trigger()`. The Locator gains `click(kind=, cell=)` and `dblclick()`,
+  the client and the MCP tool pass `kind` and `cell` through. Checked on
+  QGIS 3.34: a `QTableWidget` row chosen by its Japanese header and cell
+  text fired `currentCellChanged` and `itemSelectionChanged`, a double
+  click fired `cellDoubleClicked` after selecting, and a right click
+  opened the host's context menu, whose item was chosen through
+  `scope="popup"`.
+
 - **Popup menus and file dialogs in E2E** (#22). A menu shown with
   `QMenu.exec()` is not modal, so neither `qgis_snapshot_ui` nor dialog
   handlers saw it. The snapshot has `active_popup` (`activePopupWidget()`;

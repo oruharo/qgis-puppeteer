@@ -174,7 +174,14 @@ class Locator:
     # 操作系（auto-wait 内蔵）
     # ------------------------------------------------------------
 
-    def click(self, *, timeout_s: float | None = None, wait: bool = True) -> dict[str, Any]:
+    def click(
+        self,
+        *,
+        timeout_s: float | None = None,
+        wait: bool = True,
+        kind: str = "left",
+        cell: dict[str, Any] | int | None = None,
+    ) -> dict[str, Any]:
         """actionable になるまで待ってから click。
 
         ``editable`` は要求しない。表示専用 (readOnly な) widget でも click は
@@ -185,12 +192,30 @@ class Locator:
         dialog handler（``action="button"``）と組み合わせる。他の操作の
         ``wait`` も同じ意味。
 
+        ``kind="right"`` は右クリック、``cell`` は表・ツリー・リストの行
+        （``{"row": N}`` か ``{"text": セルの文字, "column": 見出し}``、#24）。
+        ダブルクリックは :meth:`dblclick`。
+
         押せなければ ``WidgetOperationError``（#23）。
         """
         self._wait_actionable(timeout_s=timeout_s)
         return self._client.click_widget(
-            self._effective_selector(), wait=wait, instance=self._instance
+            self._effective_selector(), wait=wait, kind=kind, cell=cell, instance=self._instance
         )
+
+    def dblclick(
+        self,
+        *,
+        timeout_s: float | None = None,
+        wait: bool = True,
+        cell: dict[str, Any] | int | None = None,
+    ) -> dict[str, Any]:
+        """actionable になるまで待ってからダブルクリック（``click(kind="double")``）。
+
+        表・ツリーなら ``cell`` で行を指す。最初の押しで行が選ばれ、
+        ``doubleClicked`` / ``cellDoubleClicked`` が出る（#24）。
+        """
+        return self.click(timeout_s=timeout_s, wait=wait, kind="double", cell=cell)
 
     def fill(
         self,

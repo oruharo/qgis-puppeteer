@@ -12,8 +12,8 @@ import re
 from collections.abc import Callable, Iterator
 from typing import Any
 
-from qgis.PyQt.QtCore import QEvent, Qt
-from qgis.PyQt.QtGui import QKeyEvent
+from qgis.PyQt.QtCore import QEvent, QItemSelectionModel, QPointF, Qt
+from qgis.PyQt.QtGui import QContextMenuEvent, QKeyEvent, QMouseEvent
 from qgis.PyQt.QtWidgets import (
     QAbstractButton,
     QAbstractItemView,
@@ -234,7 +234,17 @@ def _resolve_actionable_widget(selector: dict) -> tuple[QWidget | None, dict | N
     return widget, None
 
 
-def click_widget(selector: dict, iface=None, *, wait: bool = True) -> dict:
+_CLICK_KINDS = ("left", "double", "right")
+
+
+def click_widget(
+    selector: dict,
+    iface=None,
+    *,
+    wait: bool = True,
+    kind: str = "left",
+    cell: Any = None,
+) -> dict:
     """Click a widget located by selector.
 
     Args:
@@ -243,17 +253,37 @@ def click_widget(selector: dict, iface=None, *, wait: bool = True) -> dict:
         wait: False なら、click を Qt のイベントループに積んですぐ返す（#21）。
             押すと ``exec()`` の確認を出すボタン用。widget の解決と「押せるか」は
             その場で確かめ、click の中で出た失敗は recent_exceptions に残る。
+        kind: ``"left"``（既定）/ ``"double"`` / ``"right"``（#24）。既定の左クリックは
+            ``click()`` / ``trigger()`` で押す。それ以外（と ``cell`` 付き）は、Qt の
+            マウスのイベントを widget（表・ツリーなら viewport）に送る。``"right"`` は
+            ``QContextMenuEvent`` も送るので、``customContextMenuRequested`` が出る。
+            右クリックで開くメニューは ``exec()`` で止まるので、``wait=False`` で積み、
+            ``scope="popup"`` で項目を選ぶ。
+        cell: 表・ツリー・リストの行の指定（``{"row": N}`` か
+            ``{"text": セルの文字, "column": 見出しの名前か番号}``、
+            :func:`_resolve_row`）。そのセルの位置にクリックを送る。
 
     Returns:
-        Dictionary with success flag and widget metadata. ``wait=False`` では
-        ``queued: True`` が付く。
+        Dictionary with success flag and widget metadata. ``cell`` 付きなら
+        ``cell: {"row", "column"}`` も。``wait=False`` では ``queued: True`` が付く。
     """
     del iface  # unused
+    if kind not in _CLICK_KINDS:
+        return {
+            "success": False,
+            "error": "invalid_argument",
+            "message": f"kind must be one of {_CLICK_KINDS}, not {kind!r}",
+        }
     widget, error = _resolve_actionable_widget(selector)
     if error is not None:
         return error
 
-    if isinstance(widget, QAbstractButton):
+    result: dict[str, Any] = {"success": True, "widget": _widget_summary(widget)}
+    if kind != "left" or cell is not None:
+        press, error = _mouse_press(widget, kind, cell, result)
+        if error is not None:
+            return error
+    elif isinstance(widget, QAbstractButton):
         press = widget.click
     elif isinstance(widget, QAction):
         menu = _menu_showing(widget)
@@ -274,12 +304,201 @@ def click_widget(selector: dict, iface=None, *, wait: bool = True) -> dict:
             "widget": _widget_summary(widget),
         }
 
-    summary = _widget_summary(widget)
     if not wait:
         queued.run_later(press, what="qgis_click_widget", target=widget)
-        return {"success": True, "queued": True, "widget": summary}
+        result["queued"] = True
+        return result
     press()
-    return {"success": True, "widget": summary}
+    return result
+
+
+def _mouse_press(
+    widget: Any, kind: str, cell: Any, result: dict
+) -> tuple[Callable[[], None] | None, dict | None]:
+    """Qt のマウスのイベントで押す処理を作る（#24）。
+
+    ``cell`` があれば、その行のセルの中心に送る（表示する位置まで scroll してから）。
+    無ければ widget の中心。表・ツリー・リストは ``viewport()`` が受け手。
+    ``QAction`` は位置が無いので押せない。
+
+    修飾キー（Ctrl / Shift の複数行の選択）は、ここに ``modifiers`` を足せば通る形。
+    """
+    if not isinstance(widget, QWidget):
+        return None, {
+            "success": False,
+            "error": "widget_not_clickable",
+            "widget": _widget_summary(widget),
+        }
+    index = None
+    if cell is not None:
+        if not isinstance(widget, QAbstractItemView):
+            return None, {
+                "success": False,
+                "error": "cell_needs_a_view",
+                "widget": _widget_summary(widget),
+            }
+        index, error = _resolve_row(widget, cell)
+        if error is not None:
+            return None, error
+        result["cell"] = {"row": index.row(), "column": index.column()}
+    target = widget.viewport() if isinstance(widget, QAbstractItemView) else widget
+
+    def press() -> None:
+        if index is not None:
+            widget.scrollTo(index)
+            pos = widget.visualRect(index).center()
+        else:
+            pos = target.rect().center()
+        _send_mouse(target, pos, kind)
+
+    return press, None
+
+
+def _send_mouse(target: QWidget, pos: Any, kind: str, modifiers: Any = Qt.NoModifier) -> None:
+    """``target`` の ``pos`` にクリックを送る。
+
+    ``"double"`` は press → release → doubleClick → release（``QTest.mouseDClick`` と
+    同じ並び。最初の press で行が選ばれ、doubleClick で ``doubleClicked`` が出る）。
+    ``"right"`` は右ボタンの press / release のあと ``QContextMenuEvent``（``sendEvent``
+    では Qt が contextMenu を合成しないため）。
+    """
+    button = Qt.RightButton if kind == "right" else Qt.LeftButton
+    local = QPointF(pos)
+    global_ = QPointF(target.mapToGlobal(pos))
+
+    def event(kind_: Any, buttons: Any) -> QMouseEvent:
+        return QMouseEvent(kind_, local, global_, button, buttons, modifiers)
+
+    QApplication.sendEvent(target, event(QEvent.MouseButtonPress, button))
+    QApplication.sendEvent(target, event(QEvent.MouseButtonRelease, Qt.NoButton))
+    if kind == "double":
+        QApplication.sendEvent(target, event(QEvent.MouseButtonDblClick, button))
+        QApplication.sendEvent(target, event(QEvent.MouseButtonRelease, Qt.NoButton))
+    elif kind == "right":
+        QApplication.sendEvent(
+            target,
+            QContextMenuEvent(QContextMenuEvent.Mouse, pos, target.mapToGlobal(pos), modifiers),
+        )
+
+
+def _resolve_row(view: QAbstractItemView, spec: Any) -> tuple[Any, dict | None]:
+    """表・ツリー・リストの行の指定を ``QModelIndex`` にする（#24）。
+
+    ``spec`` は行の番号か、``{"row": N}`` / ``{"text": セルの文字, "column": 見出しの
+    名前か番号}``。``column`` を省くと全列から探す。文字は表示値との完全一致。
+
+    - ``row`` は今、画面に並んでいる順の番号（``QTableWidget`` は並べ替え後の行、
+      ``QTableView`` に代理のモデルがあれば代理のモデルの行）
+    - ``setRowHidden`` で隠した行は、文字の候補から外す。``row`` で指せば
+      ``row_hidden`` で断る（人には見えない行を選ばないため）
+    - 複数の行に当たれば ``row_ambiguous``（当たった行の番号付き）
+    - ツリーは一番上の階層だけ（snapshot と同じ）
+
+    Returns:
+        ``(index, None)`` か ``(None, error_dict)``。``index`` の列は、文字で当てた
+        列（``column`` 指定ならその列、無指定なら 0）。
+    """
+    model = view.model()
+    if model is None:
+        return None, {"success": False, "error": "no_model", "widget": _widget_summary(view)}
+    root = view.rootIndex()
+    if _is_index(spec):
+        spec = {"row": spec}
+    if not isinstance(spec, dict) or not ({"row", "text"} & set(spec)):
+        return None, _invalid(view, spec, '{"row": N} or {"text": ..., "column": ...}')
+    count = model.rowCount(root)
+    column = spec.get("column")
+    col: int | None = None
+    if column is not None:
+        col, error = _resolve_column(view, model, root, column)
+        if error is not None:
+            return None, error
+    if "row" in spec:
+        row = spec["row"]
+        if not _is_index(row):
+            return None, _invalid(view, row, "row number")
+        if not 0 <= row < count:
+            return None, _out_of_range(view, row, count)
+        if _row_hidden(view, row, root):
+            return None, {
+                "success": False,
+                "error": "row_hidden",
+                "row": row,
+                "widget": _widget_summary(view),
+            }
+        return model.index(row, col if col is not None else 0, root), None
+
+    text = str(spec["text"])
+    columns = [col] if col is not None else _columns(view, model, root)
+    hits: list[tuple[int, int]] = []
+    for row in range(count):
+        if _row_hidden(view, row, root):
+            continue
+        for c in columns:
+            if str(_display(model.index(row, c, root))) == text:
+                hits.append((row, c))
+                break
+    if not hits:
+        return None, {
+            "success": False,
+            "error": "row_not_found",
+            "text": text,
+            "column": column,
+            "widget": _widget_summary(view),
+        }
+    if len(hits) > 1:
+        return None, {
+            "success": False,
+            "error": "row_ambiguous",
+            "text": text,
+            "column": column,
+            "rows": [row for row, _ in hits],
+            "hint": "narrow with column, or use row",
+            "widget": _widget_summary(view),
+        }
+    row, c = hits[0]
+    return model.index(row, c, root), None
+
+
+def _columns(view: QAbstractItemView, model: Any, root: Any) -> list[int]:
+    """読める列の番号。リストは 1 列（``QAbstractListModel.columnCount()`` は呼べない）。"""
+    if isinstance(view, QListView):
+        return [view.modelColumn()]
+    return list(range(min(model.columnCount(root), _MAX_ITEM_COLUMNS)))
+
+
+def _resolve_column(
+    view: QAbstractItemView, model: Any, root: Any, column: Any
+) -> tuple[int | None, dict | None]:
+    """``column``（見出しの名前か番号）を列の番号にする。"""
+    columns = _columns(view, model, root)
+    if _is_index(column):
+        if column in columns:
+            return column, None
+        names: list[Any] = [_display_header(model, c) for c in columns]
+    else:
+        names = [_display_header(model, c) for c in columns]
+        for c, name in zip(columns, names, strict=True):
+            if str(name) == str(column):
+                return c, None
+    return None, {
+        "success": False,
+        "error": "column_not_found",
+        "column": column,
+        "available": names,
+        "widget": _widget_summary(view),
+    }
+
+
+def _row_hidden(view: QAbstractItemView, row: int, root: Any) -> bool:
+    try:
+        if isinstance(view, QTreeView):
+            return bool(view.isRowHidden(row, root))
+        if isinstance(view, (QTableView, QListView)):
+            return bool(view.isRowHidden(row))
+    except Exception:  # noqa: BLE001 - 隠しの判定に失敗しても選べる方に倒す
+        return False
+    return False
 
 
 def set_widget_value(
@@ -289,7 +508,10 @@ def set_widget_value(
 
     Handles common input widgets: QLineEdit, QTextEdit/QPlainTextEdit,
     QComboBox, QCheckBox/QRadioButton, QSpinBox/QDoubleSpinBox, date/time
-    editors, QTabWidget (selects tab), list/tree/table views (selects row).
+    editors, QTabWidget (selects tab), list/tree/table views (selects a row:
+    by number, or ``{"text": セルの文字, "column": 見出し}``; the whole row is
+    selected and ``currentChanged`` / ``selectionChanged`` fire as for a
+    person, #24).
 
     入れる前に確かめられることは確かめて断る（範囲外の番号は
     ``index_out_of_range``、形の違う値は ``invalid_value``、候補に無い文字は
@@ -471,38 +693,29 @@ def _prepare_widget_value(widget: Any, value: Any) -> dict:  # noqa: C901 - widg
         else:
             return _not_found("tab_not_found", widget, value, texts)
         return {"apply": lambda: widget.setCurrentIndex(idx), "expected": idx}
-    if isinstance(widget, QListWidget):
-        count = widget.count()
-        if _is_index(value):
-            if not 0 <= value < count:
-                return _out_of_range(widget, value, count)
-            row = value
-        else:
-            # 整数の 0 ではなく MatchFlag を渡す（PyQt は 0 を型で弾く、#23）
-            items = widget.findItems(str(value), Qt.MatchExactly)
-            if not items:
-                texts = [widget.item(i).text() for i in range(min(count, _MAX_ITEM_ROWS))]
-                return _not_found("list_item_not_found", widget, value, texts)
-            row = widget.row(items[0])
+    if isinstance(widget, QListWidget) and isinstance(value, str):
+        # 整数の 0 ではなく MatchFlag を渡す（PyQt は 0 を型で弾く、#23）
+        items = [i for i in widget.findItems(value, Qt.MatchExactly) if not i.isHidden()]
+        if not items:
+            count = widget.count()
+            texts = [widget.item(i).text() for i in range(min(count, _MAX_ITEM_ROWS))]
+            return _not_found("list_item_not_found", widget, value, texts)
+        row = widget.row(items[0])
         return {"apply": lambda: widget.setCurrentRow(row), "expected": row}
     if isinstance(widget, (QListView, QTreeView, QTableView)):
-        model = widget.model()
-        if model is None:
-            return {"success": False, "error": "no_model", "widget": _widget_summary(widget)}
-        if not _is_index(value):
-            return {
-                "success": False,
-                "error": "row_index_required",
-                "widget": _widget_summary(widget),
-            }
-        count = model.rowCount()
-        if not 0 <= value < count:
-            return _out_of_range(widget, value, count)
-        row = value
-        return {
-            "apply": lambda: widget.setCurrentIndex(model.index(row, 0)),
-            "expected": row,
-        }
+        index, error = _resolve_row(widget, value)
+        if error is not None:
+            return error
+        row = index.row()
+        # 行全体を選ぶ（QTableView.selectRow 相当）。setCurrentIndex だけだと
+        # selectionBehavior によってはセル 1 つの選択になり、行の選択で動くホストの
+        # 処理が進まない（#24）
+        flags = QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows
+
+        def apply() -> None:
+            widget.selectionModel().setCurrentIndex(index, flags)
+
+        return {"apply": apply, "expected": row}
     return {
         "success": False,
         "error": "unsupported_widget_type",

@@ -440,6 +440,14 @@ Client 側の操作系 API（`click_widget`, `set_widget_value`, Locator メソ�
 > できるので、派生も含めて全部比べ、値を自分で直す欄は利用側が `verify=False` を
 > 付ける。ホストの部品の知識はライブラリではなく利用側に置く。
 
+> **2026-10-23 注（#24）**: 表の行の操作は、signal を直接出すのではなく、人の操作と
+> 同じ経路で行う。行の選択は選択モデルに `ClearAndSelect | Rows` で（`setCurrentIndex`
+> だけだと `selectionBehavior` によってはセル 1 つの選択になる）、ダブルクリックと
+> 右クリックは Qt のマウスのイベントを viewport のセルの位置に送る（右クリックは
+> `QContextMenuEvent` も。`sendEvent` では Qt が contextMenu を合成しない）。ホストが
+> `currentChanged` → `doubleClicked` の順で動く前提を崩さないため。修飾キー付きの
+> クリック（複数行の選択）は、この経路に `modifiers` を足せば通る形にしてある。
+
 ##### Polling 戦略と RTT の考慮
 
 ADR-0001 §Performance の実測値では定常コマンドの RTT が 10〜140ms、最大 1170ms（list_layers の外れ値）に達します。Client 側で 4 項目を個別にコマンド発行して poll すると 1 操作が数秒〜数十秒に膨らむため、以下の戦略を採ります:

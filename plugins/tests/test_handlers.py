@@ -374,14 +374,16 @@ class TestUiHandlers:
         handlers["qgis_click_widget"]({"selector": selector})
         args, kwargs = fake_tools["ui"].click_widget.calls[0]
         assert args == (selector, iface)
-        assert kwargs == {"wait": True}
+        assert kwargs == {"wait": True, "kind": "left", "cell": None}
 
-    def test_click_widget_forwards_wait(self, fake_tools: dict[str, Any]) -> None:
+    def test_click_widget_forwards_wait_kind_and_cell(self, fake_tools: dict[str, Any]) -> None:
         build_handlers = _import_build_handlers()
         handlers = build_handlers(None)
-        handlers["qgis_click_widget"]({"selector": {"name": "b"}, "wait": False})
+        handlers["qgis_click_widget"](
+            {"selector": {"name": "b"}, "wait": False, "kind": "double", "cell": {"row": 1}}
+        )
         _, kwargs = fake_tools["ui"].click_widget.calls[0]
-        assert kwargs == {"wait": False}
+        assert kwargs == {"wait": False, "kind": "double", "cell": {"row": 1}}
 
     def test_set_widget_value_forwards_selector_and_value(self, fake_tools: dict[str, Any]) -> None:
         build_handlers = _import_build_handlers()

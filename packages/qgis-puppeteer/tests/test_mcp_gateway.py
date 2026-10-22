@@ -755,6 +755,22 @@ class TestMcpGatewayWidgetFailures:
         assert result.is_error
         assert json.loads(_extract_text(result))["error"]["code"] == "widget_disabled"
 
+    def test_kind_and_cell_are_passed(self) -> None:
+        """#24"""
+        result, seen = self._call(
+            "qgis_click_widget",
+            {"success": True, "cell": {"row": 1, "column": 0}},
+            selector={"object_name": "t"},
+            kind="double",
+            cell={"text": "beta"},
+        )
+        assert not result.is_error
+        assert seen == {
+            "selector": {"object_name": "t"},
+            "kind": "double",
+            "cell": {"text": "beta"},
+        }
+
     def test_success_is_plain_text(self) -> None:
         result, _ = self._call(
             "qgis_click_widget", {"success": True}, selector={"object_name": "b"}
