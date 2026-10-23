@@ -709,6 +709,28 @@ class E2EAutomationClient:
         _raise_for_widget_result("qgis_click_widget", result)
         return result
 
+    def close_widget(
+        self,
+        selector: dict[str, Any],
+        *,
+        wait: bool = True,
+        instance: str | None = None,
+    ) -> dict[str, Any]:
+        """`qgis_close_widget` を呼ぶ。selector の widget の窓を × と同じく閉じる（#34）。
+
+        ``closeEvent`` が走る。閉じるのを断った窓は ``closed: False``。閉じるときに
+        確認を ``exec()`` で出す窓は ``wait=False`` にして、確認には dialog handler か
+        Locator で答える。
+
+        Raises:
+            WidgetOperationError: 閉じられなかった（見つからない・メインウィンドウなど）。
+        """
+        result = self.call(
+            "qgis_close_widget", _with_wait({"selector": selector}, wait), instance=instance
+        )
+        _raise_for_widget_result("qgis_close_widget", result)
+        return result
+
     def set_widget_value(
         self,
         selector: dict[str, Any],

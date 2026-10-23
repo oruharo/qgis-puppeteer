@@ -8,6 +8,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`Locator.close()` closes a window as its close button does** (#34).
+  Nothing let a test close a window the way a person does with the title
+  bar's ×, so hosts looked up top-level widgets and called `close()`
+  themselves. `close()` (`qgis_close_widget`, also an MCP tool) closes the
+  window of the selected widget through its `closeEvent` (`reject()` for
+  a `QDialog`) and returns `closed: False` when the window refused. It
+  takes `wait=False` for a window that asks for confirmation on close. The
+  QGIS main window is not closed.
+
 - **A covered point is not clicked** (#33). Mouse input to the map canvas
   and clicks on a table, tree or list cell were sent straight to the
   viewport, so a point under a message bar item, a floating input over

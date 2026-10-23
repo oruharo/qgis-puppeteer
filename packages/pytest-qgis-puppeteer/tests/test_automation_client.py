@@ -264,6 +264,18 @@ class TestCommandWiring:
             "pixel": True,
         }
 
+    def test_close_widget_passes_the_selector_and_raises_on_failure(self) -> None:
+        """#34"""
+        e2e, inner = _make_client([{"success": True, "closed": True}])
+        assert e2e.close_widget({"title": "属性"}, wait=False)["closed"] is True
+        assert inner.call.await_args_list[0].args[:2] == (
+            "qgis_close_widget",
+            {"selector": {"title": "属性"}, "wait": False},
+        )
+        e2e, _ = _make_client([{"success": False, "error": "widget_not_closable"}])
+        with pytest.raises(WidgetOperationError, match="widget_not_closable"):
+            e2e.close_widget({"title": "QGIS"})
+
     def test_a_failed_canvas_operation_raises(self) -> None:
         e2e, _inner = _make_client([{"success": False, "error": "point_outside_canvas"}])
         with pytest.raises(WidgetOperationError, match="point_outside_canvas"):

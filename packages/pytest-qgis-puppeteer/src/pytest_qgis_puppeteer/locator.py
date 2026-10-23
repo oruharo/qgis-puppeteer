@@ -218,6 +218,19 @@ class Locator:
         """
         return self.click(timeout_s=timeout_s, wait=wait, kind="double", cell=cell)
 
+    def close(self, *, timeout_s: float | None = None, wait: bool = True) -> dict[str, Any]:
+        """actionable になるまで待ってから、この widget の窓を × と同じく閉じる（#34）。
+
+        ``closeEvent`` が走る（``QDialog`` なら ``reject()`` 相当）。閉じるのを断った窓は
+        戻り値が ``closed: False``。閉じるときに確認を出す窓は ``wait=False``::
+
+            qgis.locator({"scope": "any", "title": "属性"}).close()
+        """
+        self._wait_actionable(timeout_s=timeout_s)
+        return self._client.close_widget(
+            self._effective_selector(), wait=wait, instance=self._instance
+        )
+
     def fill(
         self,
         value: Any,

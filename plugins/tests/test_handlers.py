@@ -94,6 +94,7 @@ def _install_fake_tools() -> dict[str, Any]:
     ui_tools.snapshot_ui = _CallRecorder({"active_modal": None})
     ui_tools.click_widget = _CallRecorder({"success": True})
     ui_tools.set_widget_value = _CallRecorder({"success": True})
+    ui_tools.close_widget = _CallRecorder({"success": True})
     ui_tools.check_actionability = _CallRecorder({"actionable": True})
 
     dialog_handler_tools = types.ModuleType("qgis_puppeteer.qgis_tools.dialog_handler_tools")
@@ -421,6 +422,18 @@ class TestUiHandlers:
         _, kwargs = fake_tools["ui"].click_widget.calls[0]
         assert kwargs == {"wait": False, "kind": "double", "cell": {"row": 1}}
 
+    def test_close_widget_forwards_selector_iface_and_wait(
+        self, fake_tools: dict[str, Any]
+    ) -> None:
+        """#34"""
+        build_handlers = _import_build_handlers()
+        iface = object()
+        handlers = build_handlers(iface)
+        handlers["qgis_close_widget"]({"selector": {"title": "属性"}, "wait": False})
+        args, kwargs = fake_tools["ui"].close_widget.calls[0]
+        assert args == ({"title": "属性"}, iface)
+        assert kwargs == {"wait": False}
+
     def test_set_widget_value_forwards_selector_and_value(self, fake_tools: dict[str, Any]) -> None:
         build_handlers = _import_build_handlers()
         handlers = build_handlers(None)
@@ -596,6 +609,7 @@ class TestHandlerInventory:
             "qgis_snapshot_ui",
             "qgis_click_widget",
             "qgis_set_widget_value",
+            "qgis_close_widget",
             "qgis_check_actionability",
             # dialog handler
             "qgis_register_dialog_handler",

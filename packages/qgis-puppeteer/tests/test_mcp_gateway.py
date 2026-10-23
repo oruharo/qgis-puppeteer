@@ -622,6 +622,7 @@ class TestMcpGatewayToolInventory:
             "qgis_snapshot_ui",
             "qgis_click_widget",
             "qgis_set_widget_value",
+            "qgis_close_widget",
             # dialog handler（worker 側 handler の公開。user-guide が MCP ツールと明記）
             "qgis_register_dialog_handler",
             "qgis_unregister_dialog_handler",
@@ -773,6 +774,17 @@ class TestMcpGatewayWidgetFailures:
             "kind": "double",
             "cell": {"text": "beta"},
         }
+
+    def test_close_is_passed_with_wait(self) -> None:
+        """#34"""
+        result, seen = self._call(
+            "qgis_close_widget",
+            {"success": True, "closed": True},
+            selector={"title": "属性"},
+            wait=False,
+        )
+        assert not result.is_error
+        assert seen == {"selector": {"title": "属性"}, "wait": False}
 
     def test_success_is_plain_text(self) -> None:
         result, _ = self._call(
@@ -1189,6 +1201,7 @@ class TestMcpGatewayToolDescriptors:
             "qgis_execute_with_permission",
             "qgis_click_widget",
             "qgis_set_widget_value",
+            "qgis_close_widget",  # closeEvent で何が起きるかは窓次第（#34）
             # 地図のマップツールが何をするかは呼び出し次第（#26）
             "qgis_canvas_mouse",
             "qgis_canvas_key",

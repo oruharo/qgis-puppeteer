@@ -402,6 +402,50 @@ def _mouse_press(
     return press, None
 
 
+def close_widget(selector: dict, iface: Any = None, *, wait: bool = True) -> dict:
+    """selector の widget の窓を、人が × を押したときと同じく閉じる（#34）。
+
+    窓（``widget.window()``）に ``close()`` を呼ぶので ``closeEvent`` が走る
+    （``QDialog`` なら ``reject()`` 相当）。``closeEvent`` が「保存しますか」などを
+    ``exec()`` で出す窓は、ほかの操作と同じく ``wait=False`` で積み、dialog handler か
+    Locator で答える。
+
+    QGIS のメインウィンドウは閉じない（アプリケーションが終わるため）。
+
+    Returns:
+        ``{"success": True, "window": 要約, "closed": bool}``。``closeEvent`` で閉じるのを
+        断った窓は ``closed: false``（人が × を押して「キャンセル」したときと同じで、
+        失敗ではない）。``wait=False`` では ``closed`` の代わりに ``queued: True``。
+    """
+    widget, error = _resolve_actionable_widget(selector)
+    if error is not None:
+        return error
+    window = widget.window() if isinstance(widget, QWidget) else None
+    if window is None:
+        return {
+            "success": False,
+            "error": "widget_not_closable",
+            "message": "the selector does not point to a widget in a window",
+            "widget": _widget_summary(widget),
+        }
+    main = iface.mainWindow() if iface is not None and hasattr(iface, "mainWindow") else None
+    if main is not None and window is main:
+        return {
+            "success": False,
+            "error": "widget_not_closable",
+            "message": "closing the main window would quit QGIS",
+            "widget": _widget_summary(window),
+        }
+    summary = {**_widget_summary(window), "title": window.windowTitle()}
+    result: dict[str, Any] = {"success": True, "window": summary}
+    if not wait:
+        queued.run_later(window.close, what="qgis_close_widget", target=window)
+        result["queued"] = True
+        return result
+    result["closed"] = bool(window.close())
+    return result
+
+
 def covered_point(target: QWidget, pos: Any) -> dict | None:
     """``target`` の ``pos`` を人が押したら、別の widget に当たるか（#33）。
 

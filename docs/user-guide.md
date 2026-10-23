@@ -1049,10 +1049,26 @@ qgis.locator({"scope": "popup", "class": "QAction", "text": "削除"}).click()
 | `select(value)` | ComboBox / Tab / List の選択 | actionable |
 | `check()` | CheckBox / RadioButton を True に | actionable |
 | `uncheck()` | 同 False に | actionable |
+| `close()` | その widget の窓を、× を押したときと同じく閉じる（#34） | actionable |
 
 どれも `wait=False` を受ける。押すと確認を `exec()` で出す操作を、待たずに
 QGIS 側へ積んですぐ返す（[Dialog handler](#dialog-handler) の「確認を出す操作は
 `wait=False` と組み合わせる」）。
+
+#### 窓を閉じる（`close()`）
+
+```python
+qgis.locator({"scope": "any", "class": "QDialog", "title": "属性"}).close()
+qgis.locator({"scope": "any", "title": "編集"}).close(wait=False)  # 閉じるときに確認を出す窓
+```
+
+- selector が窓の中の widget を指していれば、その窓を閉じる
+- 窓に `close()` を呼ぶので、人が × を押したときと同じく `closeEvent` が走る（`QDialog` なら
+  `reject()` 相当）
+- `closeEvent` で閉じるのを断った窓（未保存の確認で「キャンセル」されたときなど）は、
+  戻り値が `closed: False`（失敗ではない）
+- QGIS のメインウィンドウは閉じない（`widget_not_closable`。アプリケーションが終わるため）
+- MCP は `qgis_close_widget`
 
 #### ダブルクリック・右クリック・セルのクリック
 

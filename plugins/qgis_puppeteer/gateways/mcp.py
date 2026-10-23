@@ -1426,6 +1426,28 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
             present=_present_widget_result,
         )
 
+    @mcp.tool(title="窓を閉じる", annotations=_MUTATE_ARBITRARY, structured_output=False)
+    async def qgis_close_widget(
+        ctx: Context,
+        selector: SelectorArg,
+        wait: bool = True,
+        instance: InstanceArg = None,
+    ) -> str | CallToolResult:
+        """selector の widget の窓を、人が × を押したときと同じく閉じる。
+
+        closeEvent が走る（QDialog なら reject 相当）。closeEvent で閉じるのを断った窓は
+        closed: false（失敗ではない）。閉じるときに確認を exec() で出す窓は wait=false
+        にし、確認には qgis_register_dialog_handler で答える。QGIS のメインウィンドウは
+        閉じない（widget_not_closable）。
+        """
+        return await _call(
+            ctx,
+            "qgis_close_widget",
+            _with_wait({"selector": selector}, wait),
+            instance=instance,
+            present=_present_widget_result,
+        )
+
     @mcp.tool(
         title="ウィジェットに値を設定", annotations=_MUTATE_WIDGET_VALUE, structured_output=False
     )
