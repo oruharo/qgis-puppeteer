@@ -9,6 +9,10 @@ fixture が作って fixture が片付けたもの、ホストが始めから開
 - ``qgis_leftover_fail``: 見つけたら teardown のエラーにする項目
 - ``qgis_leftover_warn``: 見つけたら警告（:class:`QgisLeftoverWarning`）だけの項目
 
+製品の既知の振る舞いで、決まったテストがいつも残す項目は、テストに
+``@pytest.mark.qgis_leftover_expected("map_tool", reason=...)`` を付けて判定から
+外せる（#31）。付けたのに残らなければ :class:`QgisLeftoverWarning` で知らせる。
+
 片付け（編集の破棄、窓を閉じる）はしない。利用者のデータを壊しうるので、
 利用側の conftest の役目。
 """
@@ -34,6 +38,7 @@ ITEMS = (
 
 INI_FAIL = "qgis_leftover_fail"
 INI_WARN = "qgis_leftover_warn"
+MARKER = "qgis_leftover_expected"
 
 
 class QgisLeftoverWarning(UserWarning):
@@ -45,6 +50,29 @@ def configured_items(config: pytest.Config) -> tuple[list[str], list[str]]:
     fail = _items(config, INI_FAIL)
     warn = [i for i in _items(config, INI_WARN) if i not in fail]
     return fail, warn
+
+
+def expected_items(item: pytest.Item) -> dict[str, str | None]:
+    """テストに付いた ``qgis_leftover_expected`` の ``{項目: reason}``（#31）。
+
+    function・class・module の印を合わせる。同じ項目は近い印の ``reason`` を使う。
+    項目が無い、知らない項目、``reason`` 以外の引数は ``UsageError``。
+    """
+    found: dict[str, str | None] = {}
+    for mark in item.iter_markers(MARKER):
+        where = f"{item.nodeid}: @pytest.mark.{MARKER}"
+        if not mark.args:
+            raise pytest.UsageError(f"{where} needs at least one item")
+        extra = set(mark.kwargs) - {"reason"}
+        if extra:
+            raise pytest.UsageError(f"{where}: unknown argument(s) {', '.join(sorted(extra))}")
+        for name in mark.args:
+            if name not in ITEMS:
+                raise pytest.UsageError(
+                    f"{where}: unknown item {name!r}; choose from {', '.join(ITEMS)}"
+                )
+            found.setdefault(name, mark.kwargs.get("reason"))
+    return found
 
 
 def _items(config: pytest.Config, name: str) -> list[str]:
@@ -188,6 +216,16 @@ _DIFFS = {
     "active_layer": _active_layer,
     "project_dirty": _project_dirty,
 }
+
+
+def format_unmet(nodeid: str, unmet: dict[str, str | None]) -> str:
+    """印を付けたのに残らなかった項目の知らせ（#31）。直ったなら印を外せるように。"""
+    lines = [f"{nodeid} was expected to leave these behind, but did not:"]
+    for item, reason in unmet.items():
+        lines.append(f"  [{item}]" + (f" ({reason})" if reason else ""))
+    names = ", ".join(repr(name) for name in unmet)
+    lines.append(f"  if it was fixed, remove them from @pytest.mark.{MARKER}({names})")
+    return "\n".join(lines)
 
 
 def format_leftovers(nodeid: str, found: dict[str, list[str]]) -> str:

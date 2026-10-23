@@ -371,6 +371,99 @@ def test_a_teardown_failure_without_qgis_does_not_ask_for_a_restart(
     result.assert_outcomes(passed=2, errors=1)
 
 
+def test_an_expected_leftover_is_not_reported(pytester: pytest.Pytester) -> None:
+    """印の項目は知らせない。印の無い項目は今まで通り（#31）。"""
+    result = _run(
+        pytester,
+        "qgis_leftover_fail = dialogs\nqgis_leftover_warn = map_tool\n",
+        """
+        import pytest
+        from conftest import STATE, win
+
+        @pytest.mark.qgis_leftover_expected("map_tool", "dialogs", reason="S-1")
+        def test_known(automation_client):
+            STATE["map_tool"] = "QgsMapToolIdentify"
+            STATE["dialogs"].append(win("Known"))
+
+        def test_unmarked(automation_client):
+            STATE["map_tool"] = "QgsMapToolSelect"
+        """,
+    )
+    result.assert_outcomes(passed=2, warnings=1)
+    out = result.stdout.str()
+    assert "test_unmarked left QGIS" in out
+    assert "test_known left QGIS" not in out
+
+
+def test_an_expected_leftover_that_did_not_happen_warns(pytester: pytest.Pytester) -> None:
+    """印を付けたのに残らなければ、reason 付きで知らせる（直ったことに気付ける）。"""
+    result = _run(
+        pytester,
+        "qgis_leftover_fail = dialogs\nqgis_leftover_warn = map_tool\n",
+        """
+        import pytest
+        from conftest import STATE, win
+
+        pytestmark = pytest.mark.qgis_leftover_expected("map_tool", reason="S-78")
+
+        @pytest.mark.qgis_leftover_expected("dialogs")
+        def test_fixed(automation_client):
+            STATE["dialogs"].append(win("Still here"))
+
+        @pytest.mark.qgis_leftover_expected("layers", reason="not looked at")
+        def test_unchecked_item(automation_client):
+            STATE["map_tool"] = "QgsMapToolPan2"
+        """,
+    )
+    result.assert_outcomes(passed=2, warnings=1)
+    result.stdout.fnmatch_lines(
+        [
+            "*test_fixed was expected to leave these behind, but did not:*",
+            "*[[]map_tool] (S-78)*",
+            "*remove them from @pytest.mark.qgis_leftover_expected('map_tool')*",
+        ]
+    )
+    assert "not looked at" not in result.stdout.str()
+
+
+def test_a_failed_test_does_not_say_its_expected_leftover_did_not_happen(
+    pytester: pytest.Pytester,
+) -> None:
+    result = _run(
+        pytester,
+        "qgis_leftover_warn = map_tool\n",
+        """
+        import pytest
+
+        @pytest.mark.qgis_leftover_expected("map_tool")
+        def test_stops_early(automation_client):
+            assert False
+        """,
+    )
+    result.assert_outcomes(failed=1)
+    assert "was expected to leave" not in result.stdout.str()
+
+
+@pytest.mark.parametrize(
+    ("mark", "message"),
+    [
+        ('qgis_leftover_expected("map_tools")', "*unknown item 'map_tools'*"),
+        ("qgis_leftover_expected()", "*needs at least one item*"),
+        ('qgis_leftover_expected("map_tool", why="x")', "*unknown argument(s) why*"),
+    ],
+)
+def test_a_wrong_expected_mark_stops_the_run(
+    pytester: pytest.Pytester, mark: str, message: str
+) -> None:
+    result = _run(
+        pytester,
+        "qgis_leftover_warn = map_tool\n",
+        f"import pytest\n\n@pytest.mark.{mark}\ndef test_x():\n    pass\n",
+    )
+    result.stderr.fnmatch_lines([message])
+    assert result.ret != 0
+
+
 def test_an_unknown_item_stops_the_run(pytester: pytest.Pytester) -> None:
     result = _run(pytester, "qgis_leftover_warn = dialog\n", "def test_x():\n    pass\n")
     result.stderr.fnmatch_lines(["*qgis_leftover_warn: unknown item 'dialog'*"])

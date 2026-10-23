@@ -8,6 +8,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A test can mark the leftovers it is known to leave** (#31). A product
+  behaviour that always leaves, say, a map tool switched after certain
+  tests produced the same warnings every run and buried new leftovers,
+  while dropping the item from the ini hid it for every test.
+  `@pytest.mark.qgis_leftover_expected("map_tool", reason="...")` keeps
+  those items out of that test's report only; items can be listed, and
+  marks on a class or module add up. A marked item that is not left
+  behind issues `QgisLeftoverWarning` with the reason, so a fix is noticed
+  and the mark removed (not for a test that failed in its call). Marks
+  for items the ini does not look at do nothing; an unknown item or
+  argument stops the run before any test.
+
 - **State a test leaves behind is found and reported** (#28). The next
   test runs on the same QGIS, so a dialog left open, a layer left in
   editing mode or a map tool left switched changed its outcome without

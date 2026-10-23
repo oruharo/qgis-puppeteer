@@ -389,6 +389,12 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
+        "qgis_leftover_expected(*items, reason=None): this test is known to leave "
+        "these qgis_leftover_fail / qgis_leftover_warn items behind (#31); they are "
+        "not reported. If none of them is left, QgisLeftoverWarning says so.",
+    )
+    config.addinivalue_line(
+        "markers",
         "qgis_restart_before: restart the session QGIS before this test (#19). "
         "pytest_qgis_ready is then called with kind='restart'. No effect on "
         "fresh_qgis tests, in dev mode, or with an overridden qgis_process.",
@@ -477,6 +483,10 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     Phase 2 meta-parent モードでは親 invocation で **全 item を deselect** する
     （実テストは ``pytest_sessionfinish`` で env ごとに子 invocation を立てて回す）。
     """
+    # 残った状態の印の綴り違いは、テストを回す前に知らせる（#31）
+    for item in items:
+        _leftover.expected_items(item)
+
     # Phase 2: meta-parent では親が 1 件も走らないようにする
     meta_envs: tuple[str, ...] | None = getattr(config, _CONFIG_ATTR_META_ENVS, None)
     if meta_envs is not None:
@@ -2590,7 +2600,8 @@ def _qgis_leftover_check(request: pytest.FixtureRequest) -> Iterator[None]:
     plugin の autouse fixture は最初に準備され、最後に片付けられるので、ここの後半は
     ほかの function の fixture の後片付けのあとに走る。始め（call の直前）に無かった
     のに残ったものを、``qgis_leftover_fail`` の項目ならエラー（teardown）、
-    ``qgis_leftover_warn`` の項目なら警告にする。
+    ``qgis_leftover_warn`` の項目なら警告にする。``qgis_leftover_expected`` の印の
+    項目は知らせず、印を付けたのに残らなかったら警告にする（#31）。
     """
     yield
     item = request.node
@@ -2600,7 +2611,8 @@ def _qgis_leftover_check(request: pytest.FixtureRequest) -> Iterator[None]:
         return
     client, baseline = taken["client"], taken["state"]
     fail, warn = items
-    if item.stash.get(_CALL_FAILED_KEY, False):
+    call_failed = item.stash.get(_CALL_FAILED_KEY, False)
+    if call_failed:
         # call で落ちたテストは、残った状態でもう 1 つエラーを重ねない（落ちれば
         # 窓などが残るのはふつう）。知らせるだけにする
         fail, warn = [], fail + warn
@@ -2609,16 +2621,31 @@ def _qgis_leftover_check(request: pytest.FixtureRequest) -> Iterator[None]:
     except Exception as exc:  # noqa: BLE001
         _warn_leftover_unreadable(item, "after", exc)
         return
-    failed = {
+    found_all = {
         name: found
-        for name in fail
+        for name in fail + warn
         if (found := _leftover.leftovers(name, baseline[name], after[name]))
     }
-    warned = {
-        name: found
-        for name in warn
-        if (found := _leftover.leftovers(name, baseline[name], after[name]))
+    expected = {
+        name: reason
+        for name, reason in _leftover.expected_items(item).items()
+        if name in fail + warn  # 見ていない項目の印は何もしない
     }
+    known = {name: found_all[name] for name in expected if name in found_all}
+    if known:
+        logger.info(
+            "qgis_leftover: expected leftovers (not reported) %s",
+            _leftover.format_leftovers(item.nodeid, known),
+        )
+    # 落ちたテストは途中で止まったかもしれないので、「残らなかった」とは言わない
+    unmet = {} if call_failed else {n: r for n, r in expected.items() if n not in found_all}
+    if unmet:
+        warnings.warn(
+            _leftover.QgisLeftoverWarning(_leftover.format_unmet(item.nodeid, unmet)),
+            stacklevel=1,
+        )
+    failed = {n: found for n, found in found_all.items() if n in fail and n not in expected}
+    warned = {n: found for n, found in found_all.items() if n in warn and n not in expected}
     if warned:
         warnings.warn(
             _leftover.QgisLeftoverWarning(_leftover.format_leftovers(item.nodeid, warned)),

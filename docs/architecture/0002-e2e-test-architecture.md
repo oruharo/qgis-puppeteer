@@ -465,6 +465,12 @@ Client 側の操作系 API（`click_widget`, `set_widget_value`, Locator メソ�
 > 確実に消したいときは、teardown のエラーを `qgis_auto_fresh_after_failure = session`
 > の起こし直しに数える。
 
+> **2026-10-23 注（#31）**: 項目ごとの ini だけでは、製品の既知の振る舞いで決まった
+> テストがいつも残すものを外すと、ほかのテストの新しい残りまで見えなくなる。そこで
+> テストの単位の印 `qgis_leftover_expected(*items, reason=...)` を足した。`xfail` と
+> 同じ考えで、印を付けたのに残らなければ警告する（直ったことに気付くため）。判定は
+> 項目の単位で、値（どのツールに変わるか）までは見ない。
+
 ##### Polling 戦略と RTT の考慮
 
 ADR-0001 §Performance の実測値では定常コマンドの RTT が 10〜140ms、最大 1170ms（list_layers の外れ値）に達します。Client 側で 4 項目を個別にコマンド発行して poll すると 1 操作が数秒〜数十秒に膨らむため、以下の戦略を採ります:

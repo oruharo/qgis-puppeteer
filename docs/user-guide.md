@@ -1934,6 +1934,21 @@ qgis_leftover_warn = editing map_tool layer_tree    # 残っていたら警告�
   使わず `automation_client` だけを使うテストは、call の直前に読む
 - 項目ごとに失敗か警告かを選べる。直す前の製品の不具合で残ることが分かっている項目は
   `qgis_leftover_warn` に入れておき、直したら `qgis_leftover_fail` に上げる、など
+- 決まったテストがいつも残すと分かっている項目は、そのテストに印を付けて判定から外す
+  （#31）。ほかのテストでは今まで通り見るので、新しい片付け漏れは埋もれない:
+
+  ```python
+  @pytest.mark.qgis_leftover_expected("map_tool", reason="S-78: 製品が Pan に戻さない")
+  def test_select_features(qgis): ...
+  ```
+
+  - 項目は並べて書ける。class や module（`pytestmark`）にも付けられ、合わせて効く
+  - 印の項目は残っていても失敗にも警告にもしない（ログには出る）
+  - 印を付けたのに残らなかったら `QgisLeftoverWarning` で知らせる（`reason` 付き）。
+    製品が直ったことに気付き、印を外し忘れないため。call で落ちたテストでは知らせない
+    （途中で止まったかもしれないので）
+  - ini で見ていない項目への印は何もしない。知らない項目の名前や `reason` 以外の引数は、
+    テストを回す前に止める
 - 知らせる文は「どの項目の、何が、始めの値から何に変わったか」:
 
   ```
