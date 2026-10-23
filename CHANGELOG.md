@@ -8,6 +8,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`title_contains` and `expect(locator).to_have_count(n)`** (#35). Waiting
+  for a window to appear or close already works with a Locator and
+  `expect(...).to_be_visible()` / `to_be_hidden()`, but `title` matched
+  only the whole title, and nothing waited for "no such window" or "n of
+  them", since `expect` refuses a selector that matches several.
+  `title_contains` matches part of a title, in the live resolution and in
+  snapshots. `to_have_count(n)` waits until n visible widgets match the
+  selector, so `to_have_count(0)` waits for every matching window to
+  close; it accepts several matches, ignores `index`, and does not count a
+  window that was closed but not yet deleted.
+
 - **`Locator.close()` closes a window as its close button does** (#34).
   Nothing let a test close a window the way a person does with the title
   bar's ×, so hosts looked up top-level widgets and called `close()`

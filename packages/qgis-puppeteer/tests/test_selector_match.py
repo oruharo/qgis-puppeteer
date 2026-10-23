@@ -256,3 +256,11 @@ class TestMenuItemText:
         button = {"class": "QPushButton", "text": "&No"}
         assert record_matches_selector(button, {"text": "No"}) is False
         assert record_matches_selector(button, {"text": "&No"}) is True
+
+
+def test_title_contains_is_a_partial_match_on_the_title() -> None:
+    """#35"""
+    rec = {"class": "QDialog", "title": "レイヤのプロパティ — 建物"}
+    assert record_matches_selector(rec, {"title_contains": "プロパティ"}) is True
+    assert record_matches_selector(rec, {"title_contains": "属性"}) is False
+    assert record_matches_selector({"class": "QDialog"}, {"title_contains": "x"}) is False

@@ -102,6 +102,11 @@ def record_matches_selector(record: dict[str, Any], selector: dict[str, Any]) ->
         rec_text = record.get("text")
         if not isinstance(rec_text, str) or text_contains not in rec_text:
             return False
+    title_contains = selector.get("title_contains")
+    if title_contains is not None:
+        rec_title = record.get("title")
+        if not isinstance(rec_title, str) or title_contains not in rec_title:
+            return False
     text_re = selector.get("text_re")
     if text_re is not None:
         rec_text = record.get("text")

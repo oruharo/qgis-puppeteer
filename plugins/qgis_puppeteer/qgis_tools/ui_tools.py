@@ -1911,7 +1911,7 @@ def _title_of(widget: Any) -> str | None:
 
 
 # record で判定する selector のキー（snapshot の解決と同じ判定にする）
-_RECORD_KEYS = ("role", "text_contains", "text_re", "attr")
+_RECORD_KEYS = ("role", "text_contains", "text_re", "attr", "title_contains")
 
 
 def _live_record(widget: QWidget) -> dict:

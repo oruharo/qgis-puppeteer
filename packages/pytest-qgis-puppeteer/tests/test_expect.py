@@ -348,3 +348,42 @@ class TestPerCallTimeout:
         loc = Locator(client, {"object_name": "btn"})
         with pytest.raises(AssertionError):
             expect(loc).to_be_visible(timeout_s=0.1)
+
+
+# ============================================================
+# to_have_count（#35）
+# ============================================================
+
+
+def _count_result(n: int) -> dict[str, Any]:
+    if n == 0:
+        return _act_result(exists=False)
+    if n == 1:
+        return _act_result()
+    return {
+        **_ambiguous_result(),
+        "diagnostics": {"reason": "selector_ambiguous", "match_count": n},
+    }
+
+
+class TestToHaveCount:
+    def test_waits_until_the_count_and_does_not_abort_on_several(self) -> None:
+        client = _FakeClient(
+            {"qgis_check_actionability": [_count_result(3), _count_result(1), _count_result(0)]}
+        )
+        loc = Locator(client, {"scope": "any", "class": "QDialog", "index": 1})
+        expect(loc, poll_interval_s=0.0).to_have_count(0, timeout_s=1.0)
+        sent = client.calls[0][1]["selector"]
+        assert "index" not in sent  # index は数えるときは使わない
+        assert sent["attr"] == {"visible": True}  # 見えているものだけ
+
+    def test_times_out_with_the_last_count(self) -> None:
+        client = _FakeClient({"qgis_check_actionability": [_count_result(2)] * 50})
+        loc = Locator(client, {"class": "QDialog"})
+        with pytest.raises(AssertionError, match="last_count.*2"):
+            expect(loc, poll_interval_s=0.01).to_have_count(1, timeout_s=0.05)
+
+    def test_negated(self) -> None:
+        client = _FakeClient({"qgis_check_actionability": [_count_result(2)]})
+        loc = Locator(client, {"class": "QDialog"})
+        expect(loc, poll_interval_s=0.0).not_.to_have_count(0, timeout_s=1.0)

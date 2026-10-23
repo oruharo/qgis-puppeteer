@@ -176,7 +176,8 @@ SelectorArg = Annotated[
     Field(
         description=(
             "対象ウィジェットの指定。照合キーは object_name（最も確実）/ text / class / "
-            "title / label / placeholder / role / text_contains / text_re / attr。"
+            "title / title_contains / label / placeholder / role / text_contains / text_re / "
+            "attr。"
             "絞り込みは scope（既定 'modal'、ほかに 'active_window' / 'popup' / 'any'）/ "
             "root_object_name / index。qgis_snapshot_ui の出力から組み立てる。"
             "scope='popup' は開いているメニュー（QMenu.exec() など）で、項目は "

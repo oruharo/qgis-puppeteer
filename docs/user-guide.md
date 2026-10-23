@@ -795,9 +795,18 @@ selector dict の全キー。複数キー指定は AND セマンティクス。
 | `object_name` | str | Qt `objectName()` 完全一致。**最も推奨**（一意性が高い） |
 | `text` | str | ボタン / ラベル / QAction の `text()` 完全一致 |
 | `class` | str | Python クラス名完全一致（`"QPushButton"` 等） |
-| `title` | str | `windowTitle()` 完全一致（dialog 選択用） |
+| `title` | str | `windowTitle()` 完全一致（dialog 選択用。メニューは `title()`） |
+| `title_contains` | str | 題名の部分一致（#35） |
 | `label` | str | `QLabel.buddy()` 経由で対応するラベル文字列。Playwright の `getByLabel` 相当 |
 | `placeholder` | str | LineEdit/TextEdit の `placeholderText()` 完全一致 |
+| `text_contains` | str | 文字の部分一致 |
+| `text_re` | str | 文字の正規表現（`re.search`） |
+| `role` | str | snapshot の `role`（Qt のアクセシビリティの役割） |
+| `attr` | dict | snapshot の node の任意のキーの完全一致（`{"enabled": False}` など） |
+
+`title_contains` / `text_contains` / `text_re` / `role` / `attr` は、snapshot の node と
+同じ形の情報で判定する。`expect` や `wait_for_widget`（snapshot で探す）でも、`click()`
+や `fill()`（その場で探す）でも同じ結果になる。
 
 ### スコープ・絞り込みキー
 
@@ -1274,9 +1283,24 @@ expect(loc).to_have_text("Done", timeout_s=10.0)
 | `to_contain_text(s)` | `get_text()` 部分一致 |
 | `to_have_value(v)` | `get_value()` 一致 |
 | `to_be_checked()` | `get_value()` が True |
+| `to_have_count(n)` | selector に当たる見えている widget の数（#35） |
 
 `not_` プロパティで否定形（「~でなくなるまで待つ」）。selector 多重マッチ時は
 `SelectorAmbiguousError` で即 abort（`Locator` の auto-wait と同じ挙動）。
+`to_have_count` だけは複数に当たる selector でよい（数えるのが目的なので）。
+
+窓が出る・消える・1 つも無くなるのを待つ:
+
+```python
+props = qgis.locator({"scope": "any", "class": "QDialog", "title_contains": "プロパティ"})
+expect(props).to_be_visible()      # 出るまで
+expect(props).to_be_hidden()       # 消えるまで（消えてもよい）
+expect(qgis.locator({"scope": "any", "class": "QDialog"})).to_have_count(0)  # 全部閉じるまで
+```
+
+- `scope="any"` は見えている一番上の窓をすべて探すので、モーダルでない窓も対象
+- `to_have_count` は見えている widget だけを数える（閉じたがまだ消えていない窓は
+  数えない）。`index` は無視する
 
 ---
 

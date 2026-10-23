@@ -63,6 +63,12 @@ def test_text_contains_and_text_re_pick_one_widget(dialog: Any) -> None:
     assert _name({"class": "QPushButton", "text_contains": "無い"}) is None
 
 
+def test_title_contains_matches_part_of_a_window_title(dialog: Any) -> None:
+    """#35"""
+    assert _name({"class": "QDialog", "title_contains": "プロパティ"}) == "keys"
+    assert _name({"class": "QDialog", "title_contains": "属性"}) is None
+
+
 def test_attr_and_role_narrow_the_match(dialog: Any) -> None:
     dialog.findChild(QtWidgets.QPushButton, "delete").setEnabled(False)
     assert _name({"class": "QPushButton", "text_contains": "削除", "attr": {"enabled": False}}) == (

@@ -152,6 +152,39 @@ class _LocatorAssertions:
             timeout_s,
         )
 
+    def to_have_count(self, count: int, *, timeout_s: float | None = None) -> None:
+        """selector に当たる**見えている** widget の数が ``count`` になるまで poll（#35）。
+
+        ``to_have_count(0)`` で「1 つも無い」（窓が全部閉じた、など）を待てる。ほかの
+        ``to_*`` と違い、複数に当たる selector でもよい（数えるのが目的なので）。
+        ``index`` は無視する。閉じたがまだ消えていない窓のような、見えていない widget は
+        数えない（数えるなら ``attr={"visible": False}`` などで明示する）。
+        """
+        effective_timeout = self._timeout_s if timeout_s is None else float(timeout_s)
+        deadline = time.monotonic() + effective_timeout
+        last = -1
+        while True:
+            last = self._count()
+            if (last == count) != self._negated:
+                return
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(self._poll_interval_s)
+        self._raise_assertion("to_have_count", count, {"last_count": last}, effective_timeout)
+
+    def _count(self) -> int:
+        selector = self._locator._effective_selector()
+        selector.pop("index", None)
+        attr = dict(selector.get("attr") or {})
+        attr.setdefault("visible", True)
+        selector["attr"] = attr
+        locator = self._locator
+        check = locator._client.check_actionability(selector, instance=locator._instance)
+        diagnostics = check.get("diagnostics") or {}
+        if isinstance(diagnostics.get("match_count"), int):
+            return diagnostics["match_count"]
+        return 1 if check.get("exists") else 0
+
     # ------------------------------------------------------------
     # 内部: polling
     # ------------------------------------------------------------
