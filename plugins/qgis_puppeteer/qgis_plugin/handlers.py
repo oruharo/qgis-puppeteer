@@ -190,6 +190,8 @@ def build_handlers(iface: Any | None = None) -> dict[str, Handler]:
         verify=params.get("verify", True),
     )
 
+    handlers["qgis_read_rows"] = lambda params: ui_tools.read_rows(params, iface)
+
     handlers["qgis_close_widget"] = lambda params: ui_tools.close_widget(
         params["selector"], iface, wait=params.get("wait", True)
     )

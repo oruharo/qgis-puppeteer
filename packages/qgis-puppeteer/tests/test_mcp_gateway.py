@@ -623,6 +623,7 @@ class TestMcpGatewayToolInventory:
             "qgis_click_widget",
             "qgis_set_widget_value",
             "qgis_close_widget",
+            "qgis_read_rows",
             # dialog handler（worker 側 handler の公開。user-guide が MCP ツールと明記）
             "qgis_register_dialog_handler",
             "qgis_unregister_dialog_handler",
@@ -773,6 +774,24 @@ class TestMcpGatewayWidgetFailures:
             "selector": {"object_name": "t"},
             "kind": "double",
             "cell": {"text": "beta"},
+        }
+
+    def test_read_rows_passes_its_arguments(self) -> None:
+        """#36"""
+        result, seen = self._call(
+            "qgis_read_rows",
+            {"success": True, "rows": [], "row_count": 0, "start": 0},
+            selector={"object_name": "t"},
+            start=1000,
+            path=["道路"],
+            role="user",
+        )
+        assert not result.is_error
+        assert seen == {
+            "selector": {"object_name": "t"},
+            "start": 1000,
+            "role": "user",
+            "path": ["道路"],
         }
 
     def test_close_is_passed_with_wait(self) -> None:
@@ -1187,6 +1206,7 @@ class TestMcpGatewayToolDescriptors:
             "qgis_get_canvas_extent",
             "qgis_get_leftover_state",
             "qgis_snapshot_ui",
+            "qgis_read_rows",
             "qgis_list_dialog_handlers",
             "qgis_get_recent_exceptions",
             "qgis_get_recent_messages",

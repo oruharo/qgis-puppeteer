@@ -1427,6 +1427,32 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
             present=_present_widget_result,
         )
 
+    @mcp.tool(title="表の行を読む", annotations=_QUERY, structured_output=False)
+    async def qgis_read_rows(
+        ctx: Context,
+        selector: SelectorArg,
+        start: int = 0,
+        max_rows: int | None = None,
+        path: list[str | int] | None = None,
+        role: str | int = "display",
+        instance: InstanceArg = None,
+    ) -> str | CallToolResult:
+        """表・ツリー・リストの行を読む（snapshot の 100 行の上限なし）。
+
+        1 回に 1000 行まで。残りは start を進めて読む（row_count が全体の行数）。path は
+        ツリーの段（["グループ", "レイヤ"] など）で、その段の子の行を読む。role は読む値で、
+        display（既定）/ edit / user（行に持たせた ID など）/ check（checked / unchecked /
+        partial）/ tooltip、または Qt のロールの番号。
+        """
+        params: dict[str, Any] = {"selector": selector, "start": start, "role": role}
+        if max_rows is not None:
+            params["max_rows"] = max_rows
+        if path is not None:
+            params["path"] = path
+        return await _call(
+            ctx, "qgis_read_rows", params, instance=instance, present=_present_widget_result
+        )
+
     @mcp.tool(title="窓を閉じる", annotations=_MUTATE_ARBITRARY, structured_output=False)
     async def qgis_close_widget(
         ctx: Context,

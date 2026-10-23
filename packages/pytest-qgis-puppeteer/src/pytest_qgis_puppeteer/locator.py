@@ -218,6 +218,51 @@ class Locator:
         """
         return self.click(timeout_s=timeout_s, wait=wait, kind="double", cell=cell)
 
+    def read_rows(
+        self,
+        *,
+        start: int = 0,
+        max_rows: int | None = None,
+        path: list[str | int] | None = None,
+        role: str | int = "display",
+        timeout_s: float | None = None,
+    ) -> dict[str, Any]:
+        """見えるまで待ってから、表・ツリー・リストの行を上限なしに読む（#36）。
+
+        snapshot は 100 行で打ち切るので、大きな表（属性テーブルなど）の中身はこれで読む::
+
+            rows = qgis.locator({"object_name": "attributeTable"}).read_rows()["rows"]
+            ids = qgis.locator(table).read_rows(role="user")["rows"]       # 行に持たせた ID
+            checks = layers.read_rows(path=["道路"], role="check")["rows"]  # ツリーの段の子
+
+        無効な（灰色の）表も読める。値は ``role`` で選ぶ（``"display"`` / ``"edit"`` /
+        ``"user"`` / ``"check"`` / ``"tooltip"`` か Qt のロールの番号）。
+        """
+        self._wait_visible(timeout_s=timeout_s)
+        return self._client.read_rows(
+            self._effective_selector(),
+            start=start,
+            max_rows=max_rows,
+            path=path,
+            role=role,
+            instance=self._instance,
+        )
+
+    def _wait_visible(self, *, timeout_s: float | None) -> None:
+        """見えるまで待つ（無効でもよい読み取り用）。曖昧なら即座に失敗。"""
+        effective_timeout = self._default_timeout_s if timeout_s is None else float(timeout_s)
+        deadline = time.monotonic() + effective_timeout
+        while True:
+            last = self._check_actionability()
+            if last.get("exists") and last.get("visible"):
+                return
+            self._abort_if_ambiguous(last)
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Widget {self._selector!r} not visible within {effective_timeout}s: {last!r}"
+                )
+            time.sleep(self._poll_interval_s)
+
     def close(self, *, timeout_s: float | None = None, wait: bool = True) -> dict[str, Any]:
         """actionable になるまで待ってから、この widget の窓を × と同じく閉じる（#34）。
 

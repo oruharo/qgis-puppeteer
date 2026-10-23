@@ -264,6 +264,37 @@ class TestCommandWiring:
             "pixel": True,
         }
 
+    def test_read_rows_joins_the_pages(self) -> None:
+        """#36: Worker は 1 回に 1000 行まで。続きを読んでつなぐ。"""
+        page = {"success": True, "columns": ["a"], "row_count": 2500}
+        e2e, inner = _make_client(
+            [
+                {**page, "rows": [[i] for i in range(1000)], "start": 0},
+                {**page, "rows": [[i] for i in range(1000, 2000)], "start": 1000},
+                {**page, "rows": [[i] for i in range(2000, 2500)], "start": 2000},
+            ]
+        )
+        result = e2e.read_rows({"object_name": "t"}, role="user")
+        assert [r[0] for r in result["rows"]] == list(range(2500))
+        assert result["columns"] == ["a"]
+        assert result["row_count"] == 2500
+        starts = [c.args[1]["start"] for c in inner.call.await_args_list]
+        assert starts == [0, 1000, 2000]
+        assert inner.call.await_args_list[0].args[1]["role"] == "user"
+
+    def test_read_rows_stops_at_max_rows(self) -> None:
+        page = {"success": True, "row_count": 5000, "start": 10}
+        e2e, inner = _make_client([{**page, "rows": [[1]] * 30}])
+        result = e2e.read_rows({"object_name": "t"}, start=10, max_rows=30, path=["道路"])
+        assert len(result["rows"]) == 30
+        assert inner.call.await_args_list[0].args[1] == {
+            "selector": {"object_name": "t"},
+            "start": 10,
+            "role": "display",
+            "max_rows": 30,
+            "path": ["道路"],
+        }
+
     def test_close_widget_passes_the_selector_and_raises_on_failure(self) -> None:
         """#34"""
         e2e, inner = _make_client([{"success": True, "closed": True}])

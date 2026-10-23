@@ -47,6 +47,7 @@ QT_TEST_FILES = [
     "packages/qgis-puppeteer/tests/test_popup_operations.py",
     "packages/qgis-puppeteer/tests/test_ui_tools_set_value.py",
     "packages/qgis-puppeteer/tests/test_ui_tools_table_rows.py",
+    "packages/qgis-puppeteer/tests/test_ui_tools_read_rows.py",
     "packages/qgis-puppeteer/tests/test_ui_tools_file_widget.py",
     "packages/qgis-puppeteer/tests/test_ui_tools_close.py",
     "packages/qgis-puppeteer/tests/test_canvas_tools_integration.py",

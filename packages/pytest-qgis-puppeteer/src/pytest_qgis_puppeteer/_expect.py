@@ -152,6 +152,19 @@ class _LocatorAssertions:
             timeout_s,
         )
 
+    def to_have_row_count(self, count: int, *, timeout_s: float | None = None) -> None:
+        """表・ツリー・リストの行の数が ``count`` になるまで poll（#36）。
+
+        snapshot の ``row_count``（全体の行の数。100 行の上限は効かない）で見る。
+        ツリーは一番上の段の行の数。
+        """
+
+        def row_count() -> Any:
+            node = self._locator.snapshot()
+            return node.get("row_count") if node else None
+
+        self._poll_value(row_count, lambda v: v == count, "to_have_row_count", count, timeout_s)
+
     def to_have_count(self, count: int, *, timeout_s: float | None = None) -> None:
         """selector に当たる**見えている** widget の数が ``count`` になるまで poll（#35）。
 

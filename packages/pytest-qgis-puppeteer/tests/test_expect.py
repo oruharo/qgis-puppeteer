@@ -387,3 +387,41 @@ class TestToHaveCount:
         client = _FakeClient({"qgis_check_actionability": [_count_result(2)]})
         loc = Locator(client, {"class": "QDialog"})
         expect(loc, poll_interval_s=0.0).not_.to_have_count(0, timeout_s=1.0)
+
+
+class TestToHaveRowCount:
+    """#36"""
+
+    def test_waits_for_the_row_count_of_the_snapshot(self) -> None:
+        def snap(n: int) -> dict[str, Any]:
+            table = {"class": "QTableView", "object_name": "t", "row_count": n}
+            return {"active_modal": {"class": "QDialog", "children": [table]}}
+
+        client = _FakeClient(
+            {
+                "qgis_check_actionability": [_act_result()] * 3,
+                "qgis_snapshot_ui": [snap(100), snap(2500)],
+            }
+        )
+        loc = Locator(client, {"object_name": "t"})
+        expect(loc, poll_interval_s=0.0).to_have_row_count(2500, timeout_s=1.0)
+
+
+class TestLocatorReadRows:
+    """#36: 見えるまで待ち（無効でもよい）、client の read_rows に渡す。"""
+
+    def test_waits_until_visible_then_reads(self) -> None:
+        class Client(_FakeClient):
+            def read_rows(self, selector: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+                self.calls.append(("read_rows", {"selector": selector, **kwargs}, None))
+                return {"rows": [["a"]], "row_count": 1, "start": 0}
+
+        disabled = _act_result(enabled=False)
+        client = Client({"qgis_check_actionability": [_act_result(exists=False), disabled]})
+        loc = Locator(client, {"object_name": "t"}, poll_interval_s=0.0)
+
+        assert loc.read_rows(role="user")["rows"] == [["a"]]
+        name, params, _ = client.calls[-1]
+        assert name == "read_rows"
+        assert params["role"] == "user"
+        assert params["selector"] == {"object_name": "t"}

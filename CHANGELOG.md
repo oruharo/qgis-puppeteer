@@ -8,6 +8,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **All rows of a table, tree or list can be read** (#36). Snapshots stop
+  at 100 rows so that a large table does not swell every response, which
+  left no way to check the content of an attribute table. `read_rows()`
+  (`Locator`, `E2EAutomationClient`, MCP `qgis_read_rows`) reads them in
+  pages of up to 1000 from the Worker and joins them; `start` and
+  `max_rows` read a part. `role` picks the value: `display` (default),
+  `edit`, `user` (an ID kept on the row), `check` (`checked` /
+  `unchecked` / `partial`), `tooltip`, or a Qt role number. `path` (as in
+  #30) reads the children of a tree node, a legend's check states for
+  instance. A disabled table can be read. `expect(locator).
+  to_have_row_count(n)` waits for the number of rows, using the
+  snapshot's `row_count`, which is not capped.
+
 - **`title_contains` and `expect(locator).to_have_count(n)`** (#35). Waiting
   for a window to appear or close already works with a Locator and
   `expect(...).to_be_visible()` / `to_be_hidden()`, but `title` matched

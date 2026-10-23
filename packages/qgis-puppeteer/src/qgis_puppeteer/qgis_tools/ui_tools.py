@@ -204,7 +204,9 @@ def snapshot_ui(
     return result
 
 
-def _resolve_actionable_widget(selector: dict) -> tuple[QWidget | None, dict | None]:
+def _resolve_actionable_widget(
+    selector: dict, *, require_enabled: bool = True
+) -> tuple[QWidget | None, dict | None]:
     """Resolve selector and apply common preconditions for click/set 系 RPC。
 
     `_find_widget` 失敗時のエラーコード変換（``selector_ambiguous`` /
@@ -230,7 +232,7 @@ def _resolve_actionable_widget(selector: dict) -> tuple[QWidget | None, dict | N
             "diagnostics": diagnostics,
         }
 
-    if not widget.isEnabled():
+    if require_enabled and not widget.isEnabled():
         return None, {
             "success": False,
             "error": "widget_disabled",
@@ -401,6 +403,92 @@ def _mouse_press(
         return None
 
     return press, None
+
+
+# read_rows が 1 回に返す行の上限（pytest 側は分けて読む）
+_MAX_READ_ROWS = 1000
+# read_rows の role の名前（ほかに Qt のロールの番号も受ける）
+_ROLES = {
+    "display": Qt.ItemDataRole.DisplayRole,
+    "edit": Qt.ItemDataRole.EditRole,
+    "user": Qt.ItemDataRole.UserRole,
+    "check": Qt.ItemDataRole.CheckStateRole,
+    "tooltip": Qt.ItemDataRole.ToolTipRole,
+}
+_CHECK_STATES = {0: "unchecked", 1: "partial", 2: "checked"}
+
+
+def read_rows(params: dict, iface: Any = None) -> dict:
+    """表・ツリー・リストの行を、snapshot の上限（100 行）なしに読む（#36）。
+
+    params:
+        - ``selector``: 対象の view
+        - ``start``: 読み始める行（既定 0）
+        - ``max_rows``: 読む行の数（既定・上限 ``_MAX_READ_ROWS``）。残りは ``start`` を
+          進めて読む
+        - ``path``: ツリーの段（#30 と同じ形）。その段の子の行を読む
+        - ``role``: 読む値。``"display"``（既定。表示の値）/ ``"edit"`` / ``"user"``
+          （行に持たせた ID など）/ ``"check"``（``checked`` / ``unchecked`` /
+          ``partial``、チェックの無いセルは None）/ ``"tooltip"``、または Qt のロールの番号
+
+    Returns:
+        ``{"success": True, "columns": [...], "rows": [[...]], "row_count": n,
+        "start": s}``。リストは 1 列（表示している列）で ``columns`` は無い。
+        隠した行も読む（データとして読むため。``setRowHidden`` を見るなら snapshot）。
+    """
+    del iface
+    # 読むだけなので、無効な（灰色の）表も読む
+    widget, error = _resolve_actionable_widget(params.get("selector") or {}, require_enabled=False)
+    if error is not None:
+        return error
+    if not isinstance(widget, QAbstractItemView) or widget.model() is None:
+        return {"success": False, "error": "not_an_item_view", "widget": _widget_summary(widget)}
+    start = params.get("start", 0)
+    max_rows = params.get("max_rows", _MAX_READ_ROWS)
+    if not _is_index(start) or start < 0:
+        return _invalid(widget, start, "start: a non-negative integer")
+    if max_rows is None:
+        max_rows = _MAX_READ_ROWS
+    if not _is_index(max_rows) or max_rows < 0:
+        return _invalid(widget, max_rows, "max_rows: a non-negative integer")
+    role_name = params.get("role", "display")
+    if _is_index(role_name):
+        role = role_name
+    elif role_name in _ROLES:
+        role = _ROLES[role_name]
+    else:
+        return _invalid(widget, role_name, f"role: one of {sorted(_ROLES)} or a Qt role number")
+    model = widget.model()
+    parent = widget.rootIndex()
+    if params.get("path") is not None:
+        index, error = _resolve_row(widget, {"path": params["path"]})
+        if error is not None:
+            return error
+        parent = model.index(index.row(), 0, index.parent())
+    _fetch_children(model, parent)
+    total = model.rowCount(parent)
+    is_list = isinstance(widget, QListView)
+    columns = [widget.modelColumn()] if is_list else list(range(model.columnCount(parent)))
+    end = min(total, start + min(max_rows, _MAX_READ_ROWS))
+
+    def value(row: int, column: int) -> Any:
+        try:
+            data = model.index(row, column, parent).data(role)
+        except Exception:  # noqa: BLE001 - 読めないセルは None
+            return None
+        if role == Qt.ItemDataRole.CheckStateRole:
+            return None if data is None else _CHECK_STATES.get(int(data), str(data))
+        return _jsonable(data)
+
+    result: dict[str, Any] = {
+        "success": True,
+        "rows": [[value(r, c) for c in columns] for r in range(start, end)],
+        "row_count": total,
+        "start": start,
+    }
+    if not is_list:
+        result["columns"] = [_display_header(model, c) for c in columns]
+    return result
 
 
 def close_widget(selector: dict, iface: Any = None, *, wait: bool = True) -> dict:

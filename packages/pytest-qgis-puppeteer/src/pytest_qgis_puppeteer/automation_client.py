@@ -709,6 +709,53 @@ class E2EAutomationClient:
         _raise_for_widget_result("qgis_click_widget", result)
         return result
 
+    def read_rows(
+        self,
+        selector: dict[str, Any],
+        *,
+        start: int = 0,
+        max_rows: int | None = None,
+        path: list[str | int] | None = None,
+        role: str | int = "display",
+        instance: str | None = None,
+    ) -> dict[str, Any]:
+        """表・ツリー・リストの行を、snapshot の上限なしに読む（`qgis_read_rows`、#36）。
+
+        Worker は 1 回に 1000 行までを返すので、ここで分けて読んでつなぐ。
+        ``max_rows=None`` は ``start`` から最後まで。``path`` はツリーの段（#30 と同じ形）、
+        ``role`` は読む値（``"display"`` / ``"edit"`` / ``"user"`` / ``"check"`` /
+        ``"tooltip"`` か Qt のロールの番号）。
+
+        Returns:
+            ``{"columns": [...], "rows": [[...]], "row_count": n, "start": start}``
+            （リストは ``columns`` 無し）。
+
+        Raises:
+            WidgetOperationError: 読めなかった（見つからない・表でない・path が無いなど）。
+        """
+        rows: list[list[Any]] = []
+        position = start
+        result: dict[str, Any] = {}
+        while True:
+            want = None if max_rows is None else max_rows - len(rows)
+            params: dict[str, Any] = {"selector": selector, "start": position, "role": role}
+            if want is not None:
+                params["max_rows"] = want
+            if path is not None:
+                params["path"] = path
+            result = self.call("qgis_read_rows", params, instance=instance)
+            _raise_for_widget_result("qgis_read_rows", result)
+            chunk = result.get("rows") or []
+            rows.extend(chunk)
+            position += len(chunk)
+            done = position >= int(result.get("row_count") or 0)
+            if done or not chunk or (max_rows is not None and len(rows) >= max_rows):
+                break
+        out = {"rows": rows, "row_count": result.get("row_count"), "start": start}
+        if "columns" in result:
+            out["columns"] = result["columns"]
+        return out
+
     def close_widget(
         self,
         selector: dict[str, Any],

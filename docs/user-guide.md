@@ -1059,6 +1059,7 @@ qgis.locator({"scope": "popup", "class": "QAction", "text": "削除"}).click()
 | `check()` | CheckBox / RadioButton を True に | actionable |
 | `uncheck()` | 同 False に | actionable |
 | `close()` | その widget の窓を、× を押したときと同じく閉じる（#34） | actionable |
+| `read_rows()` | 表・ツリー・リストの行を上限なしに読む（#36。下の「表の行を全部読む」） | visible |
 
 どれも `wait=False` を受ける。押すと確認を `exec()` で出す操作を、待たずに
 QGIS 側へ積んですぐ返す（[Dialog handler](#dialog-handler) の「確認を出す操作は
@@ -1165,7 +1166,8 @@ timeout を超えると `WidgetNotActionableError`。strict mode で複数マッ
 | どれも | `row_count`（全体の行数） |
 
 - 返すのは先頭 **100 行・50 列**まで。超えた分は返さず `"truncated": true` を付ける
-  （表は `column_count` も）。属性テーブルのような大きな表で応答が膨らまないように
+  （表は `column_count` も）。属性テーブルのような大きな表で応答が膨らまないように。
+  全部読むなら `read_rows()`（下）
 - ツリーの `rows` は一番上の段だけ。開いている段の子の行は `child_rows` に、上の段から
   順に `{"path": [上の段からの行の番号], "rows": [...], "row_count": n}` で出す（#30）。
   子があって畳まれている行は `collapsed_rows`（`path` の list）。人に見えている行だけを
@@ -1176,6 +1178,30 @@ timeout を超えると `WidgetNotActionableError`。strict mode で複数マッ
 - 値は、文字列・数値・真偽値はそのまま、NULL は `null`、日付は ISO 形式（`"2026-10-20"`）、
   それ以外は文字列
 - 中身は伏せない。パスワード欄（下）と違い、モデルの値には伏せる手がかりが無い
+
+#### 表の行を全部読む（`read_rows()`）
+
+snapshot の上限（100 行）を超える表は、`Locator.read_rows()`（MCP は `qgis_read_rows`）で
+読む（#36）:
+
+```python
+table = qgis.locator({"object_name": "attributeTable"})
+data = table.read_rows()                         # 全部（1000 行ずつ分けて読んでつなぐ）
+data["columns"], data["rows"], data["row_count"]
+table.read_rows(start=2000, max_rows=100)        # 一部
+table.read_rows(role="user")["rows"]             # 行に持たせた ID（Qt.UserRole）
+layers.read_rows(path=["道路"], role="check")    # ツリーの段の子の行のチェック
+expect(table).to_have_row_count(2500)            # 行の数を待つ
+```
+
+- `role` は読む値：`"display"`（既定。表示の値）/ `"edit"` / `"user"` / `"check"`
+  （`"checked"` / `"unchecked"` / `"partial"`、チェックの無いセルは `None`）/ `"tooltip"`、
+  または Qt のロールの番号（`UserRole + 1` など名前の無いもの）
+- `path` はツリーの段（上の「表の行」の `path` と同じ形）。その段の子の行を読む
+- リストは表示している列の 1 列で、`columns` は無い
+- データとして読むので、隠した行も読む。見えるまで待つが、無効な（灰色の）表も読める
+- Worker は 1 回に 1000 行までを返す。`Locator` / `E2EAutomationClient` は分けて読んで
+  つなぐ。MCP では `start` を進めて読む
 - QGIS の `QgsAttributeTableView` などは、QGIS が Python に公開しているクラス名
   （`QTableView` など）で出る。`object_name` で探すとよい
 
@@ -1284,6 +1310,7 @@ expect(loc).to_have_text("Done", timeout_s=10.0)
 | `to_have_value(v)` | `get_value()` 一致 |
 | `to_be_checked()` | `get_value()` が True |
 | `to_have_count(n)` | selector に当たる見えている widget の数（#35） |
+| `to_have_row_count(n)` | 表・ツリー・リストの行の数（#36。snapshot の `row_count` で、100 行の上限は効かない） |
 
 `not_` プロパティで否定形（「~でなくなるまで待つ」）。selector 多重マッチ時は
 `SelectorAmbiguousError` で即 abort（`Locator` の auto-wait と同じ挙動）。
