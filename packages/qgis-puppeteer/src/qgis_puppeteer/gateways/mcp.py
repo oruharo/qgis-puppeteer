@@ -1399,10 +1399,11 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
 
         kind は left（既定）/ double / right。cell は表・ツリー・リストの行で、
         {"row": N} か {"text": セルの文字, "column": 見出しの名前か番号}（column を
-        省くと全列から探す）。cell 付きならそのセルの位置に、kind が左以外なら Qt の
-        マウスのイベントで押す。right は customContextMenuRequested も出す。右クリック
-        で開くメニューは exec() で止まるので wait=false にし、scope='popup' で項目を
-        選ぶ。
+        省くと全列から探す）。ツリーの子の行は {"path": ["グループ", "レイヤ"]}（各段は
+        文字か番号。畳まれた段は開いてから押す）。cell 付きならそのセルの位置に、kind
+        が左以外なら Qt のマウスのイベントで押す。right は customContextMenuRequested
+        も出す。右クリックで開くメニューは exec() で止まるので wait=false にし、
+        scope='popup' で項目を選ぶ。
 
         wait=false は処理を QGIS 側に積んですぐ返す（queued: true）。押すと確認
         （QMessageBox.question など）を exec() で出す操作は、確認が閉じるまで
@@ -1438,7 +1439,9 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
 
         value は対象の種類に応じて解釈する（LineEdit は文字列、ComboBox は項目
         テキストか番号、CheckBox は true / false、日付は "yyyy-MM-dd"、時刻は
-        "HH:mm:ss"、日時は "yyyy-MM-ddTHH:mm:ss" など）。入れたあとの値を value_after
+        "HH:mm:ss"、日時は "yyyy-MM-ddTHH:mm:ss"、表・ツリー・リストは行で、番号か
+        {"text": セルの文字, "column": 見出し}、ツリーの子の行は {"path": [段, ...]}
+        など）。入れたあとの値を value_after
         に返す。失敗は tool error で、code は widget_readonly / combo_item_not_found /
         index_out_of_range / invalid_value など。入った値が頼んだ値と違えば（Qt が
         黙って丸めた・切り詰めた・無視した）value_not_applied。verify=false で

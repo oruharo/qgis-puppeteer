@@ -886,7 +886,7 @@ Worker は失敗時に `{"success": false, "error": "<code>", ...}` を返す。
 |---|---|
 | `QLineEdit` / `QTextEdit` / `QPlainTextEdit` | 文字 |
 | `QComboBox` / `QTabWidget` / `QListWidget` | 項目の文字（完全一致）か番号 |
-| `QTableWidget` / `QTableView` / `QTreeWidget` / `QTreeView` / `QListView` | 行の番号、または `{"row": N}` / `{"text": セルの文字, "column": 見出しの名前か番号}`（下の「表の行」） |
+| `QTableWidget` / `QTableView` / `QTreeWidget` / `QTreeView` / `QListView` | 行の番号、または `{"row": N}` / `{"text": セルの文字, "column": 見出しの名前か番号}` / `{"path": [段, ...]}`（下の「表の行」） |
 | `QCheckBox` / `QRadioButton` | `true` / `false`、または文字の `"true"` / `"false"` |
 | `QSpinBox` | 整数（`3.7` は断る。黙って切り捨てるため） |
 | `QDoubleSpinBox` | 数 |
@@ -924,8 +924,26 @@ Worker は失敗時に `{"success": false, "error": "<code>", ...}` を返す。
 - 行の番号は**今、画面に並んでいる順**（並べ替えた `QTableWidget` なら並べ替え後の
   行。`QTableView` に代理のモデルがあれば代理のモデルの行）
 - `setRowHidden` で隠した行は、文字の候補から外す。番号で指せば `row_hidden`
-- ツリーは一番上の階層だけ
-- 読み直し（`value_after`）は選ばれた行の番号
+- `row` / `text` はツリーの一番上の段だけ。**子の行は `path`** で、上の段から順に
+  指す（#30）:
+
+  ```python
+  layers.select({"path": ["道路", "国道"]})                  # グループの中のレイヤ
+  tree.dblclick(cell={"path": ["建物", 1, "滅失済"]})         # 文字と番号を混ぜてよい
+  tree.select({"path": ["道路", "国道"], "column": "名前"})   # どの段もその列で探す
+  ```
+
+  - 各段の文字の一致は `text` と同じ。見つからない・曖昧・隠れているときは、どの段か
+    （`depth`、0 から）とそこまでの `path` が付く
+  - 畳まれた段は、人と同じく押す・選ぶ直前に開き、開いた段を `expanded`（上の段からの
+    行の番号の list）に返す。行が見つからなければ何も開かない。段を開けないツリー
+    （`itemsExpandable` が False）では `row_collapsed`
+  - 子を遅れて読むモデル（`canFetchMore`）は、探す前に読ませる。非同期に読むもの
+    （`QFileSystemModel` など）はまだ無いことがあり、その `row_not_found` には
+    待って試し直すよう `hint` が付く
+  - 結果の `cell` には、上の段からの行の番号 `path` も付く
+- 読み直し（`value_after`）は選ばれた行の番号（ツリーの子の行なら、上の段からの番号の
+  list。例 `[1, 0]`）
 - パスワード欄は `prior_value` / `value_after` / `expected` を伏せる（`masked`）
 - `wait=False` のときは、入れる前に分かる失敗（読み取り専用・範囲外・候補に無い・
   形の違う値）だけを返す。入れたあとの失敗は `qgis_get_recent_exceptions` に残る
@@ -1113,12 +1131,18 @@ timeout を超えると `WidgetNotActionableError`。strict mode で複数マッ
 | widget | フィールド |
 |---|---|
 | `QListWidget` / `QListView` | `items`（文字列の list）、`current_row`（選択が無ければ `null`） |
-| `QTableWidget` / `QTableView` / `QTreeWidget` / `QTreeView` | `columns`（見出し）、`rows`（セルの 2 次元 list）、`current`（`{"row", "column"}` か `null`） |
+| `QTableWidget` / `QTableView` / `QTreeWidget` / `QTreeView` | `columns`（見出し）、`rows`（セルの 2 次元 list）、`current`（`{"row", "column"}` か `null`。ツリーの子の行なら `path` も） |
+| `QTreeWidget` / `QTreeView` | `child_rows`（開いている段の子の行）、`collapsed_rows`（子があって畳まれた行） |
 | どれも | `row_count`（全体の行数） |
 
 - 返すのは先頭 **100 行・50 列**まで。超えた分は返さず `"truncated": true` を付ける
   （表は `column_count` も）。属性テーブルのような大きな表で応答が膨らまないように
-- ツリーは一番上の階層だけ（子の行は返さない）
+- ツリーの `rows` は一番上の段だけ。開いている段の子の行は `child_rows` に、上の段から
+  順に `{"path": [上の段からの行の番号], "rows": [...], "row_count": n}` で出す（#30）。
+  子があって畳まれている行は `collapsed_rows`（`path` の list）。人に見えている行だけを
+  出す。畳まれた段の子は、`{"path": [..., 0]}` で選ぶと開くので、そのあと読める
+- 行の数は `rows` と `child_rows` を合わせて 100 行まで
+- widget の子（`children`）と取り違えないよう、ツリーの子の行は別の名前にしている
 - 見出しを隠している表・ツリー（QGIS のレイヤパネルなど）には `columns` が付かない
 - 値は、文字列・数値・真偽値はそのまま、NULL は `null`、日付は ISO 形式（`"2026-10-20"`）、
   それ以外は文字列

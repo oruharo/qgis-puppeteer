@@ -122,7 +122,7 @@ def test_table_widget_columns_rows_and_current(dialog: Any, app: Any) -> None:
     assert all("rows" not in h and "items" not in h for h in headers)
 
 
-def test_tree_widget_returns_the_top_level_only(dialog: Any, app: Any) -> None:
+def test_tree_widget_rows_are_the_top_level(dialog: Any, app: Any) -> None:
     tree = _add(dialog, QtWidgets.QTreeWidget(), "tree")
     tree.setHeaderLabels(["group"])
     top = QtWidgets.QTreeWidgetItem(["Base maps"])
@@ -132,6 +132,50 @@ def test_tree_widget_returns_the_top_level_only(dialog: Any, app: Any) -> None:
     node = _node(dialog, app, "tree")
     assert node["columns"] == ["group"]
     assert node["rows"] == [["Base maps"], ["Data"]]
+
+
+def test_tree_widget_shows_the_rows_of_open_groups(dialog: Any, app: Any) -> None:
+    """開いている段の子の行は child_rows、子があって畳まれた行は collapsed_rows（#30）。"""
+    tree = _add(dialog, QtWidgets.QTreeWidget(), "tree")
+    tree.setHeaderLabels(["group"])
+    base = QtWidgets.QTreeWidgetItem(["Base maps"])
+    osm = QtWidgets.QTreeWidgetItem(["OSM"])
+    osm.addChild(QtWidgets.QTreeWidgetItem(["tiles"]))
+    base.addChild(osm)
+    base.addChild(QtWidgets.QTreeWidgetItem(["Aerial"]))
+    data = QtWidgets.QTreeWidgetItem(["Data"])
+    data.addChild(QtWidgets.QTreeWidgetItem(["roads"]))
+    tree.addTopLevelItem(base)
+    tree.addTopLevelItem(data)
+    tree.addTopLevelItem(QtWidgets.QTreeWidgetItem(["Empty"]))
+    tree.expandItem(base)
+    tree.setCurrentItem(osm)
+
+    node = _node(dialog, app, "tree")
+
+    assert node["rows"] == [["Base maps"], ["Data"], ["Empty"]]  # rows の形は変えない
+    assert node["child_rows"] == [
+        {"path": [0], "rows": [["OSM"], ["Aerial"]], "row_count": 2},
+    ]
+    assert node["collapsed_rows"] == [[0, 0], [1]]
+    assert node["current"] == {"row": 0, "column": 0, "path": [0, 0]}
+    assert "truncated" not in node
+
+
+def test_tree_child_rows_share_the_row_limit(dialog: Any, app: Any) -> None:
+    tree = _add(dialog, QtWidgets.QTreeWidget(), "tree")
+    top = QtWidgets.QTreeWidgetItem(["top"])
+    for i in range(150):
+        top.addChild(QtWidgets.QTreeWidgetItem([f"c{i}"]))
+    tree.addTopLevelItem(top)
+    tree.expandItem(top)
+
+    node = _node(dialog, app, "tree")
+
+    [block] = node["child_rows"]
+    assert block["row_count"] == 150
+    assert len(block["rows"]) == 99  # rows の 1 行と合わせて 100 行
+    assert node["truncated"] is True
 
 
 def test_hidden_header_gives_no_columns(dialog: Any, app: Any) -> None:

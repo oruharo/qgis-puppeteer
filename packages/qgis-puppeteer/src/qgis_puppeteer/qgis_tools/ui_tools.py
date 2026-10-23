@@ -265,8 +265,9 @@ def click_widget(
             右クリックで開くメニューは ``exec()`` で止まるので、``wait=False`` で積み、
             ``scope="popup"`` で項目を選ぶ。
         cell: 表・ツリー・リストの行の指定（``{"row": N}`` か
-            ``{"text": セルの文字, "column": 見出しの名前か番号}``、
-            :func:`_resolve_row`）。そのセルの位置にクリックを送る。
+            ``{"text": セルの文字, "column": 見出しの名前か番号}``、ツリーの子の行は
+            ``{"path": [...]}``。:func:`_resolve_row`）。そのセルの位置にクリックを
+            送る。畳まれた段は開いてから押す。
 
     Returns:
         Dictionary with success flag and widget metadata. ``cell`` 付きなら
@@ -361,10 +362,15 @@ def _mouse_press(
             return None, {
                 "success": False,
                 "error": "cell_disabled",
-                "cell": {"row": index.row(), "column": index.column()},
+                "cell": _cell_summary(widget, index),
                 "widget": _widget_summary(widget),
             }
-        result["cell"] = {"row": index.row(), "column": index.column()}
+        result["cell"] = _cell_summary(widget, index)
+        collapsed, error = _collapsed_ancestors(widget, index)
+        if error is not None:
+            return None, error
+        if collapsed:
+            result["expanded"] = collapsed
     target = widget.viewport() if isinstance(widget, QAbstractItemView) else widget
     # 積んでから押すまでにモデルが変わっても、同じ項目を追えるように
     persistent = QPersistentModelIndex(index) if index is not None else None
@@ -377,6 +383,7 @@ def _mouse_press(
             current = widget.model().index(
                 persistent.row(), persistent.column(), persistent.parent()
             )
+            _expand_ancestors(widget, current)  # 人と同じく、畳まれた段を開いてから押す
             widget.scrollTo(current)
             # セルが viewport より広いと、中心が画面の外になる。見えている部分の中心へ
             rect = widget.visualRect(current).intersected(target.rect())
@@ -462,15 +469,16 @@ def _resolve_row(view: QAbstractItemView, spec: Any) -> tuple[Any, dict | None]:
     """表・ツリー・リストの行の指定を ``QModelIndex`` にする（#24）。
 
     ``spec`` は行の番号か、``{"row": N}`` / ``{"text": セルの文字, "column": 見出しの
-    名前か番号}``。``column`` を省くと全列から探す。文字は画面に出ている文字との
-    完全一致（``_cell_matches``）。
+    名前か番号}`` / ``{"path": [段, ...], "column": ...}``（#30）。``column`` を省くと
+    全列から探す。文字は画面に出ている文字との完全一致（``_cell_matches``）。
+    ``path`` はツリーの子の行を、上の段から順に文字か番号で指す（``_resolve_path``）。
 
     - ``row`` は今、画面に並んでいる順の番号（``QTableWidget`` は並べ替え後の行、
       ``QTableView`` に代理のモデルがあれば代理のモデルの行）
     - ``setRowHidden`` で隠した行は、文字の候補から外す。``row`` で指せば
       ``row_hidden`` で断る（人には見えない行を選ばないため）
     - 複数の行に当たれば ``row_ambiguous``（当たった行の番号付き）
-    - ツリーは一番上の階層だけ（snapshot と同じ）
+    - ``row`` / ``text`` はツリーの一番上の段だけ。子の行は ``path`` で指す
 
     Returns:
         ``(index, None)`` か ``(None, error_dict)``。``index`` の列は、``column``
@@ -480,11 +488,21 @@ def _resolve_row(view: QAbstractItemView, spec: Any) -> tuple[Any, dict | None]:
     model = view.model()
     if model is None:
         return None, {"success": False, "error": "no_model", "widget": _widget_summary(view)}
-    root = view.rootIndex()
     if _is_index(spec):
         spec = {"row": spec}
-    if not isinstance(spec, dict) or len({"row", "text"} & set(spec)) != 1:
-        return None, _invalid(view, spec, '{"row": N} or {"text": ..., "column": ...}')
+    if not isinstance(spec, dict) or len({"row", "text", "path"} & set(spec)) != 1:
+        return None, _invalid(
+            view, spec, '{"row": N}, {"text": ..., "column": ...} or {"path": [...]}'
+        )
+    if "path" in spec:
+        return _resolve_path(view, model, spec)
+    return _resolve_in(view, model, view.rootIndex(), spec)
+
+
+def _resolve_in(
+    view: QAbstractItemView, model: Any, root: Any, spec: dict
+) -> tuple[Any, dict | None]:
+    """``root`` の直下の行を ``{"row"}`` か ``{"text", "column"}`` で探す。"""
     count = model.rowCount(root)
     column = spec.get("column")
     col: int | None = None
@@ -543,6 +561,121 @@ def _resolve_row(view: QAbstractItemView, spec: Any) -> tuple[Any, dict | None]:
 
 # row_ambiguous で返す行の番号の上限（それ以上は探さない）
 _MAX_AMBIGUOUS_ROWS = 10
+# 遅れて読むモデルで、1 つの段に fetchMore を呼ぶ回数の上限
+_MAX_FETCHES = 100
+
+
+def _resolve_path(view: QAbstractItemView, model: Any, spec: dict) -> tuple[Any, dict | None]:
+    """``{"path": [段, ...], "column": ...}`` を ``QModelIndex`` にする（#30）。
+
+    各段は、その段の行の文字（``text`` と同じ一致の規則）か番号。上の段から順に
+    たどり、子は 0 列目の項目の下を見る（Qt のツリーの決まり）。``column`` は
+    どの段でも同じ列で探し、最後の行のどの列を返すかにも使う。
+
+    - 子を遅れて読むモデル（``canFetchMore``）は、探す前に ``fetchMore`` する。
+      非同期に読むもの（``QFileSystemModel`` など）はまだ無いことがあり、その
+      ``row_not_found`` には待って試し直すよう ``hint`` を付ける
+    - 見つからない・曖昧・隠れているときは、どの段か（``depth``、0 から）と、
+      そこまでの ``path`` を付ける
+    - 畳まれた段はここでは開かない（行が決まって押す・選ぶときに開く）
+    """
+    path = spec["path"]
+    if not isinstance(path, list) or not path:
+        return None, _invalid(view, path, "a non-empty list of row texts or numbers")
+    for step in path:
+        if not (_is_index(step) or isinstance(step, str)):
+            return None, _invalid(view, step, "row text (str) or row number (int)")
+    parent = view.rootIndex()
+    index = None
+    for depth, step in enumerate(path):
+        fetched = _fetch_children(model, parent)
+        sub = {"row": step} if _is_index(step) else {"text": step}
+        if "column" in spec:
+            sub["column"] = spec["column"]
+        index, error = _resolve_in(view, model, parent, sub)
+        if error is not None:
+            error["depth"] = depth
+            error["path"] = path[: depth + 1]
+            if fetched and error.get("error") in ("row_not_found", "index_out_of_range"):
+                error["hint"] = "the rows are loaded lazily; wait and try again"
+            return None, error
+        parent = model.index(index.row(), 0, index.parent())
+    return index, None
+
+
+def _fetch_children(model: Any, parent: Any) -> bool:
+    """子を遅れて読むモデルなら、読ませる（ツリーが段を開いたときと同じ）。"""
+    fetched = False
+    try:
+        for _ in range(_MAX_FETCHES):
+            if not model.canFetchMore(parent):
+                break
+            model.fetchMore(parent)
+            fetched = True
+    except Exception:  # noqa: BLE001 - 読めないモデルは、今ある行で探す
+        pass
+    return fetched
+
+
+def _row_path(view: QAbstractItemView, index: Any) -> list[int]:
+    """``index`` の行の番号を、ツリーの上の段から並べる（一番上の段だけなら 1 つ）。"""
+    root = view.rootIndex()
+    rows: list[int] = []
+    current = index
+    while current.isValid() and current != root:
+        rows.append(current.row())
+        current = current.parent()
+    return rows[::-1]
+
+
+def _cell_summary(view: QAbstractItemView, index: Any) -> dict:
+    """結果に出すセル。子の行なら、上の段からの行の番号 ``path`` も付ける。"""
+    cell = {"row": index.row(), "column": index.column()}
+    path = _row_path(view, index)
+    if len(path) > 1:
+        cell["path"] = path
+    return cell
+
+
+def _ancestors(view: QAbstractItemView, index: Any) -> list[Any]:
+    """``index`` の上の段の項目（上から順。``rootIndex`` は含めない）。"""
+    root = view.rootIndex()
+    found = []
+    parent = index.parent()
+    while parent.isValid() and parent != root:
+        found.append(parent)
+        parent = parent.parent()
+    return found[::-1]
+
+
+def _collapsed_ancestors(
+    view: QAbstractItemView, index: Any
+) -> tuple[list[list[int]], dict | None]:
+    """畳まれている上の段（開く段の ``path`` の list）。開けないツリーなら失敗。
+
+    人は段を開いてから子の行を押す・選ぶ。``itemsExpandable`` が False のツリーは
+    人にも開けないので ``row_collapsed`` で断る。
+    """
+    if not isinstance(view, QTreeView):
+        return [], None
+    collapsed = [a for a in _ancestors(view, index) if not view.isExpanded(a)]
+    if collapsed and not view.itemsExpandable():
+        return [], {
+            "success": False,
+            "error": "row_collapsed",
+            "path": _row_path(view, collapsed[0]),
+            "message": "the tree cannot be expanded (itemsExpandable is False)",
+            "widget": _widget_summary(view),
+        }
+    return [_row_path(view, a) for a in collapsed], None
+
+
+def _expand_ancestors(view: QAbstractItemView, index: Any) -> None:
+    """畳まれている上の段を、上から開く。"""
+    if isinstance(view, QTreeView):
+        for ancestor in _ancestors(view, index):
+            if not view.isExpanded(ancestor):
+                view.expand(ancestor)
 
 
 def _columns(view: QAbstractItemView, model: Any, root: Any) -> list[int]:
@@ -641,7 +774,8 @@ def set_widget_value(
     Handles common input widgets: QLineEdit, QTextEdit/QPlainTextEdit,
     QComboBox, QCheckBox/QRadioButton, QSpinBox/QDoubleSpinBox, date/time
     editors, QTabWidget (selects tab), list/tree/table views (selects a row:
-    by number, or ``{"text": セルの文字, "column": 見出し}``; the whole row is
+    by number, or ``{"text": セルの文字, "column": 見出し}``, or a tree's child
+    row by ``{"path": [...]}`` (#30), opening collapsed parents; the whole row is
     selected and ``currentChanged`` / ``selectionChanged`` fire as for a
     person, #24), and QGIS's QgsFileWidget (a path, through ``setFilePath()``;
     #25).
@@ -710,15 +844,15 @@ def _queue_widget_value(widget: Any, value: Any, *, verify: bool = True) -> dict
         return _masked(widget, _set_and_verify(widget, value, prepared, verify=verify))
 
     queued.run_later(run, what="qgis_set_widget_value", target=widget)
-    return _masked(
-        widget,
-        {
-            "success": True,
-            "queued": True,
-            "widget": _widget_summary(widget),
-            "prior_value": prior,
-        },
-    )
+    result: dict[str, Any] = {
+        "success": True,
+        "queued": True,
+        "widget": _widget_summary(widget),
+        "prior_value": prior,
+    }
+    if prepared.get("expanded"):
+        result["expanded"] = prepared["expanded"]
+    return _masked(widget, result)
 
 
 def _set_and_verify(widget: Any, value: Any, prepared: dict, *, verify: bool) -> dict:
@@ -743,6 +877,8 @@ def _set_and_verify(widget: Any, value: Any, prepared: dict, *, verify: bool) ->
     if isinstance(widget, QLineEdit) and widget.validator() is not None:
         # setText は validator を通さない。入った文字が受け付けられる形かを添える
         result["acceptable_input"] = widget.hasAcceptableInput()
+    if prepared.get("expanded"):
+        result["expanded"] = prepared["expanded"]  # 選ぶために開いたツリーの段（#30）
     expected = prepared["expected"]
     same = prepared.get("same", lambda a, b: a == b)
     if verify and not same(after, expected):
@@ -851,16 +987,30 @@ def _prepare_widget_value(widget: Any, value: Any) -> dict:  # noqa: C901 - widg
         index, error = _resolve_row(widget, value)
         if error is not None:
             return error
-        row = index.row()
+        collapsed, error = _collapsed_ancestors(widget, index)
+        if error is not None:
+            return error
+        path = _row_path(widget, index)
         # 行全体を選ぶ（QTableView.selectRow 相当）。setCurrentIndex だけだと
         # selectionBehavior によってはセル 1 つの選択になり、行の選択で動くホストの
         # 処理が進まない（#24）
         flags = QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows
+        persistent = QPersistentModelIndex(index)
 
         def apply() -> None:
-            widget.selectionModel().setCurrentIndex(index, flags)
+            if not persistent.isValid():
+                raise RuntimeError("the row was removed before it was selected")
+            current = widget.model().index(
+                persistent.row(), persistent.column(), persistent.parent()
+            )
+            _expand_ancestors(widget, current)  # 人と同じく、畳まれた段を開いてから選ぶ
+            widget.selectionModel().setCurrentIndex(current, flags)
 
-        return {"apply": apply, "expected": row}
+        # 一番上の段の行は今まで通り番号、子の行は上の段からの番号の list（_read_value）
+        prepared = {"apply": apply, "expected": path[0] if len(path) == 1 else path}
+        if collapsed:
+            prepared["expanded"] = collapsed
+        return prepared
     return {
         "success": False,
         "error": "unsupported_widget_type",
@@ -1002,7 +1152,12 @@ def _read_value(widget: Any) -> Any:
         return widget.currentIndex()
     if isinstance(widget, QListWidget):
         return widget.currentRow()
-    if isinstance(widget, (QListView, QTreeView, QTableView)):
+    if isinstance(widget, QTreeView):
+        current = widget.currentIndex()
+        path = _row_path(widget, current) if current.isValid() else []
+        # 一番上の段の行は番号（今まで通り）、子の行は上の段からの番号の list（#30）
+        return path if len(path) > 1 else current.row()
+    if isinstance(widget, (QListView, QTableView)):
         return widget.currentIndex().row()
     return None
 
@@ -1916,7 +2071,12 @@ def _fill_item_view(widget: QAbstractItemView, info: dict) -> None:
     - リスト（``QListView`` / ``QListWidget``）：``items``（文字列の list）と ``current_row``
     - 表・ツリー（``QTableView`` / ``QTableWidget`` / ``QTreeView`` / ``QTreeWidget``）：
       ``columns``（見出し。見出しを隠していれば無し）、``rows``（セルの 2 次元 list）、
-      ``current``（``{"row", "column"}``）。ツリーは一番上の階層だけ
+      ``current``（``{"row", "column"}``。ツリーの子の行なら ``path`` も）。``rows`` は
+      ツリーの一番上の段だけ
+    - ツリーは、開いている段の子の行を ``child_rows``（``[{"path", "rows",
+      "row_count"}]``、上から順）に、子があって畳まれている行を ``collapsed_rows``
+      （``path`` の list）に出す（#30）。人に見えている行だけ。widget の子
+      （``children``）と取り違えないよう別の名前にしている
     - どちらも ``row_count``（全体の行数）。``_MAX_ITEM_ROWS`` 行 / ``_MAX_ITEM_COLUMNS``
       列を超えた分は返さず、``truncated: true`` を付ける（表は ``column_count`` も）
 
@@ -1953,14 +2113,68 @@ def _fill_item_view(widget: QAbstractItemView, info: dict) -> None:
         info["rows"] = [
             [_display(model.index(r, c, root)) for c in range(n_cols)] for r in range(n_rows)
         ]
-        info["current"] = (
-            {"row": current.row(), "column": current.column()} if current.isValid() else None
-        )
+        info["current"] = _cell_summary(widget, current) if current.isValid() else None
         if total_cols > n_cols:
             info["column_count"] = total_cols
             truncated = True
+        if isinstance(widget, QTreeView):
+            budget = _MAX_ITEM_ROWS - n_rows
+            if _fill_tree_rows(widget, model, root, n_rows, n_cols, budget, info):
+                truncated = True
     if truncated:
         info["truncated"] = True
+
+
+def _fill_tree_rows(
+    widget: Any, model: Any, root: Any, n_rows: int, n_cols: int, budget: int, info: dict
+) -> bool:
+    """開いている段の子の行（``child_rows``）と畳まれた行（``collapsed_rows``）。
+
+    行の数は ``rows`` と合わせて ``_MAX_ITEM_ROWS`` まで。切ったら True。
+    """
+    child_rows: list[dict] = []
+    collapsed: list[list[int]] = []
+    cut = False
+
+    def walk(parent: Any, prefix: list[int], count: int) -> None:
+        nonlocal budget, cut
+        for r in range(count):
+            item = model.index(r, 0, parent)
+            if not model.hasChildren(item):
+                continue
+            path = [*prefix, r]
+            if not widget.isExpanded(item):
+                if len(collapsed) < _MAX_ITEM_ROWS:
+                    collapsed.append(path)
+                else:
+                    cut = True
+                continue
+            total = model.rowCount(item)
+            take = max(0, min(total, budget))
+            budget -= take
+            if take < total:
+                cut = True
+            child_rows.append(
+                {
+                    "path": path,
+                    "rows": [
+                        [_display(model.index(c_row, c, item)) for c in range(n_cols)]
+                        for c_row in range(take)
+                    ],
+                    "row_count": total,
+                }
+            )
+            walk(item, path, take)
+
+    try:
+        walk(root, [], n_rows)
+    except Exception:  # noqa: BLE001 - 壊れたモデルでも snapshot は止めない
+        return cut
+    if child_rows:
+        info["child_rows"] = child_rows
+    if collapsed:
+        info["collapsed_rows"] = collapsed
+    return cut
 
 
 def _header_shown(widget: Any) -> bool:

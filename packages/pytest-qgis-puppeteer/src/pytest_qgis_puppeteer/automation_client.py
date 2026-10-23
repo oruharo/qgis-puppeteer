@@ -692,9 +692,10 @@ class E2EAutomationClient:
 
         ``kind`` は ``"left"``（既定）/ ``"double"`` / ``"right"``、``cell`` は表・
         ツリー・リストの行（``{"row": N}`` か ``{"text": セルの文字, "column": 見出し}``、
-        #24）。``cell`` 付きならそのセルの位置に、``kind`` が左以外なら Qt のマウスの
-        イベントで押す。右クリックで開くメニューは ``wait=False`` で積み、
-        ``scope="popup"`` で項目を選ぶ。
+        #24。ツリーの子の行は ``{"path": ["グループ", "レイヤ"]}``、#30）。``cell``
+        付きならそのセルの位置に、``kind`` が左以外なら Qt のマウスのイベントで押す。
+        右クリックで開くメニューは ``wait=False`` で積み、``scope="popup"`` で項目を
+        選ぶ。
 
         Raises:
             WidgetOperationError: 押せなかった（見つからない・無効など、#23）。

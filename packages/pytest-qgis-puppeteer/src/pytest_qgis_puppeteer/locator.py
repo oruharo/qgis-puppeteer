@@ -193,7 +193,8 @@ class Locator:
         ``wait`` も同じ意味。
 
         ``kind="right"`` は右クリック、``cell`` は表・ツリー・リストの行
-        （``{"row": N}`` か ``{"text": セルの文字, "column": 見出し}``、#24）。
+        （``{"row": N}`` か ``{"text": セルの文字, "column": 見出し}``、#24。ツリーの
+        子の行は ``{"path": ["グループ", "レイヤ"]}``、#30）。
         ダブルクリックは :meth:`dblclick`。
 
         押せなければ ``WidgetOperationError``（#23）。

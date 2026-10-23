@@ -8,6 +8,29 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A child row of a tree can be addressed** (#30). `cell` and the row value
+  only reached the top level of a tree, so a layer inside a group, a
+  setting under a section or a node of a browser tree could not be
+  double-clicked, right-clicked or selected. `{"path": ["道路", "国道"]}`
+  walks down from the top level, each step a row text (matched as `text`
+  is) or a row number, and `column` applies to every step. Collapsed
+  parents are expanded right before the click or selection, as a person
+  would, and returned as `expanded`; nothing is expanded when the row is
+  not found, and a tree that cannot be expanded is `row_collapsed`. A lazy
+  model is asked to `fetchMore` first; a `row_not_found` there carries a
+  hint to wait and retry. Failures carry the `depth` and `path` where they
+  happened. `cell` in the result has the row `path`, and `value_after` of
+  a child row is that path (`[1, 0]`; top-level rows stay a number).
+
+  **The snapshot of an expanded tree grows.** A tree now also returns
+  `child_rows` (the rows of each expanded node, top-down, as `{"path",
+  "rows", "row_count"}`) and `collapsed_rows` (rows with children that are
+  collapsed), and `current` of a child row has its `path`. `rows` keeps
+  its shape. The names differ from a widget's `children` on purpose. The
+  rows together are still capped at 100. Saved snapshots of expanded
+  trees (a layer panel with open groups, for one) change, so review the
+  difference before updating them.
+
 - **A test can mark the leftovers it is known to leave** (#31). A product
   behaviour that always leaves, say, a map tool switched after certain
   tests produced the same warnings every run and buried new leftovers,
