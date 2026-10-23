@@ -1586,7 +1586,15 @@ canvas.wheel((-40500.0, 11500.0), 1)         # その位置で拡大
   クラス名（思ったツールになっていないときの切り分け用）。`extent` は送ったあとの範囲
 - どの操作も `modifiers=["shift", "ctrl", "alt"]` と `wait=False`（#21）を受ける
 - 地図の外（viewport の外）の点は、送る前に `point_outside_canvas` で断る（人には
-  押せないので）。失敗は `WidgetOperationError`
+  押せないので）。判定は、実際に届く丸めた画素で行う。`wait=False` で積んだあとに
+  地図が動いて外になったら、送らずに `qgis_get_recent_exceptions` に残す。失敗は
+  `WidgetOperationError`
+- `crs` と `pixel=True` は一緒に使えない。CRS の変換は送る時点の地図の CRS で行う
+- 文字を打つ `type_text` は、改行を Return、タブを Tab のキーで送り、大文字には
+  Shift を付ける
+- **制約**：送るのはイベントだけで、Qt のグローバルな状態
+  （`QGuiApplication.keyboardModifiers()` / `mouseButtons()`）は変わらない。修飾キーや
+  ボタンを、受けたイベントではなくグローバルな状態から読むマップツールには届かない
 - ダイアログの中の小さなキャンバスなどは `qgis.canvas({"object_name": ...})` で指す
 - キーの送り先は `target` で変えられる（`"canvas"` 既定 / `"focus"` / selector）。
   表の行を選んで Enter、なども `press_key("Return", target={"object_name": ...})` で送れる

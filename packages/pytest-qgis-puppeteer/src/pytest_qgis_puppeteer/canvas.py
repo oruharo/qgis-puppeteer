@@ -10,9 +10,10 @@
     canvas.press_key("Return", target="focus")
 
 どの操作も ``wait=False``（積んですぐ返す、#21）と ``modifiers``（``["shift"]``
-など）を受ける。戻り値の ``map_point`` は、マップツールが受け取る地図の点（画素に
-丸めるので、頼んだ点から ``map_units_per_pixel`` の半分までずれる）。失敗（地図の
-外の点など）は ``WidgetOperationError``。
+など）を受ける。マウスの操作は ``pixel=True`` で、点を viewport の画素として
+渡せる。戻り値の ``map_point`` は、マップツールが受け取る地図の点（画素に丸める
+ので、頼んだ点から ``map_units_per_pixel`` の半分までずれる）。失敗（地図の外の
+点など）は ``WidgetOperationError``。
 """
 
 from __future__ import annotations
@@ -49,16 +50,24 @@ class Canvas:
         *,
         button: str = "left",
         modifiers: Sequence[str] | None = None,
+        pixel: bool = False,
         wait: bool = True,
     ) -> dict[str, Any]:
         """その位置へ動かしてから押して離す。"""
-        return self._mouse("click", point, button=button, modifiers=modifiers, wait=wait)
+        return self._mouse(
+            "click", point, button=button, modifiers=modifiers, pixel=pixel, wait=wait
+        )
 
     def right_click(
-        self, point: Point, *, modifiers: Sequence[str] | None = None, wait: bool = True
+        self,
+        point: Point,
+        *,
+        modifiers: Sequence[str] | None = None,
+        pixel: bool = False,
+        wait: bool = True,
     ) -> dict[str, Any]:
         """右クリック（``click(point, button="right")``）。作図を終えるツールが多い。"""
-        return self.click(point, button="right", modifiers=modifiers, wait=wait)
+        return self.click(point, button="right", modifiers=modifiers, pixel=pixel, wait=wait)
 
     def dblclick(
         self,
@@ -66,10 +75,13 @@ class Canvas:
         *,
         button: str = "left",
         modifiers: Sequence[str] | None = None,
+        pixel: bool = False,
         wait: bool = True,
     ) -> dict[str, Any]:
         """ダブルクリック（press → release → doubleClick → release）。"""
-        return self._mouse("double", point, button=button, modifiers=modifiers, wait=wait)
+        return self._mouse(
+            "double", point, button=button, modifiers=modifiers, pixel=pixel, wait=wait
+        )
 
     def press(
         self,
@@ -77,10 +89,13 @@ class Canvas:
         *,
         button: str = "left",
         modifiers: Sequence[str] | None = None,
+        pixel: bool = False,
         wait: bool = True,
     ) -> dict[str, Any]:
         """その位置へ動かしてから押す（離さない）。"""
-        return self._mouse("press", point, button=button, modifiers=modifiers, wait=wait)
+        return self._mouse(
+            "press", point, button=button, modifiers=modifiers, pixel=pixel, wait=wait
+        )
 
     def release(
         self,
@@ -88,16 +103,24 @@ class Canvas:
         *,
         button: str = "left",
         modifiers: Sequence[str] | None = None,
+        pixel: bool = False,
         wait: bool = True,
     ) -> dict[str, Any]:
         """その位置で離す。"""
-        return self._mouse("release", point, button=button, modifiers=modifiers, wait=wait)
+        return self._mouse(
+            "release", point, button=button, modifiers=modifiers, pixel=pixel, wait=wait
+        )
 
     def move(
-        self, point: Point, *, modifiers: Sequence[str] | None = None, wait: bool = True
+        self,
+        point: Point,
+        *,
+        modifiers: Sequence[str] | None = None,
+        pixel: bool = False,
+        wait: bool = True,
     ) -> dict[str, Any]:
         """マウスを動かす（ボタンなし）。スナップの表示や輪郭の線が更新される。"""
-        return self._mouse("move", point, modifiers=modifiers, wait=wait)
+        return self._mouse("move", point, modifiers=modifiers, pixel=pixel, wait=wait)
 
     def drag(
         self,
@@ -106,6 +129,7 @@ class Canvas:
         button: str = "left",
         modifiers: Sequence[str] | None = None,
         steps: int | None = None,
+        pixel: bool = False,
         wait: bool = True,
     ) -> dict[str, Any]:
         """最初の点で押し、点から点へ ``steps`` 回（既定 5）ずつ動かして、最後の点で離す。"""
@@ -115,7 +139,8 @@ class Canvas:
             button=button,
             modifiers=modifiers,
             steps=steps,
-            crs=self._crs,
+            crs=None if pixel else self._crs,
+            pixel=pixel,
             canvas=self._selector,
             wait=wait,
             instance=self._instance,
@@ -127,6 +152,7 @@ class Canvas:
         delta: int = 1,
         *,
         modifiers: Sequence[str] | None = None,
+        pixel: bool = False,
         wait: bool = True,
     ) -> dict[str, Any]:
         """その位置でホイールを ``delta`` ノッチ回す（正で奥へ＝拡大）。
@@ -138,7 +164,8 @@ class Canvas:
             point,
             delta=delta,
             modifiers=modifiers,
-            crs=self._crs,
+            crs=None if pixel else self._crs,
+            pixel=pixel,
             canvas=self._selector,
             wait=wait,
             instance=self._instance,
@@ -201,6 +228,7 @@ class Canvas:
         *,
         button: str = "left",
         modifiers: Sequence[str] | None = None,
+        pixel: bool = False,
         wait: bool,
     ) -> dict[str, Any]:
         return self._client.canvas_mouse(
@@ -208,7 +236,8 @@ class Canvas:
             point,
             button=button,
             modifiers=modifiers,
-            crs=self._crs,
+            crs=None if pixel else self._crs,
+            pixel=pixel,
             canvas=self._selector,
             wait=wait,
             instance=self._instance,

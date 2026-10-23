@@ -20,6 +20,10 @@ QGIS のマップツール（作図・移動・選択など）は、キャンバ
 どの操作を使うかは利用側が決める。ライブラリは、人がキャンバスにできる基本の操作
 （クリック・ダブルクリック・押す・離す・動かす・ドラッグ・ホイール・キー・文字）を
 一通り揃える。
+
+送るのはイベントだけで、Qt のグローバルな状態（``QGuiApplication.keyboardModifiers()``
+/ ``mouseButtons()``）は変わらない。修飾キーやボタンを、受けたイベントではなく
+グローバルな状態から読むマップツールには届かない。
 """
 
 from __future__ import annotations
@@ -44,6 +48,8 @@ _MODIFIERS = {
 # ホイールの 1 ノッチ（Qt の angleDelta は 1/8 度単位で、1 ノッチ = 15 度）
 _WHEEL_STEP = 120
 _DEFAULT_DRAG_STEPS = 5
+# drag の途中の move の上限（GUI スレッドでイベントを送り続けないように）
+_MAX_DRAG_STEPS = 1000
 
 
 # ============================================================
@@ -86,18 +92,23 @@ def canvas_mouse(params: dict, iface: Any = None) -> dict:  # noqa: C901 - 引�
     modifiers, error = _parse_modifiers(params.get("modifiers"))
     if error is not None:
         return error
-    transform, error = _source_transform(canvas, params.get("crs"))
+    crs = params.get("crs")
+    pixel_mode = bool(params.get("pixel", False))
+    if crs is not None and pixel_mode:
+        return _invalid_argument("crs and pixel cannot be used together")
+    _, error = _source_transform(canvas, crs)  # 知らない CRS は、積む前に断る
     if error is not None:
         return error
-    pixel_mode = bool(params.get("pixel", False))
 
     if action == "drag":
         raw_points = params.get("points")
         if not isinstance(raw_points, list) or len(raw_points) < 2:
             return _invalid_argument("drag needs points: [[x, y], [x, y], ...] (2 or more)")
         steps = params.get("steps", _DEFAULT_DRAG_STEPS)
-        if not ui_tools._is_index(steps) or steps < 0:
-            return _invalid_argument(f"steps must be a non-negative integer, not {steps!r}")
+        if not ui_tools._is_index(steps) or not 0 <= steps <= _MAX_DRAG_STEPS:
+            return _invalid_argument(
+                f"steps must be an integer from 0 to {_MAX_DRAG_STEPS}, not {steps!r}"
+            )
     else:
         raw_points = [params.get("point")]
         steps = 0
@@ -111,48 +122,71 @@ def canvas_mouse(params: dict, iface: Any = None) -> dict:  # noqa: C901 - 引�
     if action == "wheel" and (not ui_tools._is_index(delta) or delta == 0):
         return _invalid_argument(f"delta must be a non-zero integer, not {delta!r}")
 
-    # 入れる前の確認：今の地図で、どの点も viewport の中にあること（人には外は押せない）
-    def to_pixel(point: tuple[float, float]) -> QPointF:
-        return _to_pixel(canvas, point, transform, pixel_mode)
+    def pixels_now() -> tuple[list[QPointF] | None, dict | None]:
+        """今の地図で画素に直し、どの点も viewport の中にあるか確かめる。
 
-    viewport = canvas.viewport()
-    if viewport.width() <= 0 or viewport.height() <= 0 or not canvas.isVisible():
-        return {"success": False, "error": "canvas_not_ready", "canvas": _canvas_summary(canvas)}
-    for point in points:
-        pos = to_pixel(point)
-        if not _inside(viewport, pos):
-            return {
+        積んだ処理は、送る時点でもう一度呼ぶ（積んだあとに地図や CRS が変わりうる）。
+        判定は、実際に届く丸めた画素（``toPoint()``）で行う。
+        """
+        viewport = canvas.viewport()
+        if viewport.width() <= 0 or viewport.height() <= 0 or not canvas.isVisible():
+            return None, {
                 "success": False,
-                "error": "point_outside_canvas",
-                "point": list(point),
-                "pixel": [pos.x(), pos.y()],
-                "size": [viewport.width(), viewport.height()],
-                "extent": _extent(canvas),
+                "error": "canvas_not_ready",
+                "canvas": _canvas_summary(canvas),
             }
+        transform, error = _source_transform(canvas, crs)
+        if error is not None:
+            return None, error
+        found = []
+        for point in points:
+            try:
+                pos = _to_pixel(canvas, point, transform, pixel_mode)
+            except Exception as exc:  # noqa: BLE001 - QgsCsException（CRS の範囲外など）
+                return None, {
+                    "success": False,
+                    "error": "transform_failed",
+                    "point": list(point),
+                    "message": str(exc),
+                }
+            if not _inside(viewport, pos):
+                return None, {
+                    "success": False,
+                    "error": "point_outside_canvas",
+                    "point": list(point),
+                    "pixel": [pos.x(), pos.y()],
+                    "size": [viewport.width(), viewport.height()],
+                    "extent": _extent(canvas),
+                }
+            found.append(pos)
+        return found, None
 
+    # 入れる前の確認：今の地図で、どの点も viewport の中にあること（人には外は押せない）
+    pixels, error = pixels_now()
+    if error is not None:
+        return error
     button = _BUTTONS[button_name]
 
-    def send() -> None:
-        # 画素への変換は、実際に送るこの時点の地図で
-        _send_mouse(
-            canvas,
-            action,
-            [to_pixel(p) for p in points],
-            button,
-            modifiers,
-            steps=steps,
-            delta=delta,
-        )
+    def send() -> dict | None:
+        # 画素への変換と範囲の確かめは、実際に送るこの時点の地図で
+        at_send, failure = pixels_now()
+        if failure is not None:
+            return failure  # 積んだ処理なら recent_exceptions に残る
+        _send_mouse(canvas, action, at_send, button, modifiers, steps=steps, delta=delta)
+        return None
 
     result: dict[str, Any] = {"success": True, "action": action}
-    _describe_points(canvas, [to_pixel(p) for p in points], action, result)
+    _describe_points(canvas, pixels, action, result)
     result["map_units_per_pixel"] = canvas.mapUnitsPerPixel()
     result["map_tool"] = _map_tool_name(canvas)
     if not params.get("wait", True):
+        # pixel / map_point は頼んだ時点の地図での値。送る時点で地図が動いていれば変わる
         queued.run_later(send, what="qgis_canvas_mouse", target=canvas)
         result["queued"] = True
         return result
-    send()
+    failure = send()
+    if failure is not None:
+        return failure
     result["extent"] = _extent(canvas)
     return result
 
@@ -191,11 +225,11 @@ def canvas_key(params: dict, iface: Any = None) -> dict:
         key = _key_code(key_name)
         if key is None:
             return _invalid_argument(f"unknown key: {key_name!r}")
-        strokes = [(key, _key_text(key_name))]
+        strokes = [(key, _key_text(key_name), modifiers)]
     else:
         if not isinstance(text, str) or not text:
             return _invalid_argument("text must be a non-empty string")
-        strokes = [(_char_key(ch), ch) for ch in text]
+        strokes = [_char_stroke(ch, modifiers) for ch in text]
 
     target_spec = params.get("target", "canvas")
     target, error = _resolve_key_target(target_spec, params.get("canvas"), iface)
@@ -204,14 +238,14 @@ def canvas_key(params: dict, iface: Any = None) -> dict:
 
     def send() -> None:
         receiver = target() if callable(target) else target
-        for key, key_text in strokes:
+        for key, key_text, key_modifiers in strokes:
             if action in ("tap", "press"):
                 QApplication.sendEvent(
-                    receiver, QKeyEvent(QEvent.KeyPress, key, modifiers, key_text)
+                    receiver, QKeyEvent(QEvent.KeyPress, key, key_modifiers, key_text)
                 )
             if action in ("tap", "release"):
                 QApplication.sendEvent(
-                    receiver, QKeyEvent(QEvent.KeyRelease, key, modifiers, key_text)
+                    receiver, QKeyEvent(QEvent.KeyRelease, key, key_modifiers, key_text)
                 )
 
     receiver_now = target() if callable(target) else target
@@ -220,6 +254,9 @@ def canvas_key(params: dict, iface: Any = None) -> dict:
         "target": ui_tools._widget_summary(receiver_now),
         "keys": len(strokes),
     }
+    if callable(target):
+        # "focus" は送る時点のフォーカスに送る。target は頼んだ時点のもの
+        result["target_mode"] = "focus"
     canvas = _canvas_of(receiver_now)
     if canvas is not None:
         result["map_tool"] = _map_tool_name(canvas)
@@ -301,7 +338,9 @@ def _to_pixel(canvas: Any, point: tuple[float, float], transform: Any, pixel_mod
 
 
 def _inside(viewport: Any, pos: QPointF) -> bool:
-    return 0 <= pos.x() < viewport.width() and 0 <= pos.y() < viewport.height()
+    # マップツールが受けるのは丸めた整数の画素（QMouseEvent::pos()）なので、それで見る
+    point = pos.toPoint()
+    return 0 <= point.x() < viewport.width() and 0 <= point.y() < viewport.height()
 
 
 def _describe_points(canvas: Any, pixels: list[QPointF], action: str, result: dict) -> None:
@@ -434,7 +473,11 @@ def _resolve_key_target(spec: Any, canvas_selector: Any, iface: Any) -> tuple[An
     if spec == "canvas":
         return _resolve_canvas(canvas_selector, iface)
     if spec == "focus":
-        canvas, _ = _resolve_canvas(canvas_selector, iface)  # 無ければ None のまま
+        canvas = None
+        if canvas_selector is not None or iface is not None:
+            canvas, error = _resolve_canvas(canvas_selector, iface)
+            if error is not None and canvas_selector is not None:
+                return None, error  # 指したキャンバスが無いことを、そのまま知らせる
 
         def focused() -> Any:
             widget = QApplication.focusWidget()
@@ -460,11 +503,33 @@ def _key_code(name: Any) -> Any:
 
 
 def _char_key(ch: str) -> int:
-    """1 文字のキーの番号。ASCII の印字できる文字は Qt の番号が大文字の番号と同じ。"""
+    """1 文字のキーの番号。ASCII の印字できる文字は Qt の番号が大文字の番号と同じ。
+
+    それ以外（かな・漢字など）は 0（キーの番号なし）で、文字は text で届く。
+    ``Qt.Key_unknown`` は 0x01ffffff で、0 とは別。
+    """
     upper = ch.upper()
     if len(upper) == 1 and 0x20 <= ord(upper) < 0x7F:
         return ord(upper)
-    return 0  # Qt.Key_unknown。text で文字は届く
+    return 0
+
+
+# 打つ文字のうち、キーで送るもの（改行は Return、タブは Tab）
+_CONTROL_CHARS = {"\n": ("Key_Return", "\r"), "\r": ("Key_Return", "\r"), "\t": ("Key_Tab", "\t")}
+
+
+def _char_stroke(ch: str, modifiers: Any) -> tuple[int, str, Any]:
+    """打つ 1 文字を ``(キーの番号, 文字, 修飾キー)`` にする。
+
+    改行・タブはそのキーにする（``returnPressed`` を待つ欄に届くように）。大文字は、
+    人が打つときと同じく Shift を付ける。
+    """
+    if ch in _CONTROL_CHARS:
+        name, key_text = _CONTROL_CHARS[ch]
+        return getattr(Qt, name), key_text, modifiers
+    if ch.isalpha() and ch.isupper() and ch.isascii():
+        return _char_key(ch), ch, modifiers | Qt.ShiftModifier
+    return _char_key(ch), ch, modifiers
 
 
 def _key_text(name: str) -> str:

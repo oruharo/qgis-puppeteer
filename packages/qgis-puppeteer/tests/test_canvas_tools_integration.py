@@ -116,6 +116,26 @@ R["not_canvas"] = run(canvas_mouse, {"point": [cx, cy], "canvas": {"object_name"
 queued = run(canvas_mouse, {"point": [cx, cy], "wait": False})
 R["queued"] = queued
 
+R["crs_and_pixel"] = run(canvas_mouse, {"point": [1, 1], "crs": "EPSG:4326", "pixel": True})
+R["too_many_steps"] = run(canvas_mouse, {"action": "drag", "points": DRAG, "steps": 100000})
+W = canvas.viewport().width()
+R["edge"] = run(canvas_mouse, {"point": [W - 0.3, 10], "pixel": True})  # 丸めると W で外
+R["edge_in"] = run(canvas_mouse, {"point": [-0.4, 10], "pixel": True})  # 丸めると 0 で中
+from qgis_puppeteer.qgis_tools import exception_recorder
+exception_recorder.clear()
+tool.log = []
+moved = canvas_mouse({"point": [cx, cy], "wait": False}, iface)
+canvas.setExtent(QgsRectangle(10000, 10000, 10400, 10300))  # 積んだあとに地図が動く
+for _ in range(5):
+    _app.processEvents()
+R["moved"] = {"result": moved, "log": list(tool.log),
+              "recorded": [r["message"] for r in exception_recorder.get_recent()]}
+canvas.setExtent(QgsRectangle(0, 0, 400, 300))
+_app.processEvents()
+R["typed"] = run(canvas_key, {"text": "aB\\n"})
+NOPE = {"object_name": "nope"}
+R["focus_bad_canvas"] = run(canvas_key, {"text": "x", "target": "focus", "canvas": NOPE})
+
 R["key"] = run(canvas_key, {"key": "Escape"})
 R["key_shift"] = run(canvas_key, {"key": "Backspace", "modifiers": ["shift"]})
 # Space の離しはキャンバスが自分で受ける（パンの終わり）ので、マップツールに渡る文字で
@@ -238,6 +258,28 @@ def test_text_is_typed_key_by_key(r: dict[str, Any]) -> None:
     assert typed == ["9", "0"]
     assert r["text_selector"]["result"]["keys"] == 4
     assert r["edit_text"] == "45.5"
+
+
+def test_reviewed_edges(r: dict[str, Any]) -> None:
+    assert r["crs_and_pixel"]["result"]["error"] == "invalid_argument"
+    assert r["too_many_steps"]["result"]["error"] == "invalid_argument"
+    # 範囲の判定は、実際に届く丸めた画素で
+    assert r["edge"]["result"]["error"] == "point_outside_canvas"
+    assert r["edge_in"]["result"]["success"] is True
+    # 積んだあとに地図が動いて外になった点は、送らずに記録する
+    assert r["moved"]["result"]["queued"] is True
+    assert r["moved"]["log"] == []
+    assert any("point_outside_canvas" in m for m in r["moved"]["recorded"])
+    assert r["focus_bad_canvas"]["result"]["error"] == "canvas_not_found"
+
+
+def test_typing_sends_return_for_a_newline_and_shift_for_capitals(r: dict[str, Any]) -> None:
+    presses = [e for e in r["typed"]["log"] if e[0] == "key_press"]
+    shift = 0x02000000
+    return_key = 0x01000004
+    assert [(e[1], e[2]) for e in presses] == [(ord("A"), "a"), (ord("B"), "B"), (return_key, "\r")]
+    assert presses[0][3] & shift == 0
+    assert presses[1][3] & shift
 
 
 def test_key_misuse_is_refused(r: dict[str, Any]) -> None:

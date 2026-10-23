@@ -580,6 +580,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the tick no longer writes a property onto host dialogs. A read-only
   `QgsFileWidget` is reported as not editable, so `fill()` waits for it.
 
+- **Canvas input, after review** (#26). A queued mouse action checks the
+  point against the map at the moment of sending and records
+  `point_outside_canvas` instead of sending it; the CRS transform is built
+  then too, and a transform error is `transform_failed`. The in-viewport
+  check uses the rounded pixel the map tool receives. `crs` with `pixel`
+  and drags of more than 1000 steps are refused. Typed text sends Return
+  and Tab for newlines and tabs and Shift for capitals. `Canvas` takes
+  `pixel=True`.
+
 - **A double or right click on a table row picked by a hidden column's text
   went to the hidden cell** (#24). A table that keeps an ID column hidden
   to identify rows, matched with `cell={"text": id, "column": "ID"}`, got

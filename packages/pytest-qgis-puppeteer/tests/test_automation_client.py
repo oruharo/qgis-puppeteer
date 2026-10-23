@@ -255,6 +255,15 @@ class TestCommandWiring:
             {"key": "Escape", "canvas": {"object_name": "mini"}},
         ]
 
+    def test_canvas_takes_pixels_without_its_crs(self) -> None:
+        e2e, inner = _make_client([{"success": True}])
+        e2e.canvas(crs="EPSG:4326").click((10, 20), pixel=True)
+        assert inner.call.await_args_list[0].args[1] == {
+            "action": "click",
+            "point": [10, 20],
+            "pixel": True,
+        }
+
     def test_a_failed_canvas_operation_raises(self) -> None:
         e2e, _inner = _make_client([{"success": False, "error": "point_outside_canvas"}])
         with pytest.raises(WidgetOperationError, match="point_outside_canvas"):
