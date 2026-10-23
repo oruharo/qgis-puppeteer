@@ -80,6 +80,9 @@ def _install_fake_tools() -> dict[str, Any]:
     screenshot_tools.get_canvas_extent = _CallRecorder({"xmin": 0.0})
     screenshot_tools.set_canvas_extent = _CallRecorder({"success": True})
 
+    leftover_tools = types.ModuleType("qgis_puppeteer.qgis_tools.leftover_tools")
+    leftover_tools.get_leftover_state = _CallRecorder({"success": True, "state": {}})
+
     canvas_tools = types.ModuleType("qgis_puppeteer.qgis_tools.canvas_tools")
     canvas_tools.canvas_mouse = _CallRecorder({"success": True})
     canvas_tools.canvas_key = _CallRecorder({"success": True})
@@ -120,6 +123,7 @@ def _install_fake_tools() -> dict[str, Any]:
     qgis_tools_pkg.screenshot_tools = screenshot_tools
     qgis_tools_pkg.render_tools = render_tools
     qgis_tools_pkg.canvas_tools = canvas_tools
+    qgis_tools_pkg.leftover_tools = leftover_tools
     qgis_tools_pkg.ui_tools = ui_tools
     qgis_tools_pkg.dialog_handler_tools = dialog_handler_tools
     qgis_tools_pkg.exception_recorder = exception_recorder
@@ -131,6 +135,7 @@ def _install_fake_tools() -> dict[str, Any]:
     sys.modules["qgis_puppeteer.qgis_tools.screenshot_tools"] = screenshot_tools
     sys.modules["qgis_puppeteer.qgis_tools.render_tools"] = render_tools
     sys.modules["qgis_puppeteer.qgis_tools.canvas_tools"] = canvas_tools
+    sys.modules["qgis_puppeteer.qgis_tools.leftover_tools"] = leftover_tools
     sys.modules["qgis_puppeteer.qgis_tools.ui_tools"] = ui_tools
     sys.modules["qgis_puppeteer.qgis_tools.dialog_handler_tools"] = dialog_handler_tools
     sys.modules["qgis_puppeteer.qgis_tools.exception_recorder"] = exception_recorder
@@ -143,6 +148,7 @@ def _install_fake_tools() -> dict[str, Any]:
         "shot": screenshot_tools,
         "render": render_tools,
         "canvas": canvas_tools,
+        "leftover": leftover_tools,
         "ui": ui_tools,
         "dialog": dialog_handler_tools,
         "exc": exception_recorder,
@@ -161,6 +167,7 @@ def fake_tools() -> dict[str, Any]:
         "qgis_puppeteer.qgis_tools.screenshot_tools",
         "qgis_puppeteer.qgis_tools.render_tools",
         "qgis_puppeteer.qgis_tools.canvas_tools",
+        "qgis_puppeteer.qgis_tools.leftover_tools",
         "qgis_puppeteer.qgis_tools.ui_tools",
         "qgis_puppeteer.qgis_tools.dialog_handler_tools",
         "qgis_puppeteer.qgis_tools.exception_recorder",
@@ -374,6 +381,15 @@ class TestUiHandlers:
             "include_main_window": True,
         }
 
+    def test_leftover_state_takes_params_and_iface(self, fake_tools: dict[str, Any]) -> None:
+        """#28"""
+        build_handlers = _import_build_handlers()
+        iface = object()
+        handlers = build_handlers(iface)
+        params = {"items": ["dialogs", "editing"]}
+        handlers["qgis_get_leftover_state"](params)
+        assert fake_tools["leftover"].get_leftover_state.calls[0] == ((params, iface), {})
+
     def test_canvas_mouse_and_key_take_params_and_iface(self, fake_tools: dict[str, Any]) -> None:
         """#26: 引数の検査は canvas_tools がするので、params をそのまま渡す。"""
         build_handlers = _import_build_handlers()
@@ -575,6 +591,7 @@ class TestHandlerInventory:
             "qgis_set_canvas_extent",
             "qgis_canvas_mouse",
             "qgis_canvas_key",
+            "qgis_get_leftover_state",
             # ui
             "qgis_snapshot_ui",
             "qgis_click_widget",

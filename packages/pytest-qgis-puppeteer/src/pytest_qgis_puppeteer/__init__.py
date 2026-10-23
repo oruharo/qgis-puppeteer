@@ -7,6 +7,8 @@ Public API:
       上げる例外
     - ``WidgetOperationError`` — click / 値の設定が失敗した（入った値が違う
       ことも含む）ときに上がる例外
+    - ``QgisLeftoverWarning`` — ``qgis_leftover_warn`` の項目で、テストのあとに
+      状態が残っていたときの警告
     - ``E2EAutomationClient`` — 同期版 AutomationClient ラッパ
     - ``ExecResult`` — ``execute_python_detailed`` の typed 戻り値
     - ``WorkerCodeError`` / ``ConfirmationRequiredError`` /
@@ -26,6 +28,7 @@ from qgis_puppeteer.client import (
 )
 
 from pytest_qgis_puppeteer._expect import expect
+from pytest_qgis_puppeteer._leftover import QgisLeftoverWarning
 from pytest_qgis_puppeteer._message_check import unexpected_messages
 from pytest_qgis_puppeteer.automation_client import (
     E2EAutomationClient,
@@ -62,6 +65,7 @@ __all__ = [
     "expect",
     "spawn_qgis",
     "unexpected_messages",
+    "QgisLeftoverWarning",
     "QgisPluginMismatchWarning",
     "spawn_qgis_fixture",
 ]

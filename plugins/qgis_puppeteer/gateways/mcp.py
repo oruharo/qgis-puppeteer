@@ -1219,6 +1219,37 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
             instance=instance,
         )
 
+    @mcp.tool(title="残った状態を読む", annotations=_QUERY, structured_output=False)
+    async def qgis_get_leftover_state(
+        ctx: Context,
+        items: list[
+            Literal[
+                "dialogs",
+                "popup",
+                "editing",
+                "editing_modified",
+                "map_tool",
+                "selection",
+                "layer_tree",
+                "layers",
+                "active_layer",
+                "project_dirty",
+            ]
+        ]
+        | None = None,
+        instance: InstanceArg = None,
+    ) -> str | CallToolResult:
+        """作業のあとに確かめたい QGIS の状態を 1 回で読む（既定は全部）。
+
+        見えているダイアログ（dialogs）、ポップアップ（popup）、編集中のレイヤと未保存の
+        変更・取り消しの数（editing）、マップツール（map_tool）、レイヤごとの選択の数
+        （selection）、レイヤツリーと凡例のチェック（layer_tree）、レイヤとグループ
+        （layers）、アクティブレイヤ（active_layer）、プロジェクトの未保存（project_dirty）。
+        作業の前と後で読み比べると、閉じ忘れや戻し忘れが分かる。
+        """
+        params: dict[str, Any] = {} if items is None else {"items": items}
+        return await _call(ctx, "qgis_get_leftover_state", params, instance=instance)
+
     @mcp.tool(
         title="キャンバスをマウスで操作", annotations=_MUTATE_ARBITRARY, structured_output=False
     )

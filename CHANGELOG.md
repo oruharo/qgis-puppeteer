@@ -8,6 +8,31 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **State a test leaves behind is found and reported** (#28). The next
+  test runs on the same QGIS, so a dialog left open, a layer left in
+  editing mode or a map tool left switched changed its outcome without
+  anyone seeing why. `qgis_leftover_fail` and `qgis_leftover_warn` (both
+  empty by default) choose what to look at from `dialogs`, `popup`,
+  `editing_modified` (unsaved changes or an undo history), `editing`
+  (editing without changes), `map_tool`, `selection`, `layer_tree`
+  (layer, group and legend item check states), `layers` (layers and groups
+  added or removed), `active_layer` and `project_dirty`. The state is read
+  right before the call and again after all fixtures have torn down, and
+  only what was not there at the start is reported, as "what changed from
+  what" (`建物 › 滅失済: checked True -> False`); so what a fixture makes and
+  cleans up, or a window the host keeps open, is not reported, and the map
+  tool is compared with the one at the start rather than with Pan. A
+  `qgis_leftover_fail` item errors the test at teardown, and with
+  `qgis_auto_fresh_after_failure = session` the session QGIS is restarted
+  before the next test; a teardown error now counts as a failure for that
+  in general. A `qgis_leftover_warn` item only issues
+  `QgisLeftoverWarning`. Nothing is cleaned up, since that could destroy
+  the user's data. The Worker reads the requested items in one call,
+  `qgis_get_leftover_state`, which the MCP gateway also exposes. Checked
+  on QGIS 3.34: a dialog left open errored the test and the restarted QGIS
+  had none, and a layer left editing, a switched map tool and an unchecked
+  category were warned about by name.
+
 - **A hook right before pytest starts a QGIS** (#29). `spawn_qgis()` took
   fixed `args` and `env`, but nothing let a conftest prepare something for
   *each* start, such as a new profile in a temporary folder, so hosts

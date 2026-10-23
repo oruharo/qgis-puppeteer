@@ -54,6 +54,7 @@ def build_handlers(iface: Any | None = None) -> dict[str, Handler]:
             dialog_handler_tools,
             exception_recorder,
             layer_tools,
+            leftover_tools,
             message_recorder,
             python_executor,
             render_tools,
@@ -152,6 +153,11 @@ def build_handlers(iface: Any | None = None) -> dict[str, Handler]:
         params["ymax"],
         iface,
         wait=params.get("wait", True),
+    )
+
+    # テストのあとに残った状態（#28）
+    handlers["qgis_get_leftover_state"] = lambda params: leftover_tools.get_leftover_state(
+        params, iface
     )
 
     # キャンバスへのマウスとキー（#26）。引数は params のまま渡す

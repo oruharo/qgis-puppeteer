@@ -24,12 +24,13 @@ selector・Locator・dialog handler 等の機能リファレンスをまとめ�
 10. [地図の画像スナップショット（`qgis_render_map`）](#map-image-snapshot)
 11. [Uncaught Qt/Python 例外と test fail linkage](#uncaught-exceptions)
 12. [QgsMessageLog の記録と判定](#message-log)
-13. [MCP の操作記録](#mcp-recording)
-14. [複数 QGIS（multi-instance）](#multi-instance)
-15. [Permissions / 信頼モード](#permissions)
-16. [環境変数リファレンス](#環境変数リファレンス)
-17. [Troubleshooting](#troubleshooting)
-18. [Roadmap](#roadmap)
+13. [テストのあとに残った状態の検査](#leftover-state)
+14. [MCP の操作記録](#mcp-recording)
+15. [複数 QGIS（multi-instance）](#multi-instance)
+16. [Permissions / 信頼モード](#permissions)
+17. [環境変数リファレンス](#環境変数リファレンス)
+18. [Troubleshooting](#troubleshooting)
+19. [Roadmap](#roadmap)
 
 ---
 
@@ -1871,6 +1872,65 @@ MCP からは `qgis_get_recent_messages` / `qgis_clear_recent_messages`。未捕
 エージェントは操作の後にこの 2 つで「画面に出ない失敗」を確かめられる。
 `qgis_get_recent_messages` の結果の `last_seq` を次の呼び出しの `after_seq` に
 渡すと、増えた分だけが返る。
+
+---
+
+<a id="leftover-state"></a>
+
+## テストのあとに残った状態の検査
+
+同じ QGIS を次のテストも使うので、前のテストが残した状態（閉じ忘れのダイアログ、
+編集中のレイヤ、変わったままのマップツール、選択など）で次のテストの結果が変わる。
+見る項目を ini で選ぶと、テストのあとに**始めに無かったのに残ったもの**を知らせる（#28）。
+既定はどれも見ない。
+
+```ini
+[pytest]
+qgis_leftover_fail = dialogs editing_modified       # 残っていたら teardown のエラー
+qgis_leftover_warn = editing map_tool layer_tree    # 残っていたら警告だけ
+```
+
+| 項目 | 見るもの |
+|---|---|
+| `dialogs` | 見えているダイアログとモーダル（`QDockWidget` は入らない） |
+| `popup` | 開いているポップアップ（メニューなど） |
+| `editing_modified` | 未保存の変更（`isModified`）か、取り消しの履歴が残った編集中のレイヤ |
+| `editing` | 変更の無いまま編集中のレイヤ |
+| `map_tool` | マップツール（始めと違えば） |
+| `selection` | レイヤごとの選択の数 |
+| `layer_tree` | レイヤとグループの表示のチェック、凡例の項目のチェック（分類の表示など） |
+| `layers` | 足して残したレイヤとグループ、消えたもの |
+| `active_layer` | アクティブレイヤ |
+| `project_dirty` | プロジェクトが未保存になった |
+
+- **比べ方は「始めとの差」**：テストの call の直前に 1 回読み、fixture の後片付けが
+  全部終わったあとにもう 1 回読む。fixture が作って fixture が片付けたもの、ホストが
+  始めから開いている窓などは出ない。マップツールも「Pan 以外」ではなく「始めと違う」
+  で見る（ホストによって既定のツールが違うため）
+- 項目ごとに失敗か警告かを選べる。直す前の製品の不具合で残ることが分かっている項目は
+  `qgis_leftover_warn` に入れておき、直したら `qgis_leftover_fail` に上げる、など
+- 知らせる文は「どの項目の、何が、始めの値から何に変わったか」:
+
+  ```
+  test_move.py::test_move left QGIS in a different state than it found it:
+    [layer_tree]
+      - 建物 › 滅失済: checked True -> False
+    [editing]
+      - layer '建物' left in editing mode (no changes)
+  ```
+
+- 失敗（`qgis_leftover_fail`）は **teardown のエラー**になる。
+  `qgis_auto_fresh_after_failure = session` なら、次のテストの前に QGIS を起こし直す
+  （teardown のエラーは、残った状態のものも fixture の後片付けの失敗も「落ちた」に
+  数える）。警告（`QgisLeftoverWarning`）では起こし直さない
+- **片付けはしない**（編集の破棄、ダイアログを閉じる、など）。利用者のデータを壊しうる
+  ので、要るなら conftest の fixture で片付ける
+- テストの中で足したレイヤの表示や凡例は、始めに無かったので `layer_tree` には出ない
+  （残ったこと自体は `layers` が知らせる）
+- 見ないもの：`qgis` / `automation_client` を使わないテスト、`fresh_qgis` のテスト
+  （その QGIS は捨てる）、dev モード
+- 毎テスト 2 回、選んだ項目だけを読む（1 往復ずつ）
+- MCP からは `qgis_get_leftover_state`（作業の前と後で読み比べる）
 
 ---
 

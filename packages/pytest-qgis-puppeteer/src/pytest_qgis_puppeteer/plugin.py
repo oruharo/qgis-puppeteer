@@ -63,7 +63,7 @@ from urllib.parse import urlparse
 
 import pytest
 
-from pytest_qgis_puppeteer import _message_check
+from pytest_qgis_puppeteer import _leftover, _message_check
 from pytest_qgis_puppeteer._action_recorder import ActionRecorder
 from pytest_qgis_puppeteer._environments import (
     EnvironmentsConfig,
@@ -277,6 +277,22 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "message bar messages. Default: '' (off).",
         default="",
     )
+    # #28: テストのあとに残った状態（閉じ忘れの窓、編集中のレイヤなど）を見つける。
+    # 項目は _leftover.ITEMS から。既定はどれも見ない（opt-in）。
+    parser.addini(
+        "qgis_leftover_fail",
+        "State a test must not leave behind; found after teardown, it errors the "
+        "test (#28). Items: dialogs popup editing editing_modified map_tool selection "
+        "layer_tree layers active_layer project_dirty. Default: none.",
+        type="args",
+        default=[],
+    )
+    parser.addini(
+        "qgis_leftover_warn",
+        "Like qgis_leftover_fail, but only warns (QgisLeftoverWarning). Default: none.",
+        type="args",
+        default=[],
+    )
     parser.addini(
         "qgis_message_allowlist",
         "Messages ignored by qgis_fail_on_message_level, one per line: a regex "
@@ -317,6 +333,8 @@ _CONFIG_ATTR_STARTUP_MESSAGES = "_qgis_puppeteer_startup_messages"
 _CONFIG_ATTR_STARTUP_PROBLEMS = "_qgis_puppeteer_startup_problems"
 # #15: そのテストが動く QGIS の key（qgis_startup_messages fixture が読む）
 _STARTUP_KEY = pytest.StashKey[str]()
+# #28: call の直前に読んだ状態（テストのあとと比べる）
+_LEFTOVER_BASELINE_KEY = pytest.StashKey[dict]()
 # ADR-0003 Phase 3: 子側で test outcomes を集計するための buffer
 # (counts dict + failed_tests list + start time)。``pytest_sessionfinish`` で
 # ``_env_stats.json`` に書き出される。
@@ -343,6 +361,8 @@ def pytest_configure(config: pytest.Config) -> None:
     `environments.toml` 不在は許容（後方互換）。`--env` 指定時に toml 不在なら
     UsageError。
     """
+    # 残った状態の項目の綴り違いは、テストを回す前に知らせる（#28）
+    _leftover.configured_items(config)
     config.addinivalue_line(
         "markers",
         "qgis_env(*names): assign this test to one or more QGIS environments "
@@ -2485,7 +2505,88 @@ def pytest_runtest_call(item: pytest.Item) -> Iterator[None]:  # type: ignore[mi
                         item.nodeid,
                         exc_info=True,
                     )
+        _take_leftover_baseline(item)
     yield
+
+
+def _leftover_target(item: pytest.Item) -> tuple[Any, list[str], list[str]] | None:
+    """残った状態を見るテストなら ``(client, 失敗の項目, 警告の項目)``（#28）。
+
+    dev モード、項目を選んでいない、``qgis`` を使わない、``fresh_qgis``（その QGIS は
+    捨てる）のテストは見ない。
+    """
+    if _is_dev_mode() or item.get_closest_marker("fresh_qgis") is not None:
+        return None
+    fail, warn = _leftover.configured_items(item.config)
+    if not (fail or warn):
+        return None
+    client = _try_get_automation_client(item)
+    if client is None:
+        return None
+    return client, fail, warn
+
+
+def _read_leftover_state(client: Any, items: list[str]) -> dict[str, Any]:
+    # テストの操作ではないので、操作記録に入れない
+    with client.unrecorded():
+        result = client.call("qgis_get_leftover_state", {"items": items})
+    if not isinstance(result, dict) or not result.get("success"):
+        raise RuntimeError(f"qgis_get_leftover_state failed: {result!r}")
+    return result["state"]
+
+
+def _take_leftover_baseline(item: pytest.Item) -> None:
+    """call の直前の状態を読んでおく（#28）。読めなければ、このテストは見ない。"""
+    target = _leftover_target(item)
+    if target is None:
+        return
+    client, fail, warn = target
+    try:
+        item.stash[_LEFTOVER_BASELINE_KEY] = _read_leftover_state(client, fail + warn)
+    except Exception as exc:  # noqa: BLE001 - 古い plugin などでは読めない。黙らず知らせる
+        logger.warning("qgis_leftover: could not read the state before %s: %s", item.nodeid, exc)
+
+
+@pytest.fixture(autouse=True)
+def _qgis_leftover_check(request: pytest.FixtureRequest) -> Iterator[None]:
+    """fixture の後片付けが終わったあとに、残った状態を見る（#28）。
+
+    plugin の autouse fixture は最初に準備され、最後に片付けられるので、ここの後半は
+    ほかの function の fixture の後片付けのあとに走る。始め（call の直前）に無かった
+    のに残ったものを、``qgis_leftover_fail`` の項目ならエラー（teardown）、
+    ``qgis_leftover_warn`` の項目なら警告にする。
+    """
+    yield
+    item = request.node
+    baseline = item.stash.get(_LEFTOVER_BASELINE_KEY, None)
+    if baseline is None:
+        return
+    target = _leftover_target(item)
+    if target is None:
+        return
+    client, fail, warn = target
+    try:
+        after = _read_leftover_state(client, fail + warn)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("qgis_leftover: could not read the state after %s: %s", item.nodeid, exc)
+        return
+    failed = {
+        name: found
+        for name in fail
+        if (found := _leftover.leftovers(name, baseline[name], after[name]))
+    }
+    warned = {
+        name: found
+        for name in warn
+        if (found := _leftover.leftovers(name, baseline[name], after[name]))
+    }
+    if warned:
+        warnings.warn(
+            _leftover.QgisLeftoverWarning(_leftover.format_leftovers(item.nodeid, warned)),
+            stacklevel=1,
+        )
+    if failed:
+        pytest.fail(_leftover.format_leftovers(item.nodeid, failed), pytrace=False)
 
 
 def _try_get_automation_client(item: pytest.Item) -> Any | None:
@@ -2507,6 +2608,10 @@ def _try_get_automation_client(item: pytest.Item) -> Any | None:
 def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo) -> Iterator[None]:  # type: ignore[misc]
     outcome = yield
     report = outcome.get_result()
+    if report.when == "teardown" and report.failed:
+        # 後片付けの失敗（残った状態、#28、や fixture の後片付けのエラー）も、QGIS の
+        # 状態が分からなくなるので、起こし直しの「落ちた」に数える
+        _flag_restart_after_failure(item)
     if report.when != "call":
         return
 
@@ -2573,18 +2678,23 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo) -> Itera
         # ADR-0002 §17.5: 失敗連鎖防止の自動 fresh_qgis を opt-in なら flag を立てる。
         # 次テストの ``pytest_runtest_setup`` で flag を読んで fresh_qgis marker を
         # 動的付与する。
-        mode = _resolve_auto_fresh_after_failure(item.config)
-        if mode == "test":
-            setattr(item.config, _CONFIG_ATTR_PRIOR_TEST_FAILED, True)
-        elif mode == "session" and item.get_closest_marker("fresh_qgis") is None:
-            # fresh_qgis のテストは session の QGIS を使っていないので、起こし直さない
-            setattr(item.config, _CONFIG_ATTR_RESTART_SESSION_QGIS, True)
+        _flag_restart_after_failure(item)
     # promoted_to_failed は将来 telemetry に使う想定（現状は info ログのみ）
     if promoted_to_failed:
         logger.info(
             "Test %s promoted pass→fail by uncaught exceptions or logged messages",
             item.nodeid,
         )
+
+
+def _flag_restart_after_failure(item: pytest.Item) -> None:
+    """``qgis_auto_fresh_after_failure`` に従い、次のテストの前に起こし直す印を立てる。"""
+    mode = _resolve_auto_fresh_after_failure(item.config)
+    if mode == "test":
+        setattr(item.config, _CONFIG_ATTR_PRIOR_TEST_FAILED, True)
+    elif mode == "session" and item.get_closest_marker("fresh_qgis") is None:
+        # fresh_qgis のテストは session の QGIS を使っていないので、起こし直さない
+        setattr(item.config, _CONFIG_ATTR_RESTART_SESSION_QGIS, True)
 
 
 def pytest_runtest_setup(item: pytest.Item) -> None:

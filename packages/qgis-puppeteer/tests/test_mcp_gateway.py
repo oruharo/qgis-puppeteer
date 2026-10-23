@@ -617,6 +617,7 @@ class TestMcpGatewayToolInventory:
             "qgis_set_canvas_extent",
             "qgis_canvas_mouse",
             "qgis_canvas_key",
+            "qgis_get_leftover_state",
             # ui
             "qgis_snapshot_ui",
             "qgis_click_widget",
@@ -1172,6 +1173,7 @@ class TestMcpGatewayToolDescriptors:
             "qgis_get_selected_features",
             "qgis_get_whitelist",
             "qgis_get_canvas_extent",
+            "qgis_get_leftover_state",
             "qgis_snapshot_ui",
             "qgis_list_dialog_handlers",
             "qgis_get_recent_exceptions",
