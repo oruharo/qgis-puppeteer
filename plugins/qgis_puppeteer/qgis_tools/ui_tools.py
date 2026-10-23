@@ -48,6 +48,7 @@ from qgis.PyQt.QtWidgets import (
 from qgis_puppeteer.qgis_tools import queued
 from qgis_puppeteer.selector_match import (
     label_forms,
+    record_matches_selector,
     resolve_with_index,
 )
 
@@ -1789,6 +1790,8 @@ def _collect_candidates(roots: list[QWidget], selector: dict) -> list[QWidget]:
     title = selector.get("title")
     placeholder = selector.get("placeholder")
     label_text = selector.get("label")
+    # 部分一致・正規表現・role・任意の属性は、snapshot と同じ record で判定する
+    extended = {k: selector[k] for k in _RECORD_KEYS if k in selector}
 
     buddy_map: dict[int, str] | None = None
     candidates: list[QWidget] = []
@@ -1817,9 +1820,12 @@ def _collect_candidates(roots: list[QWidget], selector: dict) -> list[QWidget]:
                     buddy_map = _build_buddy_label_map(roots)
                 if buddy_map.get(id(widget)) != label_text:
                     continue
+            if extended and not record_matches_selector(_live_record(widget), extended):
+                continue
             candidates.append(widget)
 
-        if class_name in (None, "QAction") and (object_name is not None or text is not None):
+        names_an_action = object_name is not None or text is not None or bool(extended)
+        if class_name in (None, "QAction") and names_an_action:
             is_menu = isinstance(root, QMenu)
             # メニューが根なら、その項目だけ（#22）。項目はメニューの子とは限らない
             # （addAction(既存の action)）うえ、findChildren では下位メニューの項目
@@ -1839,6 +1845,8 @@ def _collect_candidates(roots: list[QWidget], selector: dict) -> list[QWidget]:
                     if text not in forms:
                         continue
                 if class_name is not None and class_name != "QAction":
+                    continue
+                if extended and not record_matches_selector(_action_record(action), extended):
                     continue
                 candidates.append(action)
 
@@ -1900,6 +1908,29 @@ def _title_of(widget: Any) -> str | None:
     if isinstance(widget, QMenu) and widget.title():
         return widget.title()
     return widget.windowTitle() if hasattr(widget, "windowTitle") else None
+
+
+# record で判定する selector のキー（snapshot の解決と同じ判定にする）
+_RECORD_KEYS = ("role", "text_contains", "text_re", "attr")
+
+
+def _live_record(widget: QWidget) -> dict:
+    """snapshot の 1 つの node と同じ形の record（子は含めない）。題名は ``_title_of``。"""
+    record = _describe_widget(widget, 0, True)
+    title = _title_of(widget)
+    if title:
+        record["title"] = title
+    return record
+
+
+def _action_record(action: Any) -> dict:
+    return {
+        "class": "QAction",
+        "object_name": action.objectName(),
+        "text": action.text(),
+        "enabled": action.isEnabled(),
+        "visible": action.isVisible(),
+    }
 
 
 def _walk_widgets(root: QWidget) -> Iterator[QWidget]:

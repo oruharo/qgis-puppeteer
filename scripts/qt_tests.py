@@ -42,6 +42,7 @@ QT_TEST_FILES = [
     "packages/qgis-puppeteer/tests/test_ui_tools_secret.py",
     "packages/qgis-puppeteer/tests/test_ui_tools_item_views.py",
     "packages/qgis-puppeteer/tests/test_ui_tools_selector_index.py",
+    "packages/qgis-puppeteer/tests/test_ui_tools_selector_keys.py",
     "packages/qgis-puppeteer/tests/test_queued_operations.py",
     "packages/qgis-puppeteer/tests/test_popup_operations.py",
     "packages/qgis-puppeteer/tests/test_ui_tools_set_value.py",

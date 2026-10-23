@@ -608,6 +608,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`text_contains`, `text_re`, `role` and `attr` were ignored when acting
+  on a widget** (#35). They were applied when a selector was resolved in a
+  snapshot (`expect`, `wait_for_widget`, `snapshot()`), but not when one
+  was resolved for an operation (`click`, `fill`, actionability), so
+  `{"class": "QPushButton", "text_contains": "保存"}` matched every button
+  there and failed as ambiguous, or clicked the only button of that class
+  whatever its text. The live resolution now judges these keys on the
+  same record as the snapshot.
+
 - **A failed entry into a password field left its value in the MCP action
   log** (#23). Since a failed `qgis_set_widget_value` became a tool error,
   `masked` sat under `error.details`, which the recorder did not look at,
