@@ -139,6 +139,7 @@ def test_snapshot_shows_the_open_menu_and_its_items(env: dict[str, Any]) -> None
     popup = snaps[0]["active_popup"]
     assert popup["class"] == "QMenu"
     assert popup["object_name"] == "layerMenu"
+    assert popup["title"] == "Layer"  # QMenu.title()（#27）
     items = popup["menu_items"]
     assert items[0]["text"] == "&Copy"
     assert items[0]["enabled"] is True

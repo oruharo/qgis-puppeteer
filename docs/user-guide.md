@@ -910,8 +910,29 @@ Worker は失敗時に `{"success": false, "error": "<code>", ...}` を返す。
 ```python
 # メニュー付きのツールボタンを押してメニューを開き、項目を選ぶ
 qgis.locator({"object_name": "exportButton"}).click(wait=False)
+qgis.wait_for_popup()  # 出るまで待つ（題名で絞るなら wait_for_popup("レイヤ")）
 qgis.locator({"scope": "popup", "class": "QAction", "text": "削除"}).click()
 ```
+
+`wait_for_popup(title_contains=None)` はポップアップが出るまで待ち、`active_popup`
+（メニューなら `menu_items` 付き）を返す。`wait_for_popup_closed()` は閉じるまで待つ。
+どちらも `wait_for_modal` / `wait_for_modal_closed` と同じ形（#27）。メニューの
+`title` は `QMenu.title()`（dialog handler の predicate の `title` と同じ）。
+`scope="popup"` の Locator の操作は auto-wait があるので、項目を押すだけなら
+`wait_for_popup` は無くても通る。出たことを確かめたいとき、項目の一覧を見て分岐する
+ときに使う。
+
+### 窓（ダイアログ）を待つ
+
+窓を待つ専用の道具は持たず、今ある道具で書く:
+
+| したいこと | 書き方 |
+|---|---|
+| 開いている窓の一覧 | `qgis.snapshot_ui()` の `visible_dialogs`（モードレス）と `active_modal` |
+| 題名で、モーダルが開くのを待つ | `qgis.wait_for_modal("保存")`（部分一致） |
+| 題名で、モードレスの窓が開くのを待つ | `qgis.wait_for_widget({"title": "道路 - 地物属性", "scope": "any"})`（題名は完全一致） |
+| モーダルが閉じるのを待つ | `qgis.wait_for_modal_closed()` |
+| ある窓が閉じるのを待つ | `qgis.wait_for_widget({"title": ...}, visible=False)` |
 
 決まった項目を毎回選ぶなら、dialog handler でも答えられる（「Dialog handler」の
 「ポップアップに答える」）。

@@ -568,6 +568,49 @@ class TestWaitForModal:
         assert "Save Project" in result["title"]
 
 
+class TestWaitForPopup:
+    """#27: ポップアップが出るまで / 閉じるまで待つ（wait_for_modal と同じ形）。"""
+
+    @staticmethod
+    def _snap(popup: dict[str, Any] | None) -> dict[str, Any]:
+        return {"active_modal": None, "active_popup": popup, "visible_dialogs": []}
+
+    def test_returns_the_popup_once_it_appears(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        menu = {"class": "QMenu", "title": "Layer", "menu_items": [{"text": "Copy"}]}
+        e2e, inner = _make_client(call_results=[self._snap(None), self._snap(menu)])
+        monkeypatch.setattr(time, "sleep", lambda *_: None)
+
+        assert e2e.wait_for_popup(timeout_s=1.0) == menu
+        # include_main_window は要らない（ポップアップは独立した root）
+        assert inner.call.await_args_list[0].args[1]["include_main_window"] is False
+
+    def test_title_contains_waits_for_the_right_menu(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        other = {"class": "QMenu", "title": "Edit"}
+        menu = {"class": "QMenu", "title": "Layer actions"}
+        e2e, _ = _make_client(call_results=[self._snap(other), self._snap(menu)])
+        monkeypatch.setattr(time, "sleep", lambda *_: None)
+
+        assert e2e.wait_for_popup("Layer", timeout_s=1.0)["title"] == "Layer actions"
+
+    def test_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        e2e, inner = _make_client()
+        inner.call = AsyncMock(return_value=self._snap(None))
+        monkeypatch.setattr(time, "sleep", lambda *_: None)
+
+        with pytest.raises(TimeoutError, match="No popup with title containing 'X'"):
+            e2e.wait_for_popup("X", timeout_s=0.05, poll_interval_s=0.01)
+
+    def test_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        menu = {"class": "QMenu", "title": "Layer"}
+        e2e, inner = _make_client(call_results=[self._snap(menu), self._snap(None)])
+        monkeypatch.setattr(time, "sleep", lambda *_: None)
+        e2e.wait_for_popup_closed(timeout_s=1.0, poll_interval_s=0.01)
+
+        inner.call = AsyncMock(return_value=self._snap(menu))
+        with pytest.raises(TimeoutError, match="did not close"):
+            e2e.wait_for_popup_closed(timeout_s=0.05, poll_interval_s=0.01)
+
+
 class TestWaitForModalClosed:
     def test_returns_when_modal_disappears(self, monkeypatch: pytest.MonkeyPatch) -> None:
         snapshots = [

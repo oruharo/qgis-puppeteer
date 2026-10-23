@@ -8,6 +8,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Waiting for a popup** (#27). Modals had `wait_for_modal()` /
+  `wait_for_modal_closed()`, popups had nothing, so a test that opened a
+  menu with `click(wait=False)` polled `active_popup` itself.
+  `E2EAutomationClient.wait_for_popup(title_contains=None)` waits for one
+  (whose title contains the text, if given) and returns the `active_popup`
+  node, `menu_items` included; `wait_for_popup_closed()` waits for it to
+  go. The snapshot of a `QMenu` popup now carries its `title()`, the same
+  title a dialog handler's predicate matches, since a menu's window title
+  is usually empty. No helper that opens and chooses in one call is added:
+  with the wait, it is `click(wait=False)`, `wait_for_popup()` and a
+  `scope="popup"` click. The user guide also shows how to wait for windows
+  with the existing tools.
+
 - **Mouse and keys on the map canvas** (#26). QGIS's map tools (digitizing,
   moving, selecting) act on the mouse and key events the canvas receives,
   and there was no way to send them; tests built `QMouseEvent`s by hand

@@ -1223,6 +1223,56 @@ class E2EAutomationClient:
             time.sleep(poll_interval_s)
         raise TimeoutError(f"Active modal did not close within {timeout_s}s")
 
+    def wait_for_popup(
+        self,
+        title_contains: str | None = None,
+        *,
+        timeout_s: float = 5.0,
+        poll_interval_s: float = 0.25,
+        instance: str | None = None,
+    ) -> dict[str, Any]:
+        """ポップアップ（`QMenu.exec()` のメニューなど）が出るまで poll（#27）。
+
+        `title_contains` を付ければ、題名にそれを含むポップアップが出るまで待つ
+        （メニューなら `QMenu.title()`）。メニュー付きのボタンを `click(wait=False)`
+        で押したあと、項目を `scope="popup"` で選ぶ前に使う。
+
+        Returns:
+            条件を満たした時の `active_popup` 辞書（メニューなら `menu_items` 付き）。
+
+        Raises:
+            TimeoutError: `timeout_s` 以内にマッチするポップアップが現れなかった。
+        """
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            popup = self.snapshot_ui(instance=instance).get("active_popup")
+            if popup is not None and (
+                title_contains is None or title_contains in (popup.get("title") or "")
+            ):
+                return popup
+            time.sleep(poll_interval_s)
+        what = "" if title_contains is None else f" with title containing {title_contains!r}"
+        raise TimeoutError(f"No popup{what} appeared within {timeout_s}s")
+
+    def wait_for_popup_closed(
+        self,
+        *,
+        timeout_s: float = 5.0,
+        poll_interval_s: float = 0.25,
+        instance: str | None = None,
+    ) -> None:
+        """ポップアップが閉じるまで poll（#27）。
+
+        Raises:
+            TimeoutError: `timeout_s` 以内にポップアップが閉じなかった。
+        """
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self.snapshot_ui(instance=instance).get("active_popup") is None:
+                return
+            time.sleep(poll_interval_s)
+        raise TimeoutError(f"Active popup did not close within {timeout_s}s")
+
     def wait_for_widget(
         self,
         selector: dict[str, Any],

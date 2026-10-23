@@ -164,6 +164,10 @@ def snapshot_ui(
         )
         if isinstance(active_popup, QMenu):
             popup_node["menu_items"] = _menu_items(active_popup)
+            # メニューの windowTitle はふつう空。題名（dialog handler の predicate の
+            # title と同じもの）を出す（#27）
+            if not popup_node.get("title") and active_popup.title():
+                popup_node["title"] = active_popup.title()
         result["active_popup"] = popup_node
 
     active_window = app.activeWindow()
