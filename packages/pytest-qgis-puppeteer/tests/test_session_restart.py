@@ -273,3 +273,136 @@ def test_conftest_can_implement_the_hook_and_use_the_marker(pytester: pytest.Pyt
     )
     result = pytester.runpytest("-p", "no:cacheprovider", "--strict-markers")
     result.assert_outcomes(passed=1)
+
+
+# ============================================================
+# #29: pytest_qgis_before_spawn フック
+# ============================================================
+
+
+class _SpawnHookConfig:
+    """``config.hook.pytest_qgis_before_spawn`` を持つ config の代役。
+
+    pluggy と同じく、各 conftest の戻り値の list を返す。
+    """
+
+    def __init__(self, *results: Any) -> None:
+        self.calls: list[str] = []
+        self.results = results
+        outer = self
+
+        class _Hook:
+            def pytest_qgis_before_spawn(self, *, config: Any, kind: str) -> list[Any]:
+                outer.calls.append(kind)
+                return list(outer.results)
+
+        self.hook = _Hook()
+
+
+def _extras(config: Any, spawn_kwargs: dict[str, Any], env: dict[str, str] | None = None) -> Any:
+    from pytest_qgis_puppeteer.plugin import _with_spawn_extras
+
+    return _with_spawn_extras(config, "session", spawn_kwargs, env)
+
+
+class TestBeforeSpawnHook:
+    def test_args_go_after_qgis_args_and_env_is_merged(self) -> None:
+        config = _SpawnHookConfig(
+            {"args": ["--profiles-path", "/tmp/p", "--profile", "e2e"]},
+            None,
+            {"env": {"QGIS_CUSTOM_CONFIG_PATH": "/tmp/c"}},
+        )
+        base = {"qgis_bin": "qgis.exe", "args": ["--nologo"]}
+        kwargs, env = _extras(config, base, {"LANG": "ja"})
+        assert kwargs == {
+            "qgis_bin": "qgis.exe",
+            "args": ["--nologo", "--profiles-path", "/tmp/p", "--profile", "e2e"],
+        }
+        assert env == {"LANG": "ja", "QGIS_CUSTOM_CONFIG_PATH": "/tmp/c"}
+        assert base == {"qgis_bin": "qgis.exe", "args": ["--nologo"]}  # 元は変えない
+        assert config.calls == ["session"]
+
+    def test_args_go_after_a_whole_command(self) -> None:
+        config = _SpawnHookConfig({"args": ["--profile", "e2e"]})
+        kwargs, env = _extras(config, {"command": ["launch.bat", "--nologo"]})
+        assert kwargs == {"command": ["launch.bat", "--nologo", "--profile", "e2e"]}
+        assert env is None
+
+    def test_nothing_returned_changes_nothing(self) -> None:
+        kwargs, env = _extras(_SpawnHookConfig(None), {"qgis_bin": "q", "args": []})
+        assert kwargs == {"qgis_bin": "q", "args": []}
+        assert env is None
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            ["--profile"],
+            {"argv": ["x"]},
+            {"args": "--profile e2e"},
+            {"args": [1]},
+            {"env": {"A": 1}},
+        ],
+    )
+    def test_a_wrong_return_value_is_a_usage_error(self, bad: Any) -> None:
+        with pytest.raises(pytest.UsageError, match="pytest_qgis_before_spawn"):
+            _extras(_SpawnHookConfig(bad), {"qgis_bin": "q"})
+
+    def test_two_hooks_disagreeing_on_an_env_var_is_a_usage_error(self) -> None:
+        config = _SpawnHookConfig({"env": {"A": "1"}}, {"env": {"A": "2"}})
+        with pytest.raises(pytest.UsageError, match="different values"):
+            _extras(config, {"qgis_bin": "q"})
+        same = _SpawnHookConfig({"env": {"A": "1"}}, {"env": {"A": "1"}})
+        assert _extras(same, {"qgis_bin": "q"})[1] == {"A": "1"}
+
+    def test_session_spawn_asks_session_then_restart(self) -> None:
+        """起こすたびに聞き、2 回目からは kind="restart"。"""
+        from pytest_qgis_puppeteer.plugin import _with_spawn_extras
+
+        config = _SpawnHookConfig({"args": ["--x"]})
+        seen: list[tuple[str, Any]] = []
+        spawn = _FakeSpawn()
+        session: SessionQgis
+
+        def spawn_session() -> Any:
+            kind = "restart" if session.start_count > 0 else "session"
+            kwargs, _ = _with_spawn_extras(config, kind, {"qgis_bin": "q", "args": []}, None)  # type: ignore[arg-type]
+            seen.append((kind, kwargs["args"]))
+            return spawn()
+
+        session = SessionQgis(spawn_session)
+        session.start()
+        session.restart()
+        assert seen == [("session", ["--x"]), ("restart", ["--x"])]
+
+    def test_a_failing_hook_starts_no_qgis(self) -> None:
+        class _Failing:
+            class hook:  # noqa: N801 - config.hook の代役
+                @staticmethod
+                def pytest_qgis_before_spawn(**_: Any) -> list[Any]:
+                    raise RuntimeError("could not make the profile")
+
+        spawn = _FakeSpawn()
+        from pytest_qgis_puppeteer.plugin import _with_spawn_extras
+
+        def spawn_session() -> Any:
+            _with_spawn_extras(_Failing(), "session", {"qgis_bin": "q"}, None)  # type: ignore[arg-type]
+            return spawn()
+
+        session = SessionQgis(spawn_session)
+        with pytest.raises(RuntimeError, match="profile"):
+            session.start()
+        assert spawn.events == []
+
+
+def test_conftest_can_implement_the_before_spawn_hook(pytester: pytest.Pytester) -> None:
+    """フックが登録されている（未知のフックとして弾かれない）。"""
+    pytester.makeconftest(
+        """
+        def pytest_qgis_before_spawn(config, kind):
+            return {"args": ["--profile", "e2e"]}
+        """
+    )
+    pytester.makeini("[pytest]\nqgis_fail_on_uncaught_exception = false\n")
+    pytester.makepyfile("def test_ok():\n    pass\n")
+    result = pytester.runpytest("-p", "no:cacheprovider")
+    result.assert_outcomes(passed=1)

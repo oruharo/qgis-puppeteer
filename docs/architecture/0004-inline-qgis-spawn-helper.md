@@ -439,6 +439,15 @@ def spawn_qgis(*, label=None, ...):
   での integration test は Phase 4 リファクタと併せて追加予定
 - `__init__.py` に `spawn_qgis` / `SpawnedWorker` / `WorkerRegisterTimeout` を export
 
+> **2026-10-23 注（#29）**: pytest が起こす QGIS（session・起こし直し・`fresh_qgis`）
+> の起動ごとに、利用側の準備を差し込む口として、フック `pytest_qgis_before_spawn(config,
+> kind)` を足した。その起動だけに足す `args` / `env` を返せる。よくある使い道は、起動
+> ごとに新しいプロファイルを作って利用者のプロファイルから切り離すことだが、「新しい
+> プロファイルを作り、要るプラグインだけ有効にする」機能そのものは組み込まなかった。
+> どのプラグインをどこから写すか、使い回すかは利用側の方針で、上流が持つと利用者ごとの
+> 違いを背負うことになる。上流は仕組み（フック）だけを持ち、作り方は user-guide の例に
+> 置く。`pytest_qgis_ready`（#19、起こしたあと）の対。
+
 ## References
 
 - ADR-0001 §5 multi-instance（複数 Worker 同居）

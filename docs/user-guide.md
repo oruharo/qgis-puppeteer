@@ -527,7 +527,7 @@ qgis_auto_fresh_after_failure = "session"   # または "true"
 - 起こし直しの呼び出し（閉じる依頼、起動の待ち）は、次のテストの操作記録に入らない
 - 起こし直せなかったときは、そのテストを error にして、次に `qgis` を使うテストで
   もう一度試す
-- dev モードや、`qgis_process` fixture を override している場合（[9.](#9-完全制御が必要な場合-fixture-オーバーライド)）は
+- dev モードや、`qgis_process` fixture を override している場合（[10.](#10-完全制御が必要な場合-fixture-オーバーライド)）は
   起こし直せないので、警告だけ出して何もしない
 - conftest から自分で起こし直すこともできる。`qgis_process` fixture の値
   （`SessionQgis`）の `restart()` を呼ぶ
@@ -623,7 +623,76 @@ pytest test_e2e/
 （`ConfirmationRequiredError`）ので、dev モードでは UI 操作系のみ走らせるのが
 安全（または対象 QGIS で `QPUPPETEER_TRUSTED_MODE=1` を立てておく）。
 
-### 9. 完全制御が必要な場合: fixture オーバーライド
+### 9. 起動ごとの準備: `pytest_qgis_before_spawn`
+
+pytest が QGIS を起こす**直前**に、conftest のフック `pytest_qgis_before_spawn` が
+呼ばれる（#29）。起動のたびに準備が要るもの（新しいプロファイルを一時フォルダに
+作る、など）をここで済ませ、その起動だけに足す引数と環境変数を返す。
+`pytest_qgis_ready`（起こしたあと）の対。
+
+```python
+# conftest.py
+def pytest_qgis_before_spawn(config, kind):
+    """kind は "session"（最初の QGIS）/ "restart"（起こし直し）/ "fresh"。"""
+    return {"args": [...], "env": {...}}  # どちらも省ける。足すものが無ければ None
+```
+
+- `args` は `qgis_args` の後ろ（`qgis_command` を使うときはそのコマンドの後ろ）に、
+  `env` は環境（`environments.toml` の `env`）に足す。いくつかの conftest が返した
+  ものは合わせる。同じ環境変数に違う値を返すと `UsageError`
+- QGIS を起こすたびに 1 回（session の最初、起こし直し、`fresh_qgis` のそれぞれ）。
+  `spawn_qgis()` を直接使うとき（引数をその場で渡せる）と dev モードでは呼ばれない
+- 例外を出すと QGIS は起こさず、そのテストの準備のエラーになる
+- 足した引数はログに出る。環境変数は名前だけ出る（値に鍵などを入れることがあるため）
+
+#### 例: 起動ごとに新しいプロファイルを作る
+
+利用者の普段のプロファイル（入っているプラグイン、設定、最近のプロジェクト）から
+テストを切り離し、テストに要るプラグインだけを有効にしたプロファイルで起こす。
+どのプラグインを入れるかは利用側が決めることなので、上流は作り方を持たず、例で示す:
+
+```python
+# conftest.py
+import shutil
+import tempfile
+from pathlib import Path
+
+# テストに要るプラグインを並べたフォルダ（qgis_puppeteer を含む）
+PLUGINS = Path(__file__).parent / "e2e_plugins"
+
+
+def pytest_qgis_before_spawn(config, kind):
+    root = Path(tempfile.mkdtemp(prefix="qgis-e2e-"))
+    profile = root / "profiles" / "e2e"
+    plugins_dir = profile / "python" / "plugins"
+    shutil.copytree(PLUGINS, plugins_dir)
+    enabled = "\n".join(f"{p.name}=true" for p in plugins_dir.iterdir() if p.is_dir())
+    (profile / "QGIS").mkdir(parents=True)
+    (profile / "QGIS" / "QGIS3.ini").write_text(f"[PythonPlugins]\n{enabled}\n", encoding="utf-8")
+    config.add_cleanup(lambda: shutil.rmtree(root, ignore_errors=True))  # 終わったら消す
+    return {"args": ["--profiles-path", str(root), "--profile", "e2e"]}
+```
+
+- `--profiles-path` は `profiles` フォルダの**親**（QGIS がその下の
+  `profiles/<名前>` を使う）
+- QGIS に同梱のコアのプラグイン（`processing` / `db_manager` / `MetaSearch` /
+  `grassprovider`）は、新しいプロファイルでも既定で有効。止めたいなら
+  `QGIS3.ini` の `[PythonPlugins]` に `processing=false` などと書く
+- 起こし直し（`qgis_restart_before` や `qgis_auto_fresh_after_failure = session`）の
+  たびに別の新しいプロファイルになる。同じプロファイルを使い回したいなら、作るのを
+  1 回にして（`kind == "session"` のときだけ作り、あとは同じ引数を返す）
+- 設定フォルダごと切り替えるなら `{"env": {"QGIS_CUSTOM_CONFIG_PATH": ...}}` でもよい
+- **`qgis_command` で間に launcher（バッチや Python のスクリプト）をはさむ場合は、
+  `args` ではなく `env` で渡す**。足した `args` は launcher の引数として読まれ、QGIS
+  まで届かない（launcher が知らない引数として断ることもある）。環境変数は launcher を
+  通って QGIS まで引き継がれるので、`QGIS_CUSTOM_CONFIG_PATH` で新しいプロファイルを
+  指す
+
+QGIS 3.34 で、session・起こし直し・`fresh_qgis` のそれぞれが別の新しい
+プロファイルで起き、有効なプラグインがコアと `qgis_puppeteer` だけになることを
+確かめている。
+
+### 10. 完全制御が必要な場合: fixture オーバーライド
 
 `qgis_command` だけでは足りない（テスト session 内で複数 launcher を使い分け
 たい等）場合は、ユーザー側 `conftest.py` で `qgis_process` fixture を override:

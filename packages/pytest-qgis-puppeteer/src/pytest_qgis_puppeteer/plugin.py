@@ -331,7 +331,7 @@ _ENV_META_CHILD = "QPUPPETEER_META_CHILD"
 
 
 def pytest_addhooks(pluginmanager: pytest.PytestPluginManager) -> None:
-    """``pytest_qgis_ready`` などのフックを登録する（#19、`hookspecs`）。"""
+    """``pytest_qgis_ready`` / ``pytest_qgis_before_spawn`` を登録する（#19 / #29）。"""
     from pytest_qgis_puppeteer import hookspecs
 
     pluginmanager.add_hookspecs(hookspecs)
@@ -1489,17 +1489,22 @@ def qgis_process(
     register_timeout_s = float(
         pytestconfig.getini("qgis_startup_timeout") or DEFAULT_WORKER_REGISTER_TIMEOUT_S
     )
-    session = SessionQgis(
-        lambda: spawn_qgis(
+
+    def spawn_session() -> contextlib.AbstractContextManager[Any]:
+        # 起こすたびに利用側の準備（新しいプロファイルなど）を聞く（#29）
+        kind = "restart" if session.start_count > 0 else "session"
+        kwargs, env = _with_spawn_extras(pytestconfig, kind, spawn_kwargs, user_env)
+        return spawn_qgis(
             hub_port=hub_port,
             automation_client=automation_client,
-            env=user_env,
+            env=env,
             register_timeout_s=register_timeout_s,
             graceful_shutdown_timeout_s=DEFAULT_QGIS_GRACEFUL_SHUTDOWN_TIMEOUT_S,
             label="qgis_process",
-            **spawn_kwargs,
+            **kwargs,
         )
-    )
+
+    session = SessionQgis(spawn_session)
     session.start()
     try:
         yield session
@@ -1508,6 +1513,75 @@ def qgis_process(
         # ここで一括掃除（spawn_qgis 自身は自分の Worker しか閉じないため）。
         _shutdown_registered_workers(automation_client)
         session.stop()
+
+
+def _with_spawn_extras(
+    config: pytest.Config,
+    kind: str,
+    spawn_kwargs: dict[str, Any],
+    env: dict[str, str] | None,
+) -> tuple[dict[str, Any], dict[str, str] | None]:
+    """``pytest_qgis_before_spawn`` の足す引数と環境変数を、起動の設定に足す（#29）。
+
+    ``args`` は ``qgis_bin`` の ``args`` の後ろに、``command`` があればその後ろに
+    つなぐ。元の ``spawn_kwargs`` / ``env`` は変えない（起こし直しのたびに聞くため）。
+    """
+    extra_args, extra_env = _before_spawn_extras(config, kind)
+    kwargs = dict(spawn_kwargs)
+    if extra_args:
+        key = "command" if kwargs.get("command") is not None else "args"
+        kwargs[key] = [*(kwargs.get(key) or []), *extra_args]
+    if extra_env:
+        env = {**(env or {}), **extra_env}
+    return kwargs, env
+
+
+def _before_spawn_extras(config: pytest.Config, kind: str) -> tuple[list[str], dict[str, str]]:
+    """``pytest_qgis_before_spawn`` を呼び、足す引数と環境変数を集める（#29）。"""
+    hook = getattr(config, "hook", None)
+    if hook is None or not hasattr(hook, "pytest_qgis_before_spawn"):
+        return [], {}
+    args: list[str] = []
+    env: dict[str, str] = {}
+    for result in hook.pytest_qgis_before_spawn(config=config, kind=kind):
+        if result is None:
+            continue
+        if not isinstance(result, dict) or set(result) - {"args", "env"}:
+            raise pytest.UsageError(
+                "pytest_qgis_before_spawn must return None or a dict with 'args' and/or "
+                f"'env', not {result!r}"
+            )
+        more_args = result.get("args") or []
+        more_env = result.get("env") or {}
+        if not isinstance(more_args, (list, tuple)) or not all(
+            isinstance(a, str) for a in more_args
+        ):
+            raise pytest.UsageError(
+                f"pytest_qgis_before_spawn: 'args' must be a list of str, not {more_args!r}"
+            )
+        if not isinstance(more_env, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in more_env.items()
+        ):
+            raise pytest.UsageError(
+                f"pytest_qgis_before_spawn: 'env' must map str to str, not {more_env!r}"
+            )
+        for name, value in more_env.items():
+            if name in env and env[name] != value:
+                raise pytest.UsageError(
+                    f"pytest_qgis_before_spawn: two hooks set {name} to different values "
+                    f"({env[name]!r} and {value!r})"
+                )
+            env[name] = value
+        args.extend(more_args)
+    if args or env:
+        # 環境変数は値を出さない（鍵などを入れることがある）
+        logger.info(
+            "pytest_qgis_before_spawn (%s): extra args %s, extra env %s",
+            kind,
+            args,
+            sorted(env),
+        )
+    return args, env
 
 
 class SessionQgis:
@@ -1761,18 +1835,18 @@ def qgis(
 
     saved_default = automation_client.get_default_instance()
     label = _fresh_label(request.node)
+    launch: dict[str, Any] = (
+        {"command": command} if command is not None else {"qgis_bin": qgis_bin, "args": args}
+    )
+    launch, env_vars = _with_spawn_extras(pytestconfig, "fresh", launch, env_vars)
     spawn_kwargs: dict[str, Any] = {
         "hub_port": hub_port,
         "automation_client": automation_client,
         "env": env_vars,
         "register_timeout_s": register_timeout_s,
         "label": label,
+        **launch,
     }
-    if command is not None:
-        spawn_kwargs["command"] = command
-    else:
-        spawn_kwargs["qgis_bin"] = qgis_bin
-        spawn_kwargs["args"] = args
 
     with spawn_qgis(**spawn_kwargs) as worker:
         # ADR-0004 P2: active worker を tracking して diag bundle に spawn logs を入れる。

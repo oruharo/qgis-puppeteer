@@ -8,6 +8,26 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A hook right before pytest starts a QGIS** (#29). `spawn_qgis()` took
+  fixed `args` and `env`, but nothing let a conftest prepare something for
+  *each* start, such as a new profile in a temporary folder, so hosts
+  patched internals. `pytest_qgis_before_spawn(config, kind)` is called
+  before every start of the session QGIS (`kind` `"session"`, then
+  `"restart"`) and of a `fresh_qgis` QGIS (`"fresh"`), and may return
+  `{"args": [...], "env": {...}}` for that start only: the args go after
+  `qgis_args` (or after a whole `qgis_command`), the env is added to the
+  environment's; results from several conftests are combined, and two that
+  set one variable to different values are a `UsageError`, as is a wrong
+  return value. An exception in it starts no QGIS and errors the test. It
+  is not called for a direct `spawn_qgis()` or in dev mode. The added args
+  are logged, environment variables by name only. Making a fresh profile
+  with only the needed plugins enabled is a user guide example rather than
+  a built-in, since which plugins to install is the host's choice. Checked
+  on QGIS 3.34 with that example: the session QGIS, its restart and a
+  `fresh_qgis` QGIS each started on a new profile with only the core
+  plugins and `qgis_puppeteer` active, and the folders were removed at the
+  end.
+
 - **Waiting for a popup** (#27). Modals had `wait_for_modal()` /
   `wait_for_modal_closed()`, popups had nothing, so a test that opened a
   menu with `click(wait=False)` polled `active_popup` itself.
