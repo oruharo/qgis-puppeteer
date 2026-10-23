@@ -544,6 +544,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A failed entry into a password field left its value in the MCP action
+  log** (#23). Since a failed `qgis_set_widget_value` became a tool error,
+  `masked` sat under `error.details`, which the recorder did not look at,
+  so the value was written in clear text. It now redacts it there too.
+
 - **A double or right click on a table row picked by a hidden column's text
   went to the hidden cell** (#24). A table that keeps an ID column hidden
   to identify rows, matched with `cell={"text": id, "column": "ID"}`, got

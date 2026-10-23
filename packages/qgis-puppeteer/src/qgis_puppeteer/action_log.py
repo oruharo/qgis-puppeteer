@@ -112,7 +112,12 @@ def _reports_masked(result: Any) -> bool:
     if result.get("masked") is True:
         return True
     widget = result.get("widget")
-    return isinstance(widget, dict) and widget.get("masked") is True
+    if isinstance(widget, dict) and widget.get("masked") is True:
+        return True
+    # MCP は失敗を tool error の本文 {"error": {"code", "message", "details"}} で返す
+    # （#23）。パスワード欄の失敗では masked がその details の下にある
+    error = result.get("error")
+    return isinstance(error, dict) and _reports_masked(error.get("details"))
 
 
 def format_error(exc: BaseException) -> dict[str, str]:

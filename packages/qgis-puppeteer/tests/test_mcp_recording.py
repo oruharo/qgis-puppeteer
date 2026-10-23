@@ -139,6 +139,39 @@ class TestRecorder:
         assert line["params"]["value"] == "***"
         assert "s3cret" not in Path(path).read_text(encoding="utf-8")
 
+    def test_value_of_a_failed_password_entry_is_redacted(self, tmp_path: Path) -> None:
+        """#23 で失敗が tool error になっても、パスワード欄の value は伏せる。"""
+        body = {
+            "error": {
+                "code": "value_not_applied",
+                "message": "widget operation failed: value_not_applied",
+                "details": {"value_after": None, "masked": True, "widget": {"masked": True}},
+            }
+        }
+
+        class _Content:
+            type = "text"
+            text = json.dumps(body)
+
+        class _Result:
+            content = [_Content()]
+            is_error = True
+
+        r = rec.McpRecorder(tmp_path)
+        path = r.start("pw-fail")["path"]
+        r.record(
+            command="qgis_set_widget_value",
+            params={"selector": {"object_name": "password"}, "value": "s3cret-too-long"},
+            result=_Result(),
+            is_error=True,
+            instance=None,
+            duration_ms=0,
+        )
+        r.stop()
+        [line] = _lines(path)
+        assert line["params"]["value"] == "***"
+        assert "s3cret" not in Path(path).read_text(encoding="utf-8")
+
 
 class TestSummarizeResult:
     def test_json_text_is_parsed(self) -> None:
