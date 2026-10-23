@@ -364,6 +364,13 @@ def test_multi_instance(qgis_a, qgis_b):
 
 複数キー指定時は AND セマンティクス。
 
+> **2026-10-23 注（#37）**: `title` は「人に見えている題名」に改めた。窓（`isWindow()`）・
+> ドック・`QMdiSubWindow` の `windowTitle()`、メニューの `title()`、`QGroupBox` の `title()`
+> だけに当て、窓でない部品の `windowTitle()`（Designer の既定の `"Form"` など、人には
+> 見えない）には当てない。snapshot の `title` も同じ規則で出す。窓だけに当てる別のキーを
+> 足す案もあったが、見えない題名に当たること自体が selector の意図に合わないので、
+> 意味の方を直した。
+
 既定 `scope="modal"` は `activeModalWidget()` を root にし、**なければ `activeWindow()` にフォールバック**する（Claude からの曖昧指定に寛容な挙動）。
 
 ##### Strict mode（複数マッチで fail）

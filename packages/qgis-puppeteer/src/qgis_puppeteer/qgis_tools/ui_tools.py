@@ -25,12 +25,15 @@ from qgis.PyQt.QtWidgets import (
     QDateEdit,
     QDateTimeEdit,
     QDialog,
+    QDockWidget,
     QDoubleSpinBox,
+    QGroupBox,
     QHeaderView,
     QLabel,
     QLineEdit,
     QListView,
     QListWidget,
+    QMdiSubWindow,
     QMenu,
     QPlainTextEdit,
     QPushButton,
@@ -1988,14 +1991,25 @@ def _finalize_match(
 
 
 def _title_of(widget: Any) -> str | None:
-    """selector の ``title`` と比べる題名。メニューは ``QMenu.title()``。
+    """人に見えている題名（selector の ``title`` と snapshot の ``title``、#37）。
 
-    メニューの ``windowTitle`` はふつう空なので、snapshot の ``active_popup`` と
-    dialog handler の predicate が使う題名（``QMenu.title()``）に揃える。
+    - 窓（``isWindow()``）、ドック（``QDockWidget``。ドックしていても題名の帯に出る）、
+      ``QMdiSubWindow`` は ``windowTitle()``
+    - メニューは ``QMenu.title()``（``windowTitle`` はふつう空。dialog handler の
+      predicate と同じ題名）
+    - ``QGroupBox`` は枠に出る ``title()``
+    - それ以外は None。窓でない部品の ``windowTitle``（Designer の既定の ``"Form"``
+      など）は人には見えないので、当てない
     """
+    if not isinstance(widget, QWidget):
+        return None
     if isinstance(widget, QMenu) and widget.title():
         return widget.title()
-    return widget.windowTitle() if hasattr(widget, "windowTitle") else None
+    if isinstance(widget, QGroupBox):
+        return widget.title() or None
+    if widget.isWindow() or isinstance(widget, (QDockWidget, QMdiSubWindow)):
+        return widget.windowTitle() or None
+    return None
 
 
 # record で判定する selector のキー（snapshot の解決と同じ判定にする）
@@ -2003,12 +2017,8 @@ _RECORD_KEYS = ("role", "text_contains", "text_re", "attr", "title_contains")
 
 
 def _live_record(widget: QWidget) -> dict:
-    """snapshot の 1 つの node と同じ形の record（子は含めない）。題名は ``_title_of``。"""
-    record = _describe_widget(widget, 0, True)
-    title = _title_of(widget)
-    if title:
-        record["title"] = title
-    return record
+    """snapshot の 1 つの node と同じ形の record（子は含めない）。"""
+    return _describe_widget(widget, 0, True)
 
 
 def _action_record(action: Any) -> dict:
@@ -2141,10 +2151,9 @@ def _describe_widget(
         "enabled": widget.isEnabled(),
         "visible": widget.isVisible(),
     }
-    if hasattr(widget, "windowTitle"):
-        title = widget.windowTitle()
-        if title:
-            info["title"] = title
+    title = _title_of(widget)  # 人に見えている題名だけ（#37）
+    if title:
+        info["title"] = title
 
     _populate_widget_value(widget, info)
 

@@ -94,3 +94,42 @@ def test_a_click_reaches_the_widget_matched_by_text_contains(dialog: Any) -> Non
 
     assert result["success"] is True
     assert clicked == ["s"]
+
+
+def test_title_is_only_the_title_a_person_sees(app: Any) -> None:
+    """#37: 窓でない部品の windowTitle（Designer の既定の "Form" など）には当てない。"""
+    main = QtWidgets.QMainWindow()
+    main.setObjectName("titles")
+    main.setWindowTitle("検索")
+    central = QtWidgets.QWidget()
+    central.setWindowTitle("検索")  # 埋め込んだ .ui の部品（人には見えない題名）
+    layout = QtWidgets.QVBoxLayout(central)
+    for _ in range(2):
+        form = QtWidgets.QWidget()
+        form.setWindowTitle("Form")
+        layout.addWidget(form)
+    box = QtWidgets.QGroupBox("条件")
+    layout.addWidget(box)
+    main.setCentralWidget(central)
+    dock = QtWidgets.QDockWidget("凡例", main)
+    main.addDockWidget(QtCore.Qt.LeftDockWidgetArea, dock)
+    main.show()
+    QApplication.processEvents()
+    try:
+
+        def find(selector: dict) -> Any:
+            widget, _ = _find_widget({"scope": "any", "root_object_name": "titles", **selector})
+            return widget
+
+        assert find({"title": "検索"}) is main  # 中の部品の同じ題名には当たらない
+        assert find({"title": "Form"}) is None
+        assert find({"title_contains": "Fo"}) is None
+        assert find({"title": "条件"}) is box  # 枠の題名
+        assert find({"title": "凡例"}) is dock  # ドックしていても題名の帯に出る
+        assert "title" not in _describe_widget(central, 0, True)
+        assert _describe_widget(box, 0, True)["title"] == "条件"
+    finally:
+        main.close()
+        main.deleteLater()
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        app.processEvents()

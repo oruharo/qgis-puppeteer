@@ -496,6 +496,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed (breaking)
 
+- **`title` is the title a person sees** (#37). A selector's `title` (and
+  `title_contains`) matched the `windowTitle()` of any widget, so waiting
+  for a window by its title also hit widgets inside it whose title nobody
+  sees, such as forms left with Designer's default `"Form"`, and failed as
+  ambiguous. `title` now matches a window's, a dock widget's or an MDI
+  subwindow's `windowTitle()`, a menu's `title()` as before, and a group
+  box's `title()`, which could not be matched before; other widgets have
+  no title. Snapshots report `title` by the same rule, so saved snapshots
+  lose the titles of inner widgets and gain those of group boxes.
+
 - **A click or value change that fails raises, and a value Qt changed on the
   way in is a failure** (#23). `E2EAutomationClient.click_widget()` /
   `set_widget_value()` and the Locator's `click` / `fill` / `select` /

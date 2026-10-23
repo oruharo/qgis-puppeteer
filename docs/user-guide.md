@@ -795,8 +795,8 @@ selector dict の全キー。複数キー指定は AND セマンティクス。
 | `object_name` | str | Qt `objectName()` 完全一致。**最も推奨**（一意性が高い） |
 | `text` | str | ボタン / ラベル / QAction の `text()` 完全一致 |
 | `class` | str | Python クラス名完全一致（`"QPushButton"` 等） |
-| `title` | str | `windowTitle()` 完全一致（dialog 選択用。メニューは `title()`） |
-| `title_contains` | str | 題名の部分一致（#35） |
+| `title` | str | 人に見えている題名の完全一致（#37）。窓・ドック・`QMdiSubWindow` は `windowTitle()`、メニューは `title()`、`QGroupBox` は枠の `title()`。窓でない部品の `windowTitle()`（Designer の既定の `"Form"` など、人には見えない）には当たらない |
+| `title_contains` | str | 題名の部分一致（#35。当たる部品は `title` と同じ） |
 | `label` | str | `QLabel.buddy()` 経由で対応するラベル文字列。Playwright の `getByLabel` 相当 |
 | `placeholder` | str | LineEdit/TextEdit の `placeholderText()` 完全一致 |
 | `text_contains` | str | 文字の部分一致 |
