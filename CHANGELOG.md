@@ -549,6 +549,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `masked` sat under `error.details`, which the recorder did not look at,
   so the value was written in clear text. It now redacts it there too.
 
+- **Leftover checks and the start hook, after review** (#28, #29). The
+  state is now read right after the `qgis` fixture is ready rather than
+  right before the call, so what a test's own fixture makes and cleans up
+  (a layer added then removed, a selection restored) is no longer reported
+  as removed. A state that cannot be read is reported once with
+  `QgisLeftoverWarning` instead of passing silently. A test that already
+  failed in its call gets its leftovers as a warning, not a second error.
+  Only teardown failures of tests that used QGIS ask for a restart.
+  `selection` notices a different set of the same size. An environment
+  variable set by the environment or a `fresh_qgis` marker now wins over
+  the same one from `pytest_qgis_before_spawn`.
+
 - **A double or right click on a table row picked by a hidden column's text
   went to the hidden cell** (#24). A table that keeps an ID column hidden
   to identify rows, matched with `cell={"text": id, "column": "ID"}`, got

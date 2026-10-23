@@ -126,9 +126,11 @@ def _selection(before: dict, after: dict) -> list[str]:
         old, new = before.get(lid), after.get(lid)
         old_n = old["count"] if old else 0
         new_n = new["count"] if new else 0
+        name = (new or old)["name"]
         if old_n != new_n:
-            name = (new or old)["name"]
             found.append(f"selection on {name!r}: {old_n} -> {new_n} features")
+        elif old and new and old.get("ids") != new.get("ids"):
+            found.append(f"selection on {name!r}: {new_n} features, but different ones")
     return found
 
 

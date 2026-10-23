@@ -94,6 +94,14 @@ class TestLeftovers:
         ]
         assert _leftover.leftovers("active_layer", roads, None) == ["active layer: 'roads' -> none"]
 
+    def test_the_same_count_of_other_features_is_reported(self) -> None:
+        before = {"1": {"name": "roads", "count": 3, "ids": "aaa"}}
+        after = {"1": {"name": "roads", "count": 3, "ids": "bbb"}}
+        assert _leftover.leftovers("selection", before, after) == [
+            "selection on 'roads': 3 features, but different ones"
+        ]
+        assert _leftover.leftovers("selection", before, before) == []
+
     def test_selection_by_layer_name(self) -> None:
         before = {"1": {"name": "roads", "count": 2}}
         after = {"1": {"name": "roads", "count": 5}, "2": {"name": "pts", "count": 1}}
@@ -164,6 +172,7 @@ _CONFTEST = textwrap.dedent(
         "project_dirty": False,
     }
     CALLS = []
+    BROKEN = []  # 中身があれば、状態を読む呼び出しが失敗する
 
 
     def win(title, modal=False, cls="QDialog"):
@@ -177,6 +186,8 @@ _CONFTEST = textwrap.dedent(
         def call(self, command, params, **_):
             CALLS.append(command)
             assert command == "qgis_get_leftover_state"
+            if BROKEN:
+                raise RuntimeError("invalid_command: qgis_get_leftover_state")
             return {"success": True, "state": {i: copy.deepcopy(STATE[i]) for i in params["items"]}}
 
 
@@ -295,6 +306,69 @@ def test_tests_without_the_client_or_without_items_are_not_checked(
         """,
     )
     result.assert_outcomes(passed=2)
+
+
+def test_a_test_that_failed_gets_a_warning_not_a_second_error(pytester: pytest.Pytester) -> None:
+    """call で落ちたテストに、残った状態の teardown エラーを重ねない（警告にする）。"""
+    result = _run(
+        pytester,
+        "qgis_leftover_fail = dialogs\n",
+        """
+        from conftest import STATE, win
+
+        def test_fails_and_leaves_a_dialog(automation_client):
+            STATE["dialogs"].append(win("Delete?", modal=True))
+            assert False, "the test itself failed"
+        """,
+    )
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(["*QgisLeftoverWarning*", "*modal left open*Delete?*"])
+
+
+def test_an_unreadable_state_warns_once(pytester: pytest.Pytester) -> None:
+    """読めないのに黙って緑にしない。ただし毎テストは出さない。"""
+    result = _run(
+        pytester,
+        "qgis_leftover_fail = dialogs\n",
+        """
+        from conftest import BROKEN
+
+        BROKEN.append(True)
+
+        def test_a(automation_client):
+            pass
+
+        def test_b(automation_client):
+            pass
+        """,
+    )
+    result.assert_outcomes(passed=2, warnings=1)  # 2 本目はログだけ
+    assert "leftover checks are not running" in result.stdout.str()
+
+
+def test_a_teardown_failure_without_qgis_does_not_ask_for_a_restart(
+    pytester: pytest.Pytester,
+) -> None:
+    """QGIS を使っていないテストの後片付けの失敗では、QGIS を起こし直さない。"""
+    result = _run(
+        pytester,
+        "qgis_auto_fresh_after_failure = session\n",
+        """
+        import pytest
+
+        @pytest.fixture
+        def broken_cleanup():
+            yield
+            raise RuntimeError("tmp dir is busy")
+
+        def test_unrelated(broken_cleanup):
+            pass
+
+        def test_next(request):
+            assert not getattr(request.config, "_qgis_puppeteer_restart_session_qgis", False)
+        """,
+    )
+    result.assert_outcomes(passed=2, errors=1)
 
 
 def test_an_unknown_item_stops_the_run(pytester: pytest.Pytester) -> None:

@@ -639,8 +639,10 @@ def pytest_qgis_before_spawn(config, kind):
 ```
 
 - `args` は `qgis_args` の後ろ（`qgis_command` を使うときはそのコマンドの後ろ）に、
-  `env` は環境（`environments.toml` の `env`）に足す。いくつかの conftest が返した
-  ものは合わせる。同じ環境変数に違う値を返すと `UsageError`
+  `env` は環境（`environments.toml` の `env`）に足す。環境や `fresh_qgis` の印の
+  `env` で既に決めている変数は、そちらが勝つ（明示した設定を優先。ログに出る）。
+  いくつかの conftest が返したものは合わせる。同じ環境変数に違う値を返すと
+  `UsageError`
 - QGIS を起こすたびに 1 回（session の最初、起こし直し、`fresh_qgis` のそれぞれ）。
   `spawn_qgis()` を直接使うとき（引数をその場で渡せる）と dev モードでは呼ばれない
 - 例外を出すと QGIS は起こさず、そのテストの準備のエラーになる
@@ -1907,10 +1909,12 @@ qgis_leftover_warn = editing map_tool layer_tree    # 残っていたら警告�
 | `active_layer` | アクティブレイヤ |
 | `project_dirty` | プロジェクトが未保存になった |
 
-- **比べ方は「始めとの差」**：テストの call の直前に 1 回読み、fixture の後片付けが
-  全部終わったあとにもう 1 回読む。fixture が作って fixture が片付けたもの、ホストが
-  始めから開いている窓などは出ない。マップツールも「Pan 以外」ではなく「始めと違う」
-  で見る（ホストによって既定のツールが違うため）
+- **比べ方は「始めとの差」**：`qgis` fixture の準備が終わった直後（テスト自身の
+  fixture の準備より前）に 1 回読み、fixture の後片付けが全部終わったあとにもう 1 回
+  読む。fixture が作って fixture が片付けたもの（足して消したレイヤ、選んで戻した
+  選択など）、ホストが始めから開いている窓などは出ない。マップツールも「Pan 以外」
+  ではなく「始めと違う」で見る（ホストによって既定のツールが違うため）。`qgis` を
+  使わず `automation_client` だけを使うテストは、call の直前に読む
 - 項目ごとに失敗か警告かを選べる。直す前の製品の不具合で残ることが分かっている項目は
   `qgis_leftover_warn` に入れておき、直したら `qgis_leftover_fail` に上げる、など
 - 知らせる文は「どの項目の、何が、始めの値から何に変わったか」:
@@ -1925,12 +1929,20 @@ qgis_leftover_warn = editing map_tool layer_tree    # 残っていたら警告�
 
 - 失敗（`qgis_leftover_fail`）は **teardown のエラー**になる。
   `qgis_auto_fresh_after_failure = session` なら、次のテストの前に QGIS を起こし直す
-  （teardown のエラーは、残った状態のものも fixture の後片付けの失敗も「落ちた」に
-  数える）。警告（`QgisLeftoverWarning`）では起こし直さない
+  （QGIS を使ったテストの teardown のエラーは、残った状態のものも fixture の後片付けの
+  失敗も「落ちた」に数える。QGIS を使わないテストの後片付けの失敗では起こし直さない）。
+  警告（`QgisLeftoverWarning`）では起こし直さない
+- call で落ちたテストは、残った状態をエラーにせず警告にする（落ちれば窓などが残るのは
+  ふつうで、同じテストにエラーを重ねないため）
+- 状態を読めなかったとき（古い plugin でコマンドが無い、QGIS が落ちた、など）は、
+  `QgisLeftoverWarning` で知らせる（session で 1 回。あとはログ）。黙って緑には
+  しない
+- `selection` は数だけでなく、選んだ地物が入れ替わったことも見る
 - **片付けはしない**（編集の破棄、ダイアログを閉じる、など）。利用者のデータを壊しうる
   ので、要るなら conftest の fixture で片付ける
-- テストの中で足したレイヤの表示や凡例は、始めに無かったので `layer_tree` には出ない
-  （残ったこと自体は `layers` が知らせる）
+- テストやその fixture が足したレイヤの表示や凡例は、始めに無かったので `layer_tree`
+  には出ない（残ったこと自体は `layers` が知らせる）。始めからあるレイヤ（プロジェクトの
+  レイヤ、前のテストまでに足したもの）の変化は出る
 - 見ないもの：`qgis` / `automation_client` を使わないテスト、`fresh_qgis` のテスト
   （その QGIS は捨てる）、dev モード
 - 毎テスト 2 回、選んだ項目だけを読む（1 往復ずつ）

@@ -111,7 +111,9 @@ def test_editing_layers_with_and_without_changes(r: dict[str, Any]) -> None:
 def test_selection_counts_by_layer(r: dict[str, Any]) -> None:
     assert r["before"]["selection"] == {}
     [entry] = r["after"]["selection"].values()
-    assert entry == {"name": "建物", "count": 2}
+    assert entry["name"] == "建物"
+    assert entry["count"] == 2
+    assert len(entry["ids"]) == 16  # 選んだ地物の id の要約（入れ替わりが分かる）
 
 
 def test_layer_tree_visibility_and_legend_checks(r: dict[str, Any]) -> None:

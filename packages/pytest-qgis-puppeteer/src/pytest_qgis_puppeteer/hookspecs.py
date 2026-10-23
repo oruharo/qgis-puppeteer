@@ -34,8 +34,10 @@ def pytest_qgis_before_spawn(config: pytest.Config, kind: str) -> dict[str, Any]
         None（足すものが無い）か、``{"args": [str, ...], "env": {str: str}}``
         （どちらも省ける）。``args`` は ini / 環境の ``qgis_args`` の後ろ
         （``qgis_command`` を使うときはそのコマンドの後ろ）に、``env`` は環境の
-        ``env`` に足す。いくつかの conftest が返したものは合わせる。同じ環境変数に
-        違う値を返すと ``pytest.UsageError``。
+        ``env`` に足す。環境（``environments.toml`` の ``env``）や ``fresh_qgis`` の印の
+        ``env`` で既に決めている変数は、そちらが勝つ（明示した設定を優先）。いくつかの
+        conftest が返したものは合わせる。同じ環境変数に違う値を返すと
+        ``pytest.UsageError``。
     """
 
 

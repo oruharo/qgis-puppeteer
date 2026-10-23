@@ -322,6 +322,12 @@ class TestBeforeSpawnHook:
         assert base == {"qgis_bin": "qgis.exe", "args": ["--nologo"]}  # 元は変えない
         assert config.calls == ["session"]
 
+    def test_an_explicit_env_wins_over_the_hook(self) -> None:
+        """環境や fresh_qgis の印で決めた変数は、フックより勝つ（明示した設定を優先）。"""
+        config = _SpawnHookConfig({"env": {"QGIS_CUSTOM_CONFIG_PATH": "/hook", "B": "2"}})
+        _, env = _extras(config, {"qgis_bin": "q"}, {"QGIS_CUSTOM_CONFIG_PATH": "/marker"})
+        assert env == {"QGIS_CUSTOM_CONFIG_PATH": "/marker", "B": "2"}
+
     def test_args_go_after_a_whole_command(self) -> None:
         config = _SpawnHookConfig({"args": ["--profile", "e2e"]})
         kwargs, env = _extras(config, {"command": ["launch.bat", "--nologo"]})

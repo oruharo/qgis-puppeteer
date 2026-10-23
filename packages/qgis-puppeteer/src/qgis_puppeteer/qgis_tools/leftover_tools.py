@@ -134,16 +134,23 @@ def _map_tool(iface: Any) -> str | None:
 
 
 def _selection() -> dict[str, dict]:
-    """選択のあるベクタレイヤの、選択の数（``{layer_id: {"name", "count"}}``）。"""
+    """選択のあるベクタレイヤの選択（``{layer_id: {"name", "count", "ids"}}``）。
+
+    ``ids`` は選択した地物の id の要約（並べた id の hash）。数が同じでも、選んだ
+    地物が変わったことが分かる。
+    """
+    import hashlib
+
     from qgis.core import QgsProject, QgsVectorLayer
 
-    counts = {}
+    found = {}
     for layer_id, layer in QgsProject.instance().mapLayers().items():
         if isinstance(layer, QgsVectorLayer):
-            n = layer.selectedFeatureCount()
-            if n:
-                counts[layer_id] = {"name": layer.name(), "count": n}
-    return counts
+            ids = sorted(layer.selectedFeatureIds())
+            if ids:
+                digest = hashlib.sha1(",".join(map(str, ids)).encode()).hexdigest()[:16]
+                found[layer_id] = {"name": layer.name(), "count": len(ids), "ids": digest}
+    return found
 
 
 def _layer_tree() -> dict:
