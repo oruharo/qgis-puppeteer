@@ -34,6 +34,7 @@ ITEMS = (
     "layers",
     "active_layer",
     "project_dirty",
+    "message_bar",
 )
 
 INI_FAIL = "qgis_leftover_fail"
@@ -204,6 +205,32 @@ def _project_dirty(before: Any, after: Any) -> list[str]:
     return ["project left with unsaved changes"] if after and not before else []
 
 
+def _message_bar(before: list[dict], after: list[dict]) -> list[str]:
+    """始めに無かった、閉じるまで残る帯（#32）。
+
+    時間で消える帯（``duration > 0``）は数えない。後片付けの時点でまだ出ている
+    だけで、残るものではないため。
+    """
+
+    def key(item: dict) -> tuple:
+        return (item.get("level"), item.get("title"), item.get("text"))
+
+    remaining = [key(item) for item in before]
+    found = []
+    for item in after:
+        k = key(item)
+        if k in remaining:
+            remaining.remove(k)
+            continue
+        if int(item.get("duration") or 0) > 0:
+            continue
+        title = item.get("title") or ""
+        text = item.get("text") or ""
+        label = f"{title}: {text}" if title and text else title or text
+        found.append(f"message bar item left: {item.get('level')} {label!r}")
+    return found
+
+
 _DIFFS = {
     "dialogs": _dialogs,
     "popup": _popup,
@@ -215,6 +242,7 @@ _DIFFS = {
     "layers": _layers,
     "active_layer": _active_layer,
     "project_dirty": _project_dirty,
+    "message_bar": _message_bar,
 }
 
 

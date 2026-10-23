@@ -8,6 +8,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Leftover message bar items** (#32). A message bar item that stays until
+  closed (a critical one, for instance) kept covering the top of the map
+  canvas for every later test, in the way of clicks and screen
+  comparisons. `message_bar` is a new `qgis_leftover_fail` /
+  `qgis_leftover_warn` item: an item that was not there at the start and
+  has no timeout is reported by level, title and text. Items that close
+  themselves after a timeout are not counted, since they are only still
+  showing. `qgis_get_leftover_state` returns the items with their
+  `duration`.
+
 - **A child row of a tree can be addressed** (#30). `cell` and the row value
   only reached the top level of a tree, so a layer inside a group, a
   setting under a section or a node of a browser tree could not be

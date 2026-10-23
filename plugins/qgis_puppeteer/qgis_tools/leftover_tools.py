@@ -26,6 +26,7 @@ ITEMS = (
     "layers",
     "active_layer",
     "project_dirty",
+    "message_bar",
 )
 
 
@@ -60,6 +61,7 @@ def get_leftover_state(params: dict, iface: Any = None) -> dict:
         "layers": _layers,
         "active_layer": lambda: _active_layer(iface),
         "project_dirty": _project_dirty,
+        "message_bar": lambda: _message_bar(iface),
     }
     return {"success": True, "state": {item: readers[item]() for item in items}}
 
@@ -221,6 +223,39 @@ def _active_layer(iface: Any) -> dict | None:
         return None
     layer = iface.activeLayer()
     return {"id": layer.id(), "name": layer.name()} if layer is not None else None
+
+
+# メッセージバーの帯の level（Qgis.MessageLevel の値）
+_LEVELS = {0: "info", 1: "warning", 2: "critical", 3: "success", 4: "none"}
+
+
+def _message_bar(iface: Any) -> list[dict]:
+    """メッセージバーに出ている帯（#32）。
+
+    ``duration`` は自動で消えるまでの秒数（0 は閉じるまで残る）。どれを残ったと
+    みなすかは呼ぶ側が決める。
+    """
+    if iface is None or not hasattr(iface, "messageBar"):
+        return []
+    bar = iface.messageBar()
+    if bar is None:
+        return []
+    items = bar.items() if hasattr(bar, "items") else []
+    found = []
+    for item in items:
+        try:
+            level = _LEVELS.get(int(item.level()), str(item.level()))
+        except Exception:  # noqa: BLE001 - 知らない level も文字で残す
+            level = str(item.level())
+        found.append(
+            {
+                "level": level,
+                "title": item.title(),
+                "text": item.text(),
+                "duration": int(item.duration()),
+            }
+        )
+    return found
 
 
 def _project_dirty() -> bool:

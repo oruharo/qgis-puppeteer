@@ -141,6 +141,17 @@ class TestLeftovers:
             "group removed: 'work'",
         ]
 
+    def test_message_bar_items_that_stay_until_closed(self) -> None:
+        def item(title: str, *, duration: int = 0, level: str = "critical") -> dict:
+            return {"level": level, "title": title, "text": "x", "duration": duration}
+
+        before = [item("start")]
+        after = [item("start"), item("new"), item("timed", duration=5, level="info")]
+        assert _leftover.leftovers("message_bar", before, after) == [
+            "message bar item left: critical 'new: x'"
+        ]
+        assert _leftover.leftovers("message_bar", before, [item("start")]) == []
+
     def test_project_dirty_only_when_it_became_dirty(self) -> None:
         assert _leftover.leftovers("project_dirty", False, True) == [
             "project left with unsaved changes"
@@ -170,6 +181,7 @@ _CONFTEST = textwrap.dedent(
         "active_layer": None,
         "popup": None,
         "project_dirty": False,
+        "message_bar": [],
     }
     CALLS = []
     BROKEN = []  # 中身があれば、状態を読む呼び出しが失敗する

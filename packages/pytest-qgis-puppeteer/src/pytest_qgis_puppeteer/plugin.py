@@ -283,7 +283,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "qgis_leftover_fail",
         "State a test must not leave behind; found after teardown, it errors the "
         "test (#28). Items: dialogs popup editing editing_modified map_tool selection "
-        "layer_tree layers active_layer project_dirty. Default: none.",
+        "layer_tree layers active_layer project_dirty message_bar. Default: none.",
         type="args",
         default=[],
     )

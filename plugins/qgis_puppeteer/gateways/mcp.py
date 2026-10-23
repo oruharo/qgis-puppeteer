@@ -1234,6 +1234,7 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
                 "layers",
                 "active_layer",
                 "project_dirty",
+                "message_bar",
             ]
         ]
         | None = None,
@@ -1244,8 +1245,9 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
         見えているダイアログ（dialogs）、ポップアップ（popup）、編集中のレイヤと未保存の
         変更・取り消しの数（editing）、マップツール（map_tool）、レイヤごとの選択の数
         （selection）、レイヤツリーと凡例のチェック（layer_tree）、レイヤとグループ
-        （layers）、アクティブレイヤ（active_layer）、プロジェクトの未保存（project_dirty）。
-        作業の前と後で読み比べると、閉じ忘れや戻し忘れが分かる。
+        （layers）、アクティブレイヤ（active_layer）、プロジェクトの未保存（project_dirty）、
+        メッセージバーの帯（message_bar。duration は自動で消えるまでの秒数で、0 は閉じる
+        まで残る）。作業の前と後で読み比べると、閉じ忘れや戻し忘れが分かる。
         """
         params: dict[str, Any] = {} if items is None else {"items": items}
         return await _call(ctx, "qgis_get_leftover_state", params, instance=instance)

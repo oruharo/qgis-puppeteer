@@ -19,10 +19,10 @@ pytestmark = pytest.mark.integration
 
 _BODY = """
 from qgis.core import (
-    QgsCategorizedSymbolRenderer, QgsFeature, QgsGeometry, QgsPointXY, QgsProject,
+    Qgis, QgsCategorizedSymbolRenderer, QgsFeature, QgsGeometry, QgsPointXY, QgsProject,
     QgsRendererCategory, QgsSymbol, QgsVectorLayer,
 )
-from qgis.gui import QgsMapCanvas, QgsMapToolPan
+from qgis.gui import QgsMapCanvas, QgsMapToolPan, QgsMessageBar
 from qgis.PyQt.QtWidgets import QDialog
 from qgis_puppeteer.qgis_tools.leftover_tools import get_leftover_state
 
@@ -48,11 +48,14 @@ group.addLayer(roads)
 canvas = QgsMapCanvas()
 pan = QgsMapToolPan(canvas)
 canvas.setMapTool(pan)
+bar = QgsMessageBar()
 
 
 class Iface:
     def mapCanvas(self):
         return canvas
+    def messageBar(self):
+        return bar
     def activeLayer(self):
         return ACTIVE[0]
 
@@ -78,6 +81,8 @@ pts.renderer().checkLegendSymbolItem(pts.renderer().legendSymbolItems()[1].ruleK
 root.addGroup("作業")
 ACTIVE[0] = roads
 project.setDirty(True)
+bar.pushMessage("読込", "失敗しました", Qgis.Critical, 0)
+bar.pushMessage("保存", "済み", Qgis.Info, 30)
 dlg = QDialog()
 dlg.setWindowTitle("検索")
 dlg.show()
@@ -146,6 +151,15 @@ def test_dialogs_and_popup(r: dict[str, Any]) -> None:
         {"class": "QDialog", "object_name": "", "title": "検索", "modal": False}
     ]
     assert r["after"]["popup"] is None
+
+
+def test_message_bar_items_with_their_duration(r: dict[str, Any]) -> None:
+    assert r["before"]["message_bar"] == []
+    items = sorted(r["after"]["message_bar"], key=lambda i: i["title"])
+    assert items == [
+        {"level": "info", "title": "保存", "text": "済み", "duration": 30},
+        {"level": "critical", "title": "読込", "text": "失敗しました", "duration": 0},
+    ]
 
 
 def test_only_the_asked_items_are_read(r: dict[str, Any]) -> None:
