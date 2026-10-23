@@ -1040,6 +1040,10 @@ QGIS 側へ積んですぐ返す（[Dialog handler](#dialog-handler) の「確�
   `{"text": ..., "column": ...}`）。そのセルの位置に送るので、ダブルクリックの最初の
   押しで行が選ばれ（`currentChanged`）、それから `doubleClicked` /
   `cellDoubleClicked` が出る。戻り値に `cell: {"row", "column"}` が付く
+- 指したセルが**隠した列**（`setColumnHidden`。ID の列を隠して行の目印にだけ使う表
+  など）にあるときは、人には押せないので、同じ行の見えている最初の列（画面の並び順）
+  に送る。行は `{"text": ID, "column": "ID"}` のように隠した列の文字で指してよい。
+  見えている列が無ければ `no_visible_column`
 - `kind="right"` は右ボタンの押し・離しのあと `QContextMenuEvent` も送るので、
   `customContextMenuRequested` が出る。開いたメニューは `exec()` で止まるので、
   `wait=False` で積み、`scope="popup"` で項目を選ぶ

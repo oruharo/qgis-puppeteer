@@ -345,6 +345,15 @@ def _mouse_press(
         index, error = _resolve_row(widget, cell)
         if error is not None:
             return None, error
+        # 隠した列（ID の列など、行の目印にだけ使う）のセルは人には押せないので、
+        # 同じ行の見えている最初の列に送る
+        index = _visible_cell(widget, index)
+        if index is None:
+            return None, {
+                "success": False,
+                "error": "no_visible_column",
+                "widget": _widget_summary(widget),
+            }
         result["cell"] = {"row": index.row(), "column": index.column()}
     target = widget.viewport() if isinstance(widget, QAbstractItemView) else widget
 
@@ -357,6 +366,24 @@ def _mouse_press(
         _send_mouse(target, pos, kind)
 
     return press, None
+
+
+def _visible_cell(view: QAbstractItemView, index: Any) -> Any:
+    """``index`` の列が隠れていれば、同じ行の見えている最初の列（画面の並び順）。
+
+    見えている列が 1 つも無ければ None。リストは列を隠せないのでそのまま。
+    """
+    if not isinstance(view, (QTableView, QTreeView)):
+        return index
+    if not view.isColumnHidden(index.column()):
+        return index
+    header = view.horizontalHeader() if isinstance(view, QTableView) else view.header()
+    model = view.model()
+    for visual in range(header.count()):
+        column = header.logicalIndex(visual)
+        if not view.isColumnHidden(column):
+            return model.index(index.row(), column, index.parent())
+    return None
 
 
 def _send_mouse(target: QWidget, pos: Any, kind: str, modifiers: Any = Qt.NoModifier) -> None:

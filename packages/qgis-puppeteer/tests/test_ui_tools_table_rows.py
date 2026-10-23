@@ -221,6 +221,30 @@ def test_a_right_click_on_a_cell_requests_the_context_menu(host: Any) -> None:
     assert table.currentRow() == 2  # 右クリックでも行が選ばれる
 
 
+def test_a_cell_in_a_hidden_column_is_clicked_in_the_first_visible_column(host: Any) -> None:
+    """ID の列を隠して行の目印にだけ使う表。行は ID の文字で指し、見えている列に送る。"""
+    table = QtWidgets.QTableWidget(len(ROWS), 3)
+    table.setHorizontalHeaderLabels(["ID", *HEADERS])
+    for r, cells in enumerate(ROWS):
+        table.setItem(r, 0, QtWidgets.QTableWidgetItem(f"id-{r}"))
+        for c, text in enumerate(cells, start=1):
+            table.setItem(r, c, QtWidgets.QTableWidgetItem(text))
+    table.setColumnHidden(0, True)
+    table.horizontalHeader().moveSection(2, 1)  # 画面の並び: (ID) 種別 名前
+    _add(host, table)
+    seen: list[Any] = []
+    table.cellDoubleClicked.connect(lambda r, c: seen.append((r, c)))
+
+    result = click_widget(_sel(), kind="double", cell={"text": "id-2", "column": "ID"})
+
+    assert result["cell"] == {"row": 2, "column": 2}  # 見えている最初の列（種別）
+    assert seen == [(2, 2)]
+    table.setColumnHidden(1, True)
+    table.setColumnHidden(2, True)
+    gone = click_widget(_sel(), kind="double", cell={"text": "id-2", "column": "ID"})
+    assert gone["error"] == "no_visible_column"
+
+
 def test_a_view_double_click_emits_double_clicked(host: Any) -> None:
     model = QtCore.QStringListModel(["a", "b", "c"])
     view = _add(host, QtWidgets.QListView())

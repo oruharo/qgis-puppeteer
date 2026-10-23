@@ -544,6 +544,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A double or right click on a table row picked by a hidden column's text
+  went to the hidden cell** (#24). A table that keeps an ID column hidden
+  to identify rows, matched with `cell={"text": id, "column": "ID"}`, got
+  the mouse events at the hidden cell's empty rectangle, so the row was
+  never hit. The click now goes to the first visible column of that row,
+  in on-screen order; with no visible column it is `no_visible_column`.
+
 - **A dialog handler fired again and again on a modal it did not close, and
   could skip a new one** (#21). The handler tracked the modal it had handled
   by `id()` of the Python wrapper, but PyQt may return a new wrapper for each
