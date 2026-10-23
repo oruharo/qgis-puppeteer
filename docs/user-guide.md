@@ -1073,6 +1073,10 @@ QGIS 側へ積んですぐ返す（[Dialog handler](#dialog-handler) の「確�
   ときは、見えている部分の中心に送る）。当たらなければ `click_missed`、無効な項目は
   `cell_disabled`（押しても Qt が黙って無視するため）。`wait=False` で積んだあとに
   行が消えていれば `row_gone`（`qgis_get_recent_exceptions` に残る）
+- その位置が別の widget（表の上に重なった窓など）に覆われていれば、人には押せないので
+  `point_covered`（`covered_by` に覆っている widget）。マウスを通す widget
+  （`WA_TransparentForMouseEvents`）や、表の中の部品（セルの編集欄など）は覆っていると
+  みなさない（#33）
 - `kind="right"` は右ボタンの押し・離しのあと `QContextMenuEvent` も送るので、
   `customContextMenuRequested` が出る。開いたメニューは `exec()` で止まるので、
   `wait=False` で積み、`scope="popup"` で項目を選ぶ
@@ -1613,6 +1617,10 @@ canvas.wheel((-40500.0, 11500.0), 1)         # その位置で拡大
   押せないので）。判定は、実際に届く丸めた画素で行う。`wait=False` で積んだあとに
   地図が動いて外になったら、送らずに `qgis_get_recent_exceptions` に残す。失敗は
   `WidgetOperationError`
+- 別の widget に覆われた点（キャンバスの上端に重なるメッセージバーの帯、キャンバスの
+  上に浮かぶ入力欄、重なった窓など）は、人には押せないので `point_covered`
+  （`covered_by` に覆っている widget）。`wait=False` で積んだ操作は送る時点で確かめ
+  直す（#33）
 - `crs` と `pixel=True` は一緒に使えない。CRS の変換は送る時点の地図の CRS で行う
 - 文字を打つ `type_text` は、改行を Return、タブを Tab のキーで送り、大文字には
   Shift を付ける

@@ -126,7 +126,9 @@ def canvas_mouse(params: dict, iface: Any = None) -> dict:  # noqa: C901 - 引�
         """今の地図で画素に直し、どの点も viewport の中にあるか確かめる。
 
         積んだ処理は、送る時点でもう一度呼ぶ（積んだあとに地図や CRS が変わりうる）。
-        判定は、実際に届く丸めた画素（``toPoint()``）で行う。
+        判定は、実際に届く丸めた画素（``toPoint()``）で行う。別の widget（メッセージバーの
+        帯、キャンバスの上に浮かぶ入力欄、重なった窓など）に覆われた点は、人には押せない
+        ので ``point_covered``（#33）。
         """
         viewport = canvas.viewport()
         if viewport.width() <= 0 or viewport.height() <= 0 or not canvas.isVisible():
@@ -158,6 +160,10 @@ def canvas_mouse(params: dict, iface: Any = None) -> dict:  # noqa: C901 - 引�
                     "size": [viewport.width(), viewport.height()],
                     "extent": _extent(canvas),
                 }
+            covered = ui_tools.covered_point(viewport, pos)
+            if covered is not None:
+                covered["point"] = list(point)
+                return None, covered
             found.append(pos)
         return found, None
 

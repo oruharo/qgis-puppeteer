@@ -8,6 +8,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A covered point is not clicked** (#33). Mouse input to the map canvas
+  and clicks on a table, tree or list cell were sent straight to the
+  viewport, so a point under a message bar item, a floating input over
+  the canvas or another window was clicked although a person would hit
+  the widget on top. The widget at the point (`QApplication.widgetAt()`,
+  or the window's `childAt()`) is now checked first; anything other than
+  the viewport or its children is `point_covered`, with `covered_by`.
+  Widgets transparent for mouse events do not cover. A queued canvas
+  action checks again when it is sent.
+
 - **Leftover message bar items** (#32). A message bar item that stays until
   closed (a critical one, for instance) kept covering the top of the map
   canvas for every later test, in the way of clicks and screen

@@ -393,10 +393,45 @@ def _mouse_press(
             hit = widget.indexAt(pos)
             if hit.row() != current.row() or hit.parent() != current.parent():
                 return _missed(widget, "click_missed", f"the point hits row {hit.row()}")
+        covered = covered_point(target, pos)
+        if covered is not None:
+            return covered
         _send_mouse(target, pos, kind)
         return None
 
     return press, None
+
+
+def covered_point(target: QWidget, pos: Any) -> dict | None:
+    """``target`` の ``pos`` を人が押したら、別の widget に当たるか（#33）。
+
+    当たるなら ``point_covered`` の失敗（覆っている widget の要約付き）、当たらなければ
+    None。その点で一番上にある widget は ``QApplication.widgetAt()`` で見る（別の窓が
+    重なっていても分かる）。取れなければ、その窓の ``childAt()``。
+
+    - ``target`` 自身と、その子（表のセルに開いた編集の部品など）は覆っていないとみなす
+    - ``WA_TransparentForMouseEvents`` の widget は人のクリックも通すので、
+      ``widgetAt`` / ``childAt`` が飛ばす（覆っているとみなさない）
+    - 一番上の widget が分からないとき（画面の外など）は、断らない
+    """
+    point = pos.toPoint() if hasattr(pos, "toPoint") else pos
+    global_pos = target.mapToGlobal(point)
+    hit = QApplication.widgetAt(global_pos)
+    if hit is None:
+        window = target.window()
+        local = window.mapFromGlobal(global_pos)
+        if window.rect().contains(local):
+            hit = window.childAt(local) or window
+    if hit is None or hit is target or target.isAncestorOf(hit):
+        return None
+    return {
+        "success": False,
+        "error": "point_covered",
+        "message": "another widget is on top of the point; a person would click that instead",
+        "pixel": [point.x(), point.y()],
+        "covered_by": _widget_summary(hit),
+        "widget": _widget_summary(target),
+    }
 
 
 def _missed(widget: Any, error: str, message: str) -> dict:

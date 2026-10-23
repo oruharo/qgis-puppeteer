@@ -269,6 +269,27 @@ def test_a_zero_width_column_counts_as_hidden(host: Any) -> None:
     assert by_number["cell"] == {"row": 2, "column": 1}
 
 
+def test_a_cell_covered_by_another_widget_is_not_clicked(host: Any) -> None:
+    """表の上に重なった widget に遮られたセルは押さない（#33）。"""
+    table = _table(host)
+    seen: list[Any] = []
+    table.cellDoubleClicked.connect(lambda r, c: seen.append((r, c)))
+    cover = QtWidgets.QLabel("cover", host)
+    cover.setObjectName("cover")
+    cover.setGeometry(table.geometry())
+    cover.show()
+    cover.raise_()
+    QApplication.processEvents()
+
+    result = click_widget(_sel(), kind="double", cell={"row": 0})
+    assert result["error"] == "point_covered"
+    assert result["covered_by"]["object_name"] == "cover"
+    assert seen == []
+    cover.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+    assert click_widget(_sel(), kind="double", cell={"row": 0})["success"] is True
+    assert seen == [(0, 0)]
+
+
 def test_a_list_uses_its_model_column(host: Any) -> None:
     """setModelColumn(1) のリスト。表示していない列 0 を押したり選んだりしない。"""
     model = QtGui.QStandardItemModel(0, 2)

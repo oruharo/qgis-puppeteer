@@ -136,6 +136,31 @@ R["typed"] = run(canvas_key, {"text": "aB\\n"})
 NOPE = {"object_name": "nope"}
 R["focus_bad_canvas"] = run(canvas_key, {"text": "x", "target": "focus", "canvas": NOPE})
 
+# キャンバスの上端に重なる帯（メッセージバーのような、キャンバスの上に重なる子）
+from qgis.PyQt.QtWidgets import QLabel
+band = QLabel("帯", canvas)
+band.setObjectName("band")
+band.setGeometry(0, 0, canvas.width(), 28)
+band.show()
+band.raise_()
+_app.processEvents()
+R["covered"] = run(canvas_mouse, {"point": [10, 10], "pixel": True})
+R["below_band"] = run(canvas_mouse, {"point": [10, 40], "pixel": True})
+band.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+R["see_through"] = run(canvas_mouse, {"point": [10, 10], "pixel": True})
+band.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+band.hide()
+exception_recorder.clear()
+queued_cover = canvas_mouse({"point": [10, 10], "pixel": True, "wait": False}, iface)
+band.show()  # 積んだあとに帯が出る
+tool.log = []
+for _ in range(5):
+    _app.processEvents()
+R["covered_later"] = {"result": queued_cover, "log": list(tool.log),
+                      "recorded": [r["message"] for r in exception_recorder.get_recent()]}
+band.hide()
+_app.processEvents()
+
 R["key"] = run(canvas_key, {"key": "Escape"})
 R["key_shift"] = run(canvas_key, {"key": "Backspace", "modifiers": ["shift"]})
 # Space の離しはキャンバスが自分で受ける（パンの終わり）ので、マップツールに渡る文字で
@@ -258,6 +283,21 @@ def test_text_is_typed_key_by_key(r: dict[str, Any]) -> None:
     assert typed == ["9", "0"]
     assert r["text_selector"]["result"]["keys"] == 4
     assert r["edit_text"] == "45.5"
+
+
+def test_a_covered_point_is_not_clicked(r: dict[str, Any]) -> None:
+    """人は上に重なった帯に遮られて押せない（#33）。"""
+    covered = r["covered"]["result"]
+    assert covered["error"] == "point_covered"
+    assert covered["covered_by"]["object_name"] == "band"
+    assert covered["point"] == [10, 10]
+    assert r["covered"]["log"] == []
+    assert r["below_band"]["result"]["success"] is True
+    assert r["see_through"]["result"]["success"] is True  # マウスを通す widget は覆わない
+    later = r["covered_later"]
+    assert later["result"]["queued"] is True
+    assert later["log"] == []
+    assert any("point_covered" in m for m in later["recorded"])
 
 
 def test_reviewed_edges(r: dict[str, Any]) -> None:
