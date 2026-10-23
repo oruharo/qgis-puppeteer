@@ -253,6 +253,87 @@ def test_a_popup_handler_chooses_an_item_and_a_dialog_handler_answers_what_follo
     assert exception_recorder.get_recent() == []
 
 
+def test_a_popup_title_selector_matches_the_menu_title(env: dict[str, Any]) -> None:
+    """実ツリーの selector の title も QMenu.title()（snapshot と dialog handler と同じ）。"""
+    menu = _menu(env, "Copy")
+    chosen: list[str] = []
+    checks: list[dict] = []
+
+    def probe() -> None:
+        checks.append(check_actionability({"scope": "popup", "title": "Layer", "class": "QMenu"}))
+        menu.close()
+
+    _open(menu, chosen)
+    _while_open(probe)
+
+    assert _pump_until(env["app"], lambda: bool(chosen))
+    assert checks[0]["exists"] is True
+
+
+def test_a_hidden_menu_item_is_not_a_candidate(env: dict[str, Any]) -> None:
+    menu = _menu(env, "Copy", "Copy")
+    menu.actions()[0].setVisible(False)
+    chosen: list[str] = []
+    results: list[dict] = []
+
+    def probe() -> None:
+        results.append(click_widget({"scope": "popup", "class": "QAction", "text": "Copy"}))
+
+    _open(menu, chosen)
+    _while_open(probe)
+
+    assert _pump_until(env["app"], lambda: bool(chosen))
+    assert results[0]["success"] is True  # 見えない方と重ならない
+    assert chosen == ["Copy"]
+
+
+def test_a_once_handler_without_its_item_stays_for_the_right_menu(env: dict[str, Any]) -> None:
+    """項目が無くて当てられなかった once の handler は、使い切らずに残る。"""
+    first = _menu(env, "Copy")
+    chosen: list[str] = []
+    dialog_handler_tools.register_dialog_handler(
+        {
+            "name": "m",
+            "predicate": {"popup": True},
+            "action": "button",
+            "button": "Paste",
+            "once": True,
+        }
+    )
+
+    def probe() -> None:
+        _pump_until(env["app"], lambda: bool(exception_recorder.get_recent()), timeout_s=1.0)
+        first.close()
+
+    _open(first, chosen)
+    _while_open(probe)
+    assert _pump_until(env["app"], lambda: bool(chosen))
+
+    second = _menu(env, "Copy", "Paste")
+    chosen.clear()
+    _open(second, chosen)
+    assert _pump_until(env["app"], lambda: bool(chosen))
+    assert chosen == ["Paste"]
+    assert dialog_handler_tools.list_dialog_handlers({})["handlers"] == []  # 今度は使い切った
+
+
+def test_no_handlers_means_nothing_is_written_to_the_modal(env: dict[str, Any]) -> None:
+    """handler が無ければ、ホストの窓に印の property を書かない。"""
+    dialog = QtWidgets.QDialog(env["window"])
+    seen: list[Any] = []
+
+    def probe() -> None:
+        dialog_handler_tools.tick()
+        seen.append(dialog.property("_qpuppeteer_modal_key"))
+        dialog.reject()
+
+    QtCore.QTimer.singleShot(0, lambda: dialog.exec())
+    QtCore.QTimer.singleShot(50, probe)
+
+    assert _pump_until(env["app"], lambda: bool(seen))
+    assert seen == [None]
+
+
 def test_a_catch_all_handler_leaves_popups_alone(env: dict[str, Any]) -> None:
     """``{}`` の handler は、ポップアップ（コンボのドロップダウンなど）を閉じない。"""
     menu = _menu(env, "Copy")

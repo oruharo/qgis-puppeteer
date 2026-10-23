@@ -119,6 +119,15 @@ class DialogHandlerRegistry:
         # 答えられるように。#21）
         self._last_modal_id = None
 
+    def restore(self, spec: DialogHandlerSpec) -> None:
+        """当てられなかった ``once`` の handler を戻す（同じ name が無いときだけ）。
+
+        ``select_for_modal`` は ``once`` の handler を返すときに外す。その後で action を
+        当てられなかった（ボタンが無い、ポップアップに accept、など）なら、本来の窓の
+        ために残す。今の modal は処理済みのままなので、同じ窓に繰り返し発火はしない。
+        """
+        self._handlers.setdefault(spec.name, spec)
+
     def unregister(self, name: str) -> bool:
         """``name`` の handler を削除。存在すれば True、無ければ False。"""
         return self._handlers.pop(name, None) is not None

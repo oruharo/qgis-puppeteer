@@ -24,7 +24,7 @@ def results() -> dict[str, Any]:
         """
 from qgis.PyQt.QtWidgets import QWidget, QVBoxLayout
 from qgis.gui import QgsFileWidget
-from qgis_puppeteer.qgis_tools.ui_tools import set_widget_value
+from qgis_puppeteer.qgis_tools.ui_tools import check_actionability, set_widget_value
 
 host = QWidget()
 host.setObjectName("host")
@@ -62,6 +62,7 @@ RESULT["number_refused"] = set_widget_value(sel("open"), 5)
 # 有効なまま。それでも断ること
 widgets["open"].setReadOnly(True)
 RESULT["readonly"] = set_widget_value(sel("open"), "/x")
+RESULT["readonly_editable"] = check_actionability(sel("open"))["editable"]
 widgets["open"].setReadOnly(False)
 
 def find(node, name):
@@ -103,6 +104,8 @@ def test_only_a_single_path_string_is_accepted(results: dict[str, Any]) -> None:
 
 def test_a_read_only_file_widget_is_refused(results: dict[str, Any]) -> None:
     assert results["readonly"]["error"] == "widget_readonly"
+    # fill() の auto-wait が、読み取り専用が解けるのを待てるように
+    assert results["readonly_editable"] is False
 
 
 def test_snapshot_shows_the_path_and_the_mode(results: dict[str, Any]) -> None:

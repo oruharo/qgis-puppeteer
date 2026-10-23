@@ -107,6 +107,19 @@ class TestRegisterValidation:
         assert spec.name == "h"
         assert reg.select_for_modal(7, record) is None  # 2 度目は発火しない
 
+    def test_a_once_handler_that_could_not_be_applied_can_be_restored(self) -> None:
+        """当てられなかった once の handler は戻せる。同じ modal には繰り返さない。"""
+        reg = DialogHandlerRegistry()
+        reg.register("yes", {"class": "QMessageBox"}, "button", once=True, button="Yes")
+        record = {"class": "QMessageBox", "title": "Other"}
+        spec = reg.select_for_modal(1, record)
+        assert spec is not None
+        assert reg.list_specs() == []  # once なので外れた
+        reg.restore(spec)
+        assert [s["name"] for s in reg.list_specs()] == ["yes"]
+        assert reg.select_for_modal(1, record) is None  # 同じ modal にはもう発火しない
+        assert reg.select_for_modal(2, {"class": "QMessageBox", "title": "Delete?"}) is not None
+
     def test_popups_go_only_to_handlers_that_opt_in(self) -> None:
         """#22: ポップアップは predicate に "popup": true を書いた handler だけ。
 

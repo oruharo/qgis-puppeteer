@@ -44,9 +44,14 @@ def label_forms(text: str) -> tuple[str, ...]:
     """ボタン・メニュー項目の文言を、指定と比べる形にする。
 
     そのまま・``&`` のニーモニック抜き・末尾の ``(&N)`` 抜きの 3 つ（``"No"`` で
-    ``"&No"``、``"いいえ"`` で ``"いいえ(&N)"`` に当たる）。
+    ``"&No"``、``"いいえ"`` で ``"いいえ(&N)"`` に当たる）。``&&`` は文字としての
+    ``&``（``"Cut && Paste"`` は ``"Cut & Paste"`` と表示される）。
     """
-    return (text, text.replace("&", ""), _MNEMONIC_SUFFIX_RE.sub("", text).replace("&", ""))
+
+    def strip(value: str) -> str:
+        return value.replace("&&", "\0").replace("&", "").replace("\0", "&")
+
+    return (text, strip(text), strip(_MNEMONIC_SUFFIX_RE.sub("", text)))
 
 
 def record_matches_selector(record: dict[str, Any], selector: dict[str, Any]) -> bool:

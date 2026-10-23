@@ -245,6 +245,146 @@ def test_a_cell_in_a_hidden_column_is_clicked_in_the_first_visible_column(host: 
     assert gone["error"] == "no_visible_column"
 
 
+def test_a_zero_width_column_counts_as_hidden(host: Any) -> None:
+    """ID の列を setColumnHidden ではなく幅 0 で隠す表。人には押せないので、見えている
+    列に送る。列を指さないときの列にも選ばない。"""
+    table = QtWidgets.QTableWidget(len(ROWS), 3)
+    table.setHorizontalHeaderLabels(["ID", *HEADERS])
+    for r, cells in enumerate(ROWS):
+        table.setItem(r, 0, QtWidgets.QTableWidgetItem(f"id-{r}"))
+        for c, text in enumerate(cells, start=1):
+            table.setItem(r, c, QtWidgets.QTableWidgetItem(text))
+    table.setColumnWidth(0, 0)
+    _add(host, table)
+    assert table.horizontalHeader().sectionSize(0) == 0  # 前提：幅 0 のまま
+    seen: list[Any] = []
+    table.cellDoubleClicked.connect(lambda r, c: seen.append((r, c)))
+
+    result = click_widget(_sel(), kind="double", cell={"text": "id-1", "column": "ID"})
+    assert result["success"] is True
+    assert result["cell"] == {"row": 1, "column": 1}
+    assert seen == [(1, 1)]
+
+    by_number = click_widget(_sel(), kind="double", cell=2)
+    assert by_number["cell"] == {"row": 2, "column": 1}
+
+
+def test_a_list_uses_its_model_column(host: Any) -> None:
+    """setModelColumn(1) のリスト。表示していない列 0 を押したり選んだりしない。"""
+    model = QtGui.QStandardItemModel(0, 2)
+    for i in range(3):
+        model.appendRow([QtGui.QStandardItem(f"id{i}"), QtGui.QStandardItem(f"name{i}")])
+    view = _add(host, QtWidgets.QListView())
+    view.setModel(model)
+    view.setModelColumn(1)
+    QApplication.processEvents()
+    seen: list[Any] = []
+    view.doubleClicked.connect(lambda index: seen.append((index.row(), index.column())))
+
+    result = click_widget(_sel(), kind="double", cell={"row": 2})
+
+    assert result["cell"] == {"row": 2, "column": 1}
+    assert seen == [(2, 1)]
+    assert set_widget_value(_sel(), {"text": "name1"})["value_after"] == 1
+    assert view.currentIndex().column() == 1
+
+
+def test_a_row_without_a_column_clicks_the_first_column_on_screen(host: Any) -> None:
+    table = _table(host)
+    table.horizontalHeader().moveSection(1, 0)  # 画面の並び: 種別 名前
+    seen: list[Any] = []
+    table.cellDoubleClicked.connect(lambda r, c: seen.append((r, c)))
+
+    result = click_widget(_sel(), kind="double", cell={"row": 1})
+
+    assert result["cell"] == {"row": 1, "column": 1}
+    assert seen == [(1, 1)]
+
+
+def test_duplicate_header_names_are_ambiguous(host: Any) -> None:
+    table = QtWidgets.QTableWidget(1, 2)
+    table.setHorizontalHeaderLabels(["名前", "名前"])
+    table.setItem(0, 0, QtWidgets.QTableWidgetItem("a"))
+    table.setItem(0, 1, QtWidgets.QTableWidgetItem("b"))
+    _add(host, table)
+
+    result = set_widget_value(_sel(), {"text": "b", "column": "名前"})
+
+    assert result["error"] == "column_ambiguous"
+    assert result["columns"] == [0, 1]
+    assert set_widget_value(_sel(), {"text": "b", "column": 1})["value_after"] == 0
+
+
+def test_a_cell_is_matched_by_what_it_shows(host: Any) -> None:
+    """空のセルは ""、真偽値は true / false で当たる（"None" や "True" ではなく）。"""
+    model = QtGui.QStandardItemModel(0, 2)
+    model.setHorizontalHeaderLabels(["名前", "済"])
+    for name, done in (("a", True), (None, False)):
+        cells = [QtGui.QStandardItem(), QtGui.QStandardItem()]
+        if name is not None:
+            cells[0].setData(name, Qt.DisplayRole)
+        cells[1].setData(done, Qt.DisplayRole)
+        model.appendRow(cells)
+    view = _add(host, QtWidgets.QTableView())
+    view.setModel(model)
+    QApplication.processEvents()
+
+    assert set_widget_value(_sel(), {"text": "", "column": "名前"})["value_after"] == 1
+    assert set_widget_value(_sel(), {"text": "true", "column": "済"})["value_after"] == 0
+    assert set_widget_value(_sel(), {"text": "None", "column": "名前"})["error"] == "row_not_found"
+
+
+def test_columns_past_the_snapshot_limit_can_be_addressed(host: Any) -> None:
+    table = QtWidgets.QTableWidget(2, 60)
+    table.setHorizontalHeaderLabels([f"c{i}" for i in range(60)])
+    table.setItem(1, 55, QtWidgets.QTableWidgetItem("far"))
+    _add(host, table)
+
+    assert set_widget_value(_sel(), {"text": "far"})["value_after"] == 1
+    assert set_widget_value(_sel(), {"text": "far", "column": "c55"})["value_after"] == 1
+
+
+def test_row_and_text_together_are_refused(host: Any) -> None:
+    _table(host)
+    assert set_widget_value(_sel(), {"row": 1, "text": "beta"})["error"] == "invalid_value"
+
+
+def test_a_disabled_cell_is_refused_instead_of_silently_ignored(host: Any) -> None:
+    table = _table(host)
+    item = table.item(1, 0)
+    item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+
+    result = click_widget(_sel(), kind="double", cell={"row": 1, "column": 0})
+
+    assert result["error"] == "cell_disabled"
+
+
+def test_a_row_removed_before_a_queued_click_is_recorded(host: Any, app: Any) -> None:
+    table = _table(host)
+
+    result = click_widget(_sel(), kind="double", cell={"text": "gamma"}, wait=False)
+    table.removeRow(2)
+
+    assert result["queued"] is True
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and not exception_recorder.get_recent():
+        app.processEvents()
+        time.sleep(0.01)
+    records = exception_recorder.get_recent()
+    assert len(records) == 1
+    assert "row_gone" in records[0]["message"]
+
+
+def test_list_widget_duplicate_texts_are_ambiguous(host: Any) -> None:
+    widget = _add(host, QtWidgets.QListWidget())
+    widget.addItems(["a", "b", "a"])
+
+    result = set_widget_value(_sel(), "a")
+
+    assert result["error"] == "row_ambiguous"
+    assert result["rows"] == [0, 2]
+
+
 def test_a_view_double_click_emits_double_clicked(host: Any) -> None:
     model = QtCore.QStringListModel(["a", "b", "c"])
     view = _add(host, QtWidgets.QListView())

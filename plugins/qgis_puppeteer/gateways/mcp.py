@@ -1389,7 +1389,7 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
         selector: SelectorArg,
         wait: bool = True,
         kind: Literal["left", "double", "right"] = "left",
-        cell: dict[str, Any] | None = None,
+        cell: dict[str, Any] | int | None = None,
         instance: InstanceArg = None,
     ) -> str | CallToolResult:
         """UI ウィジェットをクリックする。

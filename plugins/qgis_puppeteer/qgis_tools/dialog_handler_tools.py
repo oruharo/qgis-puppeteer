@@ -171,8 +171,16 @@ def _apply_action(modal: Any, spec: Any) -> bool:
     ):
         logger.warning("Cannot apply action %r to modal of type %s", action, type(modal).__name__)
         return False
+
+    def run() -> dict:
+        outcome = _run_action(modal, action, spec.button)
+        if outcome.get("success") is False and spec.once:
+            # 押すボタン・項目が無かった once の handler は使い切らない
+            _REGISTRY.restore(spec)
+        return outcome
+
     queued.run_later(
-        lambda: _run_action(modal, action, spec.button),
+        run,
         what=f"dialog handler {spec.name!r} ({action})",
         target=modal,
         gone_is_failure=False,  # その間に閉じて消えたなら、することが無いだけ
@@ -268,7 +276,8 @@ def tick(iface: Any = None) -> dict:
     """
     del iface
     app = QApplication.instance()
-    if app is None:
+    if app is None or len(_REGISTRY) == 0:
+        # handler が無ければ何もしない（ホストの窓に印の property を書かない）
         return {"applied": False}
 
     # ポップアップは、開いていれば一番上にある（モーダルの上に開くこともある）
@@ -282,6 +291,9 @@ def tick(iface: Any = None) -> dict:
         return {"applied": False}
 
     success = _apply_action(modal, spec)
+    if not success and spec.once:
+        # 当てられなかった once の handler は使い切らない（本来の窓のために残す）
+        _REGISTRY.restore(spec)
     return {
         "applied": bool(success),
         "queued": bool(success),

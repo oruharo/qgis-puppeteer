@@ -584,6 +584,13 @@ class TestWaitForPopup:
         # include_main_window は要らない（ポップアップは独立した root）
         assert inner.call.await_args_list[0].args[1]["include_main_window"] is False
 
+    def test_title_contains_ignores_mnemonics(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        menu = {"class": "QMenu", "title": "Add &Layer"}
+        e2e, _ = _make_client(call_results=[self._snap(menu)])
+        monkeypatch.setattr(time, "sleep", lambda *_: None)
+
+        assert e2e.wait_for_popup("Add Layer", timeout_s=1.0)["title"] == "Add &Layer"
+
     def test_title_contains_waits_for_the_right_menu(self, monkeypatch: pytest.MonkeyPatch) -> None:
         other = {"class": "QMenu", "title": "Edit"}
         menu = {"class": "QMenu", "title": "Layer actions"}

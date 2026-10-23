@@ -13,7 +13,7 @@ import re
 from collections.abc import Callable, Iterator
 from typing import Any
 
-from qgis.PyQt.QtCore import QEvent, QItemSelectionModel, QPointF, Qt
+from qgis.PyQt.QtCore import QEvent, QItemSelectionModel, QPersistentModelIndex, QPointF, Qt
 from qgis.PyQt.QtGui import QContextMenuEvent, QKeyEvent, QMouseEvent
 from qgis.PyQt.QtWidgets import (
     QAbstractButton,
@@ -313,13 +313,15 @@ def click_widget(
         queued.run_later(press, what="qgis_click_widget", target=widget)
         result["queued"] = True
         return result
-    press()
+    outcome = press()
+    if isinstance(outcome, dict) and outcome.get("success") is False:
+        return outcome  # セルに当たらなかった（_mouse_press）
     return result
 
 
 def _mouse_press(
     widget: Any, kind: str, cell: Any, result: dict
-) -> tuple[Callable[[], None] | None, dict | None]:
+) -> tuple[Callable[[], dict | None] | None, dict | None]:
     """Qt のマウスのイベントで押す処理を作る（#24）。
 
     ``cell`` があれば、その行のセルの中心に送る（表示する位置まで scroll してから）。
@@ -354,36 +356,79 @@ def _mouse_press(
                 "error": "no_visible_column",
                 "widget": _widget_summary(widget),
             }
+        if not index.flags() & Qt.ItemIsEnabled:
+            # 無効な項目は、押しても Qt が黙って無視する
+            return None, {
+                "success": False,
+                "error": "cell_disabled",
+                "cell": {"row": index.row(), "column": index.column()},
+                "widget": _widget_summary(widget),
+            }
         result["cell"] = {"row": index.row(), "column": index.column()}
     target = widget.viewport() if isinstance(widget, QAbstractItemView) else widget
+    # 積んでから押すまでにモデルが変わっても、同じ項目を追えるように
+    persistent = QPersistentModelIndex(index) if index is not None else None
 
-    def press() -> None:
-        if index is not None:
-            widget.scrollTo(index)
-            pos = widget.visualRect(index).center()
-        else:
-            pos = target.rect().center()
+    def press() -> dict | None:
+        pos = target.rect().center()
+        if persistent is not None:
+            if not persistent.isValid():
+                return _missed(widget, "row_gone", "the row was removed before the click")
+            current = widget.model().index(
+                persistent.row(), persistent.column(), persistent.parent()
+            )
+            widget.scrollTo(current)
+            # セルが viewport より広いと、中心が画面の外になる。見えている部分の中心へ
+            rect = widget.visualRect(current).intersected(target.rect())
+            if rect.isEmpty():
+                return _missed(widget, "click_missed", "the cell is not on the screen")
+            pos = rect.center()
+            hit = widget.indexAt(pos)
+            if hit.row() != current.row() or hit.parent() != current.parent():
+                return _missed(widget, "click_missed", f"the point hits row {hit.row()}")
         _send_mouse(target, pos, kind)
+        return None
 
     return press, None
+
+
+def _missed(widget: Any, error: str, message: str) -> dict:
+    return {
+        "success": False,
+        "error": error,
+        "message": message,
+        "widget": _widget_summary(widget),
+    }
 
 
 def _visible_cell(view: QAbstractItemView, index: Any) -> Any:
     """``index`` の列が隠れていれば、同じ行の見えている最初の列（画面の並び順）。
 
-    見えている列が 1 つも無ければ None。リストは列を隠せないのでそのまま。
+    隠れているかは ``_column_shown`` で見る（幅 0 の列も隠れている）。見えている列が
+    1 つも無ければ None。リストは列を隠せないのでそのまま。
     """
     if not isinstance(view, (QTableView, QTreeView)):
         return index
-    if not view.isColumnHidden(index.column()):
+    header = _column_header(view)
+    if _column_shown(view, header, index.column()):
         return index
-    header = view.horizontalHeader() if isinstance(view, QTableView) else view.header()
     model = view.model()
     for visual in range(header.count()):
         column = header.logicalIndex(visual)
-        if not view.isColumnHidden(column):
+        if _column_shown(view, header, column):
             return model.index(index.row(), column, index.parent())
     return None
+
+
+def _column_header(view: QAbstractItemView) -> Any:
+    """表・ツリーの横の見出し（列の幅と画面の並びを持つ）。"""
+    return view.horizontalHeader() if isinstance(view, QTableView) else view.header()
+
+
+def _column_shown(view: QAbstractItemView, header: Any, column: int) -> bool:
+    """列が画面に出ているか。``setColumnHidden`` の列も、幅を 0 にした列
+    （``setColumnWidth(c, 0)``。ID の列をこうして隠す表がある）も、人には押せない。"""
+    return not view.isColumnHidden(column) and header.sectionSize(column) > 0
 
 
 def _send_mouse(target: QWidget, pos: Any, kind: str, modifiers: Any = Qt.NoModifier) -> None:
@@ -417,7 +462,8 @@ def _resolve_row(view: QAbstractItemView, spec: Any) -> tuple[Any, dict | None]:
     """表・ツリー・リストの行の指定を ``QModelIndex`` にする（#24）。
 
     ``spec`` は行の番号か、``{"row": N}`` / ``{"text": セルの文字, "column": 見出しの
-    名前か番号}``。``column`` を省くと全列から探す。文字は表示値との完全一致。
+    名前か番号}``。``column`` を省くと全列から探す。文字は画面に出ている文字との
+    完全一致（``_cell_matches``）。
 
     - ``row`` は今、画面に並んでいる順の番号（``QTableWidget`` は並べ替え後の行、
       ``QTableView`` に代理のモデルがあれば代理のモデルの行）
@@ -427,8 +473,9 @@ def _resolve_row(view: QAbstractItemView, spec: Any) -> tuple[Any, dict | None]:
     - ツリーは一番上の階層だけ（snapshot と同じ）
 
     Returns:
-        ``(index, None)`` か ``(None, error_dict)``。``index`` の列は、文字で当てた
-        列（``column`` 指定ならその列、無指定なら 0）。
+        ``(index, None)`` か ``(None, error_dict)``。``index`` の列は、``column``
+        指定ならその列、文字で当てたならその列、どちらでもなければ画面で最初に
+        見えている列（``_first_column``）。
     """
     model = view.model()
     if model is None:
@@ -436,7 +483,7 @@ def _resolve_row(view: QAbstractItemView, spec: Any) -> tuple[Any, dict | None]:
     root = view.rootIndex()
     if _is_index(spec):
         spec = {"row": spec}
-    if not isinstance(spec, dict) or not ({"row", "text"} & set(spec)):
+    if not isinstance(spec, dict) or len({"row", "text"} & set(spec)) != 1:
         return None, _invalid(view, spec, '{"row": N} or {"text": ..., "column": ...}')
     count = model.rowCount(root)
     column = spec.get("column")
@@ -458,7 +505,7 @@ def _resolve_row(view: QAbstractItemView, spec: Any) -> tuple[Any, dict | None]:
                 "row": row,
                 "widget": _widget_summary(view),
             }
-        return model.index(row, col if col is not None else 0, root), None
+        return model.index(row, col if col is not None else _first_column(view), root), None
 
     text = str(spec["text"])
     columns = [col] if col is not None else _columns(view, model, root)
@@ -467,9 +514,11 @@ def _resolve_row(view: QAbstractItemView, spec: Any) -> tuple[Any, dict | None]:
         if _row_hidden(view, row, root):
             continue
         for c in columns:
-            if str(_display(model.index(row, c, root))) == text:
+            if _cell_matches(view, model.index(row, c, root), text):
                 hits.append((row, c))
                 break
+        if len(hits) > _MAX_AMBIGUOUS_ROWS:
+            break  # 曖昧なのはもう分かった。大きな表を最後まで読まない
     if not hits:
         return None, {
             "success": False,
@@ -492,11 +541,54 @@ def _resolve_row(view: QAbstractItemView, spec: Any) -> tuple[Any, dict | None]:
     return model.index(row, c, root), None
 
 
+# row_ambiguous で返す行の番号の上限（それ以上は探さない）
+_MAX_AMBIGUOUS_ROWS = 10
+
+
 def _columns(view: QAbstractItemView, model: Any, root: Any) -> list[int]:
-    """読める列の番号。リストは 1 列（``QAbstractListModel.columnCount()`` は呼べない）。"""
+    """指せる列の番号（すべて。snapshot の出力の上限とは別）。
+
+    リストは表示している 1 列（``QAbstractListModel.columnCount()`` は呼べない）。
+    """
     if isinstance(view, QListView):
         return [view.modelColumn()]
-    return list(range(min(model.columnCount(root), _MAX_ITEM_COLUMNS)))
+    return list(range(model.columnCount(root)))
+
+
+def _first_column(view: QAbstractItemView) -> int:
+    """列を指さないときの列：リストは表示している列、表・ツリーは画面の並びで最初に
+    見えている列（隠した列や並べ替えた列を押さないため）。"""
+    if isinstance(view, QListView):
+        return view.modelColumn()
+    if isinstance(view, (QTableView, QTreeView)):
+        header = _column_header(view)
+        for visual in range(header.count()):
+            column = header.logicalIndex(visual)
+            if _column_shown(view, header, column):
+                return column
+    return 0
+
+
+def _cell_matches(view: QAbstractItemView, index: Any, text: str) -> bool:
+    """セルの文字が ``text`` と同じか。画面に出ている文字（delegate の表示）でも比べる。
+
+    ``None`` は空の文字、真偽値は ``true`` / ``false``、数や日付は delegate が出す
+    形（ロケール込み）でも当たる。
+    """
+    try:
+        value = index.data(Qt.ItemDataRole.DisplayRole)
+    except Exception:  # noqa: BLE001
+        return False
+    forms = {""} if value is None else {str(value), str(_jsonable(value))}
+    if isinstance(value, bool):
+        forms.add("true" if value else "false")
+    try:
+        delegate = view.itemDelegate(index)
+        if delegate is not None and hasattr(delegate, "displayText"):
+            forms.add(delegate.displayText(value, view.locale()))
+    except Exception:  # noqa: BLE001 - delegate が無い・合わない型は生の値で比べる
+        pass
+    return text in forms
 
 
 def _resolve_column(
@@ -504,15 +596,23 @@ def _resolve_column(
 ) -> tuple[int | None, dict | None]:
     """``column``（見出しの名前か番号）を列の番号にする。"""
     columns = _columns(view, model, root)
+    names: list[Any] = [_display_header(model, c) for c in columns]
     if _is_index(column):
         if column in columns:
             return column, None
-        names: list[Any] = [_display_header(model, c) for c in columns]
     else:
-        names = [_display_header(model, c) for c in columns]
-        for c, name in zip(columns, names, strict=True):
-            if str(name) == str(column):
-                return c, None
+        same = [c for c, name in zip(columns, names, strict=True) if str(name) == str(column)]
+        if len(same) == 1:
+            return same[0], None
+        if len(same) > 1:
+            return None, {
+                "success": False,
+                "error": "column_ambiguous",
+                "column": column,
+                "columns": same,
+                "hint": "use the column number",
+                "widget": _widget_summary(view),
+            }
     return None, {
         "success": False,
         "error": "column_not_found",
@@ -736,6 +836,15 @@ def _prepare_widget_value(widget: Any, value: Any) -> dict:  # noqa: C901 - widg
             count = widget.count()
             texts = [widget.item(i).text() for i in range(min(count, _MAX_ITEM_ROWS))]
             return _not_found("list_item_not_found", widget, value, texts)
+        if len(items) > 1:
+            return {
+                "success": False,
+                "error": "row_ambiguous",
+                "text": value,
+                "rows": sorted(widget.row(i) for i in items),
+                "hint": "use the row number",
+                "widget": _widget_summary(widget),
+            }
         row = widget.row(items[0])
         return {"apply": lambda: widget.setCurrentRow(row), "expected": row}
     if isinstance(widget, (QListView, QTreeView, QTableView)):
@@ -813,6 +922,24 @@ def _is_file_widget(widget: Any) -> bool:
 _STORAGE_MODES = {0: "GetFile", 1: "GetDirectory", 2: "GetMultipleFiles", 3: "SaveFile"}
 
 
+def _file_widget_read_only(widget: Any) -> bool:
+    """``QgsFileWidget`` が読み取り専用か。
+
+    ``isReadOnly()`` を持たないので ``_widget_is_writable`` の一般の判定では見えない。
+    ``setReadOnly()`` は（3.34 では）中の入力欄とボタンを無効にするだけで、部品自身は
+    有効なまま。そこで中の入力欄（``lineEdit()`` は公開 API）が無効か読み取り専用かで
+    見る。``readOnly()`` の getter がある版ならそれを使う。
+    """
+    try:
+        getter = getattr(widget, "readOnly", None)
+        if callable(getter):
+            return bool(getter())
+        line = widget.lineEdit()
+        return not line.isEnabled() or bool(line.isReadOnly())
+    except Exception:  # noqa: BLE001 - 判定できなければ入れてみる
+        return False
+
+
 def _storage_mode(widget: Any) -> str:
     try:
         mode = int(widget.storageMode())
@@ -829,20 +956,7 @@ def _prepare_file_path(widget: Any, value: Any) -> dict:
     フォルダはこれから作る場所を指す）。複数ファイル（``GetMultipleFiles``）の
     list は受けない：まずは 1 つのパスだけ。
     """
-    # QgsFileWidget は isReadOnly() を持たないので、_widget_is_writable では見えない。
-    # setReadOnly() は（3.34 では）中の入力欄とボタンを無効にするだけで、部品自身は
-    # 有効なまま。そこで中の入力欄（lineEdit() は公開 API）が無効か読み取り専用かで
-    # 見る。readOnly() の getter がある版ならそれを使う
-    try:
-        getter = getattr(widget, "readOnly", None)
-        if callable(getter):
-            read_only = bool(getter())
-        else:
-            line = widget.lineEdit()
-            read_only = not line.isEnabled() or bool(line.isReadOnly())
-    except Exception:  # noqa: BLE001 - 判定できなければ入れてみる
-        read_only = False
-    if read_only:
+    if _file_widget_read_only(widget):
         return {"success": False, "error": "widget_readonly", "widget": _widget_summary(widget)}
     if not isinstance(value, str):
         return _invalid(widget, value, "a single path (str)")
@@ -1119,6 +1233,8 @@ def _widget_is_writable(widget: Any) -> bool:
             return not bool(widget.isReadOnly())
         except Exception:  # noqa: BLE001
             return True
+    if _is_file_widget(widget):
+        return not _file_widget_read_only(widget)
     return True
 
 
@@ -1452,9 +1568,7 @@ def _collect_candidates(roots: list[QWidget], selector: dict) -> list[QWidget]:
                 widget_text = _widget_text(widget)
                 if widget_text != text:
                     continue
-            if title is not None and (
-                not hasattr(widget, "windowTitle") or widget.windowTitle() != title
-            ):
+            if title is not None and _title_of(widget) != title:
                 continue
             if placeholder is not None:
                 if not hasattr(widget, "placeholderText"):
@@ -1477,7 +1591,8 @@ def _collect_candidates(roots: list[QWidget], selector: dict) -> list[QWidget]:
             # （addAction(既存の action)）うえ、findChildren では下位メニューの項目
             # まで拾い、開いていない項目と重なる
             actions = (
-                [a for a in root.actions() if not a.isSeparator()]
+                # 見えていない項目は人には選べない（snapshot の menu_items と同じ）
+                [a for a in root.actions() if not a.isSeparator() and a.isVisible()]
                 if is_menu
                 else root.findChildren(QAction)
             )
@@ -1540,6 +1655,17 @@ def _finalize_match(
     # 1 つ目に戻っていた（#20）
     chosen_index = next(i for i, record in enumerate(records) if record is chosen_record)
     return candidates[chosen_index], diagnostics
+
+
+def _title_of(widget: Any) -> str | None:
+    """selector の ``title`` と比べる題名。メニューは ``QMenu.title()``。
+
+    メニューの ``windowTitle`` はふつう空なので、snapshot の ``active_popup`` と
+    dialog handler の predicate が使う題名（``QMenu.title()``）に揃える。
+    """
+    if isinstance(widget, QMenu) and widget.title():
+        return widget.title()
+    return widget.windowTitle() if hasattr(widget, "windowTitle") else None
 
 
 def _walk_widgets(root: QWidget) -> Iterator[QWidget]:

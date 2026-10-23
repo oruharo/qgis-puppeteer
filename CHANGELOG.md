@@ -561,6 +561,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   variable set by the environment or a `fresh_qgis` marker now wins over
   the same one from `pytest_qgis_before_spawn`.
 
+- **Table rows, popups and dialog handlers, after review** (#22, #24, #27).
+  A list view with `setModelColumn` was clicked and selected in the hidden
+  column 0; a row picked without a column now uses the first column on
+  screen. A column shrunk to zero width counts as hidden, like one hidden
+  with `setColumnHidden`. A click is checked to land on the cell first
+  (`click_missed`, `cell_disabled`, `row_gone` for a row removed before a
+  queued click, which also keeps its place with a persistent index). Cell text is
+  matched as shown (an empty cell is `""`, booleans `true` / `false`,
+  numbers and dates as the delegate displays them), columns past the
+  snapshot limit can be addressed, duplicate header names are
+  `column_ambiguous`, `{"row", "text"}` together is refused, and duplicate
+  `QListWidget` texts are `row_ambiguous`. A popup's `title` in the live
+  selector is the menu's `title()`, as in the snapshot and dialog
+  handlers; hidden menu items are not candidates; `&&` is a literal `&`;
+  `wait_for_popup` ignores `&` in titles. A `once` handler that could not
+  be applied is kept for the dialog it was meant for, and with no handlers
+  the tick no longer writes a property onto host dialogs. A read-only
+  `QgsFileWidget` is reported as not editable, so `fill()` waits for it.
+
 - **A double or right click on a table row picked by a hidden column's text
   went to the hidden cell** (#24). A table that keeps an ID column hidden
   to identify rows, matched with `cell={"text": id, "column": "ID"}`, got

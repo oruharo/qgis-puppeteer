@@ -911,8 +911,13 @@ Worker は失敗時に `{"success": false, "error": "<code>", ...}` を返す。
 #### 表の行（`QTableWidget` / `QTableView` / ツリー / リスト）
 
 - 行は番号か、`{"text": セルの文字, "column": 見出しの名前か番号}` で指す
-  （`column` を省くと全列から探す。文字は表示値との完全一致）。複数の行に当たれば
-  `row_ambiguous`（当たった行の番号付き）なので、`column` で絞るか番号で指す
+  （`column` を省くと全列から探す）。文字は**画面に出ている文字**との完全一致（空の
+  セルは `""`、真偽値は `true` / `false`、数や日付は表示の形でも当たる）。複数の行に
+  当たれば `row_ambiguous`（当たった行の番号付き）なので、`column` で絞るか番号で
+  指す。同じ名前の見出しが複数あれば `column_ambiguous`（列の番号で指す）。
+  `{"row": ..., "text": ...}` のように両方は書けない
+- 列を指さずに番号で指すと、表・ツリーは画面の並びで最初に見えている列、リストは
+  表示している列（`setModelColumn`）を使う
 - **行全体が選ばれる**（`QTableView.selectRow()` 相当。`selectionBehavior` に
   関わらず）。`currentChanged` と `selectionChanged` が人の操作と同じ形で出るので、
   行の選択で動くホストの処理（選んだ行の地物に地図を移す、など）が進む
@@ -1042,10 +1047,14 @@ QGIS 側へ積んですぐ返す（[Dialog handler](#dialog-handler) の「確�
   `{"text": ..., "column": ...}`）。そのセルの位置に送るので、ダブルクリックの最初の
   押しで行が選ばれ（`currentChanged`）、それから `doubleClicked` /
   `cellDoubleClicked` が出る。戻り値に `cell: {"row", "column"}` が付く
-- 指したセルが**隠した列**（`setColumnHidden`。ID の列を隠して行の目印にだけ使う表
-  など）にあるときは、人には押せないので、同じ行の見えている最初の列（画面の並び順）
+- 指したセルが**隠した列**（`setColumnHidden` か、幅を 0 にした列。ID の列を隠して
+  行の目印にだけ使う表など）にあるときは、人には押せないので、同じ行の見えている最初の列（画面の並び順）
   に送る。行は `{"text": ID, "column": "ID"}` のように隠した列の文字で指してよい。
   見えている列が無ければ `no_visible_column`
+- 送る前に、その位置が本当にそのセルに当たるかを確かめる（セルが viewport より広い
+  ときは、見えている部分の中心に送る）。当たらなければ `click_missed`、無効な項目は
+  `cell_disabled`（押しても Qt が黙って無視するため）。`wait=False` で積んだあとに
+  行が消えていれば `row_gone`（`qgis_get_recent_exceptions` に残る）
 - `kind="right"` は右ボタンの押し・離しのあと `QContextMenuEvent` も送るので、
   `customContextMenuRequested` が出る。開いたメニューは `exec()` で止まるので、
   `wait=False` で積み、`scope="popup"` で項目を選ぶ

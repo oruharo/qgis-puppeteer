@@ -241,6 +241,10 @@ class TestMenuItemText:
         assert "Save as new" in label_forms("Save as &new")
         assert "Copy" not in label_forms("Copy all")
 
+    def test_a_double_ampersand_is_a_literal_ampersand(self) -> None:
+        assert "Cut & Paste" in label_forms("Cut && Paste")
+        assert "Save & Close" in label_forms("&Save && Close")
+
     def test_menu_item_text_without_mnemonics(self) -> None:
         item = {"class": "QAction", "text": "レイヤをコピー(&C)", "menu_item": True}
         assert record_matches_selector(item, {"text": "レイヤをコピー"}) is True

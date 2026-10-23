@@ -42,6 +42,7 @@ from qgis_puppeteer.client import (
 from qgis_puppeteer.hub_state import select_by_selector
 from qgis_puppeteer.protocol import ErrorCode, RejectedRegistration, Role
 from qgis_puppeteer.selector_match import (
+    label_forms,
     record_matches_selector,
     resolve_with_index,
 )
@@ -1247,7 +1248,9 @@ class E2EAutomationClient:
         while time.monotonic() < deadline:
             popup = self.snapshot_ui(instance=instance).get("active_popup")
             if popup is not None and (
-                title_contains is None or title_contains in (popup.get("title") or "")
+                title_contains is None
+                # 題名の & を除いても比べる（"&Layer" を "Layer" で待てる）
+                or any(title_contains in form for form in label_forms(popup.get("title") or ""))
             ):
                 return popup
             time.sleep(poll_interval_s)
