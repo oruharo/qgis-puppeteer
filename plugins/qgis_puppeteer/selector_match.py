@@ -11,6 +11,8 @@ pytest_qgis_puppeteer.automation_client._find_in_snapshot（snapshot DFS）が
 - ``resolve_with_index(records, selector)`` — match list から `index` /
   strict mode の解釈を含めて確定 record を返す
 - ``label_forms(text)`` — ボタン・メニュー項目の文言を、指定と比べる形にする
+- ``live_only_keys(selector)`` — snapshot では判定できないキー（``window`` /
+  ``class_inherits``）のうち、selector が使っているもの
 
 ## record の形
 
@@ -26,6 +28,12 @@ dict で以下のキーを持つ（無いものは None / 欠落で OK）:
   ``QAccessibleInterface`` 経由で埋める想定（実 record 生成は次フェーズ）
 - ``menu_item``: 開いているメニューの項目なら True。``text`` を
   :func:`label_forms` で比べる（``"Copy"`` で ``"&Copy"`` に当たる、#22）
+- ``is_window``: ``QWidget.isWindow()``（selector の ``window``、#38）
+- ``class_lineage``: Qt のメタオブジェクトのクラス名を、自分から基底へ並べたもの
+  （selector の ``class_inherits``。``QObject.inherits()`` と同じ判定、#38）
+
+``is_window`` と ``class_lineage`` は snapshot の node には無い（その場の widget
+から作る record だけが持つ）。
 
 live tree 側では QWidget から record を抽出し、snapshot 側ではノード辞書を
 そのまま record として扱う。
@@ -38,6 +46,40 @@ from typing import Any
 
 # 日本語などの Qt が付ける「いいえ(&N)」のようなニーモニックの括弧
 _MNEMONIC_SUFFIX_RE = re.compile(r"\s*\(&.\)$")
+
+# その場の Qt の widget からしか判定できない selector のキー（#38）。snapshot の
+# node には型の系譜も isWindow も入っていない
+LIVE_ONLY_KEYS = ("window", "class_inherits")
+
+
+class LiveOnlySelectorError(ValueError):
+    """snapshot で探す API に、snapshot では判定できないキーを渡した（#38）。
+
+    黙って「当たらない」にすると、``wait_for_widget`` は時間切れまで待ち、値の
+    ``expect`` は値が無いと言うだけで、原因が分からない。
+    """
+
+
+def live_only_keys(selector: dict[str, Any]) -> list[str]:
+    """selector（``_scope_chain`` の各段も含む）が使っている :data:`LIVE_ONLY_KEYS`。"""
+    found = [key for key in LIVE_ONLY_KEYS if key in selector]
+    for step in selector.get("_scope_chain") or ():
+        if isinstance(step, dict):
+            found.extend(key for key in live_only_keys(step) if key not in found)
+    return found
+
+
+def check_snapshot_selector(selector: dict[str, Any]) -> None:
+    """snapshot で探す前に呼ぶ。:data:`LIVE_ONLY_KEYS` があれば :class:`LiveOnlySelectorError`。"""
+    keys = live_only_keys(selector)
+    if keys:
+        raise LiveOnlySelectorError(
+            f"selector keys {keys} are not in snapshots and work only where the widget is "
+            "looked up in QGIS: actions, close(), and expect's to_be_visible / to_be_hidden / "
+            "to_be_enabled / to_be_disabled / to_have_count. They cannot be used with "
+            "snapshot(), get_text(), get_value(), wait_for_widget, or expect's to_have_text / "
+            f"to_contain_text / to_have_value / to_be_checked / to_have_row_count: {selector!r}"
+        )
 
 
 def label_forms(text: str) -> tuple[str, ...]:
@@ -119,6 +161,12 @@ def record_matches_selector(record: dict[str, Any], selector: dict[str, Any]) ->
             # 不正な正規表現はマッチしない扱い（silently skip。呼び出し側で
             # バリデートする想定で、selector 全体を fail させない）。
             return False
+    window = selector.get("window")
+    if window is not None and record.get("is_window") is not bool(window):
+        return False
+    class_inherits = selector.get("class_inherits")
+    if class_inherits is not None and class_inherits not in (record.get("class_lineage") or ()):
+        return False
     attr = selector.get("attr")
     if attr is not None:
         if not isinstance(attr, dict):

@@ -29,7 +29,7 @@ from qgis_puppeteer.dialog_handlers import (
     DialogHandlerRegistry,
 )
 from qgis_puppeteer.qgis_tools import queued
-from qgis_puppeteer.qgis_tools.ui_tools import activate_menu_action
+from qgis_puppeteer.qgis_tools.ui_tools import activate_menu_action, qt_record
 from qgis_puppeteer.selector_match import label_forms
 
 logger = logging.getLogger("qgis_puppeteer.qgis_tools.dialog_handler_tools")
@@ -58,7 +58,8 @@ def register_dialog_handler(params: dict, iface: Any = None) -> dict:
     params:
         - ``name`` (str): handler 識別名（既存名は上書き）
         - ``predicate`` (dict): modal の record と AND 一致比較する selector
-          （``class`` / ``object_name`` / ``title`` を主に想定）
+          （``class`` / ``object_name`` / ``title`` を主に想定。C++ が作って
+          sip が基底の型で包んだ窓は ``class_inherits``、#38）
         - ``action`` (str): ``"accept"`` / ``"reject"`` / ``"close"`` / ``"button"``
         - ``once`` (bool, optional): True で 1 度発火したら自動 unregister
         - ``button`` (str, optional): ``action="button"`` で押すボタン。
@@ -121,6 +122,8 @@ def _modal_to_record(modal: Any, *, popup: bool = False) -> dict | None:
     record: dict = {
         "class": type(modal).__name__,
         "object_name": modal.objectName() if hasattr(modal, "objectName") else "",
+        # predicate の window / class_inherits 用（#38）
+        **qt_record(modal),
     }
     if popup:
         record["popup"] = True

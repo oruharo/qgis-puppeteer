@@ -50,6 +50,7 @@ from qgis.PyQt.QtWidgets import (
 
 from qgis_puppeteer.qgis_tools import queued
 from qgis_puppeteer.selector_match import (
+    LIVE_ONLY_KEYS,
     label_forms,
     record_matches_selector,
     resolve_with_index,
@@ -1676,6 +1677,14 @@ def _find_widget(selector: dict) -> tuple[QWidget | None, dict]:
                widget を救う。
         placeholder: Match widgets whose ``placeholderText()`` equals this value
                (Playwright ``getByPlaceholder`` 相当). LineEdit / TextEdit 等で有効。
+        window: ``True`` matches only windows (``isWindow()``), ``False`` only
+               widgets inside a window (#38).
+        class_inherits: Match objects whose Qt class is this class or inherits
+               it (``QObject.inherits()``). Unlike ``class``, it sees the C++
+               type of a widget that sip wraps as a base class (a
+               ``QgsAttributeDialog`` that Python sees as a ``QDialog``, #38).
+               ``window`` and ``class_inherits`` are not in snapshots, so the
+               snapshot-based lookups refuse them.
         index: 0-based index among matches. **If the selector matches multiple
                widgets and ``index`` is not given, ``selector_ambiguous`` is
                reported (strict mode).** Set ``index`` explicitly to opt out
@@ -1883,6 +1892,8 @@ def _collect_candidates(roots: list[QWidget], selector: dict) -> list[QWidget]:
     label_text = selector.get("label")
     # 部分一致・正規表現・role・任意の属性は、snapshot と同じ record で判定する
     extended = {k: selector[k] for k in _RECORD_KEYS if k in selector}
+    # 窓か・型の系譜は、snapshot に無いのでその場の Qt のオブジェクトで判定する（#38）
+    live_only = {k: selector[k] for k in LIVE_ONLY_KEYS if k in selector}
 
     buddy_map: dict[int, str] | None = None
     candidates: list[QWidget] = []
@@ -1913,6 +1924,8 @@ def _collect_candidates(roots: list[QWidget], selector: dict) -> list[QWidget]:
                     continue
             if extended and not record_matches_selector(_live_record(widget), extended):
                 continue
+            if live_only and not record_matches_selector(qt_record(widget), live_only):
+                continue
             candidates.append(widget)
 
         names_an_action = object_name is not None or text is not None or bool(extended)
@@ -1938,6 +1951,8 @@ def _collect_candidates(roots: list[QWidget], selector: dict) -> list[QWidget]:
                 if class_name is not None and class_name != "QAction":
                     continue
                 if extended and not record_matches_selector(_action_record(action), extended):
+                    continue
+                if live_only and not record_matches_selector(qt_record(action), live_only):
                     continue
                 candidates.append(action)
 
@@ -2019,6 +2034,25 @@ _RECORD_KEYS = ("role", "text_contains", "text_re", "attr", "title_contains")
 def _live_record(widget: QWidget) -> dict:
     """snapshot の 1 つの node と同じ形の record（子は含めない）。"""
     return _describe_widget(widget, 0, True)
+
+
+def qt_record(obj: Any) -> dict:
+    """selector の ``window`` / ``class_inherits`` を判定する record（#38）。
+
+    ``class_lineage`` は Qt のメタオブジェクトのクラス名を、自分から基底へたどった
+    もの。``QObject.inherits()`` と同じ判定で、sip が基底の型で包んだ C++ の
+    オブジェクト（``QDialog`` として見える ``QgsAttributeDialog`` など）でも、
+    本来の型の名前が入る。
+    """
+    lineage: list[str] = []
+    meta = obj.metaObject()
+    while meta is not None:
+        lineage.append(meta.className())
+        meta = meta.superClass()
+    return {
+        "is_window": isinstance(obj, QWidget) and obj.isWindow(),
+        "class_lineage": lineage,
+    }
 
 
 def _action_record(action: Any) -> dict:

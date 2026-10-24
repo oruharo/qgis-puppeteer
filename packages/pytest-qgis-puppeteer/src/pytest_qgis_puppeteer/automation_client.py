@@ -42,6 +42,7 @@ from qgis_puppeteer.client import (
 from qgis_puppeteer.hub_state import select_by_selector
 from qgis_puppeteer.protocol import ErrorCode, RejectedRegistration, Role
 from qgis_puppeteer.selector_match import (
+    check_snapshot_selector,
     label_forms,
     record_matches_selector,
     resolve_with_index,
@@ -1514,7 +1515,12 @@ def _find_in_snapshot(snapshot: dict[str, Any], selector: dict[str, Any]) -> dic
     Locator chain（``_scope_chain`` キー）: ネスト selector を順に解決し、
     最深 node の subtree 内で leaf selector を適用する（live tree 側
     `_find_widget` と semantics 一致）。
+
+    Raises:
+        LiveOnlySelectorError: snapshot に無い ``window`` / ``class_inherits`` を
+            使っている（#38）。
     """
+    check_snapshot_selector(selector)
     chain = selector.get("_scope_chain") or []
     if chain:
         leaf = {k: v for k, v in selector.items() if k != "_scope_chain"}

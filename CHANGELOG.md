@@ -8,6 +8,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`window` and `class_inherits` in selectors** (#38). No selector
+  matched every top-level window, so a test could not wait for "no window
+  is open" with `to_have_count(0)`; and `class` compares the Python type
+  name, so a window that QGIS's C++ creates, such as the attribute form
+  (`QgsAttributeDialog`), which sip wraps as a `QDialog`, could not be
+  told apart. `window: true` matches windows (`isWindow()`), and
+  `class_inherits` matches by the Qt class lineage (`QObject.inherits()`),
+  which also sees Python subclasses. Snapshots do not carry either, so
+  they work where a widget is looked up in QGIS (actions, `close()`,
+  `to_be_visible` / `to_be_hidden` / `to_be_enabled` / `to_be_disabled`,
+  `to_have_count`) and in
+  dialog handler predicates; the snapshot-based lookups raise
+  `LiveOnlySelectorError` instead of matching nothing.
+
 - **All rows of a table, tree or list can be read** (#36). Snapshots stop
   at 100 rows so that a large table does not swell every response, which
   left no way to check the content of an attribute table. `read_rows()`

@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from pytest_qgis_puppeteer import expect
+from pytest_qgis_puppeteer import LiveOnlySelectorError, expect
 from pytest_qgis_puppeteer.locator import Locator, SelectorAmbiguousError
 
 # ============================================================
@@ -425,3 +425,33 @@ class TestLocatorReadRows:
         assert name == "read_rows"
         assert params["role"] == "user"
         assert params["selector"] == {"object_name": "t"}
+
+
+class TestLiveOnlySelectorKeys:
+    """#38: window / class_inherits は snapshot に無いので、snapshot で探す確認は断る"""
+
+    _SELECTOR = {"scope": "any", "window": True, "class_inherits": "QDialog"}
+
+    def test_to_have_count_sends_them_to_the_live_lookup(self) -> None:
+        client = _FakeClient({"qgis_check_actionability": [_count_result(0)]})
+        expect(Locator(client, dict(self._SELECTOR)), poll_interval_s=0.0).to_have_count(0)
+        sent = client.calls[0][1]["selector"]
+        assert sent["window"] is True
+        assert sent["class_inherits"] == "QDialog"
+
+    def test_a_value_check_raises_at_once_instead_of_timing_out(self) -> None:
+        client = _FakeClient(
+            {
+                "qgis_check_actionability": [_act_result()],
+                "qgis_snapshot_ui": [{"active_modal": None}],
+            }
+        )
+        loc = Locator(client, {"scope": "any", "class_inherits": "QgsAttributeDialog"})
+        with pytest.raises(LiveOnlySelectorError, match="class_inherits"):
+            expect(loc, poll_interval_s=0.0).to_have_text("x", timeout_s=5.0)
+
+    def test_get_value_raises(self) -> None:
+        client = _FakeClient({"qgis_snapshot_ui": [{"active_modal": None}]})
+        outer = Locator(client, {"scope": "any", "class_inherits": "QgsAttributeDialog"})
+        with pytest.raises(LiveOnlySelectorError):
+            outer.locator({"object_name": "name"}).get_value()

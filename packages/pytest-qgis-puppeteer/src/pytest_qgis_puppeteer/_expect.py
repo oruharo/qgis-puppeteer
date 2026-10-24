@@ -40,6 +40,8 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from qgis_puppeteer.selector_match import LiveOnlySelectorError
+
 from pytest_qgis_puppeteer.locator import (
     SelectorAmbiguousError,
     _diagnostics_reason,
@@ -255,6 +257,9 @@ class _LocatorAssertions:
 
             try:
                 last_value = getter()
+            except LiveOnlySelectorError:
+                # 待っても変わらない、selector の誤り（#38）
+                raise
             except Exception as exc:  # noqa: BLE001 — getter は client.snapshot_ui を通る
                 logger.debug("getter raised in expect poll: %s", exc)
                 last_value = None

@@ -803,10 +803,29 @@ selector dict の全キー。複数キー指定は AND セマンティクス。
 | `text_re` | str | 文字の正規表現（`re.search`） |
 | `role` | str | snapshot の `role`（Qt のアクセシビリティの役割） |
 | `attr` | dict | snapshot の node の任意のキーの完全一致（`{"enabled": False}` など） |
+| `window` | bool | `True` でトップレベルの窓（`isWindow()`）だけ、`False` で窓の中の部品だけ（#38） |
+| `class_inherits` | str | Qt の型がこのクラスか、それを継承している（`QObject.inherits()`、#38）。`class` と違い、C++ が作って sip が基底の型で包んだ widget（Python からは `QDialog` に見える `QgsAttributeDialog` など）にも、Python のサブクラスにも当たる |
 
 `title_contains` / `text_contains` / `text_re` / `role` / `attr` は、snapshot の node と
 同じ形の情報で判定する。`expect` や `wait_for_widget`（snapshot で探す）でも、`click()`
 や `fill()`（その場で探す）でも同じ結果になる。
+
+`window` と `class_inherits` は snapshot の node に無い情報なので、その場で探す経路
+（操作、`close()`、`expect` の `to_be_visible` / `to_be_hidden` / `to_be_enabled` /
+`to_be_disabled` / `to_have_count`）だけで使える。snapshot で探す API（`snapshot()` /
+`get_text()` / `get_value()` / `wait_for_widget`、`expect` の `to_have_text` /
+`to_contain_text` / `to_have_value` / `to_be_checked` / `to_have_row_count`）に渡すと
+`LiveOnlySelectorError` になる（黙って当たらないのではなく）。
+
+```python
+# どの窓も開いていない（leftover_state の dialogs と同じ範囲）
+expect(qgis.locator({"scope": "any", "window": True, "class_inherits": "QDialog"})).to_have_count(0)
+
+# QGIS が開いた属性フォームを閉じる
+qgis.locator({"scope": "any", "class_inherits": "QgsAttributeDialog"}).close()
+```
+
+dialog handler の predicate でも `window` / `class_inherits` を使える。
 
 ### スコープ・絞り込みキー
 

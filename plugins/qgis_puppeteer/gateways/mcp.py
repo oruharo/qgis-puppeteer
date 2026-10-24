@@ -177,7 +177,8 @@ SelectorArg = Annotated[
         description=(
             "対象ウィジェットの指定。照合キーは object_name（最も確実）/ text / class / "
             "title / title_contains / label / placeholder / role / text_contains / text_re / "
-            "attr。"
+            "attr / window（true でトップレベルの窓だけ）/ class_inherits（Qt の型の系譜。"
+            "class では QDialog に見える C++ の QgsAttributeDialog などにも当たる）。"
             "絞り込みは scope（既定 'modal'、ほかに 'active_window' / 'popup' / 'any'）/ "
             "root_object_name / index。qgis_snapshot_ui の出力から組み立てる。"
             "scope='popup' は開いているメニュー（QMenu.exec() など）で、項目は "

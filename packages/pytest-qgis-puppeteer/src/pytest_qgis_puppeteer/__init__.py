@@ -5,6 +5,8 @@ Public API:
     - ``Locator`` — Playwright 流の widget locator（実体は ``locator`` モジュール）
     - ``WidgetNotActionableError`` / ``SelectorAmbiguousError`` — Locator が
       上げる例外
+    - ``LiveOnlySelectorError`` — snapshot で探す API に、snapshot では判定
+      できない selector のキー（``window`` / ``class_inherits``）を渡した
     - ``WidgetOperationError`` — click / 値の設定が失敗した（入った値が違う
       ことも含む）ときに上がる例外
     - ``QgisLeftoverWarning`` — ``qgis_leftover_warn`` の項目で、テストのあとに
@@ -26,6 +28,7 @@ from qgis_puppeteer.client import (
     NonSerializableResultError,
     WorkerCodeError,
 )
+from qgis_puppeteer.selector_match import LiveOnlySelectorError
 
 from pytest_qgis_puppeteer._expect import expect
 from pytest_qgis_puppeteer._leftover import QgisLeftoverWarning
@@ -53,6 +56,7 @@ __all__ = [
     "ConfirmationRequiredError",
     "E2EAutomationClient",
     "ExecResult",
+    "LiveOnlySelectorError",
     "Locator",
     "NonSerializableResultError",
     "SelectorAmbiguousError",

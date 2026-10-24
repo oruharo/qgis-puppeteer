@@ -133,3 +133,77 @@ def test_title_is_only_the_title_a_person_sees(app: Any) -> None:
         main.deleteLater()
         QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
         app.processEvents()
+
+
+def test_window_matches_only_windows(dialog: Any) -> None:
+    """#38"""
+    assert _name({"window": True}) == "keys"
+    assert _name({"class": "QPushButton", "window": True}) is None
+    assert _name({"object_name": "save", "window": False}) == "save"
+
+
+def test_window_and_class_inherits_count_every_open_dialog(dialog: Any) -> None:
+    """#38: どの窓も開いていない、を数える指定。窓の中の部品と、窓でない部品は数えない。"""
+    child = QtWidgets.QMessageBox(dialog)  # 親のある窓（topLevelWidgets にも親の子にも出る）
+    child.setObjectName("child")
+    child.setModal(False)
+    child.show()
+    inner = QtWidgets.QDialog(dialog)  # QDialog だが窓でない（埋め込み）
+    # コンストラクタのフラグが 0 だと QDialog は Qt::Dialog を足すので、あとで外す
+    inner.setWindowFlags(QtCore.Qt.Widget)
+    inner.setObjectName("inner")
+    assert not inner.isWindow()
+    QApplication.processEvents()
+    try:
+        selector = {"scope": "any", "window": True, "class_inherits": "QDialog"}
+        widget, diagnostics = _find_widget(selector)
+        assert widget is None
+        assert diagnostics["reason"] == "selector_ambiguous"
+        # 親のある窓を、トップレベルとしてと親の子としての 2 回は数えない
+        assert diagnostics["match_count"] == 2
+        assert {c["object_name"] for c in diagnostics["candidates"]} == {"keys", "child"}
+    finally:
+        child.close()
+        child.deleteLater()
+
+
+class _PythonDialog(QtWidgets.QDialog):
+    pass
+
+
+def test_class_inherits_matches_a_python_subclass_by_either_name(app: Any) -> None:
+    """#38"""
+    dlg = _PythonDialog()
+    dlg.setObjectName("py")
+    dlg.show()
+    QApplication.processEvents()
+    try:
+
+        def find(selector: dict) -> Any:
+            widget, _ = _find_widget({"scope": "any", "root_object_name": "py", **selector})
+            return widget
+
+        assert find({"class_inherits": "_PythonDialog"}) is dlg
+        assert find({"class_inherits": "QDialog", "window": True}) is dlg
+        assert find({"class_inherits": "QMessageBox"}) is None
+    finally:
+        dlg.close()
+        dlg.deleteLater()
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        app.processEvents()
+
+
+def test_class_inherits_sees_a_cpp_type_that_python_sees_as_its_base(dialog: Any) -> None:
+    """#38: C++ だけの型（sip は基底の型で包む）は class では当たらず、class_inherits で当たる。
+
+    QComboBox のポップアップの入れ物は Qt の内部の型 QComboBoxPrivateContainer で、
+    Python からは QFrame に見える（QGIS の QgsAttributeDialog が QDialog に見えるのと同じ）。
+    """
+    combo = QtWidgets.QComboBox(dialog)
+    container = combo.view().parentWidget()
+    assert type(container).__name__ == "QFrame"
+    assert _name({"class": "QComboBoxPrivateContainer"}) is None
+    widget, _ = _find_widget(
+        {"scope": "any", "root_object_name": "keys", "class_inherits": "QComboBoxPrivateContainer"}
+    )
+    assert widget is container

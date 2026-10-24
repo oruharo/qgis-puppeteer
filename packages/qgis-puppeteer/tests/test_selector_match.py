@@ -6,8 +6,12 @@
 
 from __future__ import annotations
 
+import pytest
 from qgis_puppeteer.selector_match import (
+    LiveOnlySelectorError,
+    check_snapshot_selector,
     label_forms,
+    live_only_keys,
     record_matches_selector,
     resolve_with_index,
 )
@@ -264,3 +268,49 @@ def test_title_contains_is_a_partial_match_on_the_title() -> None:
     assert record_matches_selector(rec, {"title_contains": "プロパティ"}) is True
     assert record_matches_selector(rec, {"title_contains": "属性"}) is False
     assert record_matches_selector({"class": "QDialog"}, {"title_contains": "x"}) is False
+
+
+class TestWindowAndClassInherits:
+    """#38"""
+
+    def test_window_matches_is_window(self) -> None:
+        dialog = {"class": "QDialog", "is_window": True}
+        button = {"class": "QPushButton", "is_window": False}
+        assert record_matches_selector(dialog, {"window": True}) is True
+        assert record_matches_selector(button, {"window": True}) is False
+        assert record_matches_selector(button, {"window": False}) is True
+        assert record_matches_selector(dialog, {"window": False}) is False
+
+    def test_class_inherits_looks_at_the_lineage(self) -> None:
+        # sip が QDialog として包んだ C++ の QgsAttributeDialog
+        form = {"class": "QDialog", "class_lineage": ["QgsAttributeDialog", "QDialog", "QWidget"]}
+        assert record_matches_selector(form, {"class_inherits": "QgsAttributeDialog"}) is True
+        assert record_matches_selector(form, {"class_inherits": "QDialog"}) is True
+        assert record_matches_selector(form, {"class": "QgsAttributeDialog"}) is False
+        assert record_matches_selector(form, {"class_inherits": "QMessageBox"}) is False
+
+    def test_a_record_without_the_fields_does_not_match(self) -> None:
+        # snapshot の node には無い（呼び出し側が check_snapshot_selector で止める）
+        node = {"class": "QDialog"}
+        assert record_matches_selector(node, {"window": True}) is False
+        assert record_matches_selector(node, {"window": False}) is False
+        assert record_matches_selector(node, {"class_inherits": "QDialog"}) is False
+
+
+class TestCheckSnapshotSelector:
+    """#38"""
+
+    def test_live_only_keys_are_refused(self) -> None:
+        with pytest.raises(LiveOnlySelectorError, match="class_inherits"):
+            check_snapshot_selector({"scope": "any", "class_inherits": "QDialog"})
+        with pytest.raises(LiveOnlySelectorError, match="window"):
+            check_snapshot_selector({"window": True})
+
+    def test_chain_steps_are_checked(self) -> None:
+        selector = {"object_name": "ok", "_scope_chain": [{"class_inherits": "QgsAttributeDialog"}]}
+        assert live_only_keys(selector) == ["class_inherits"]
+        with pytest.raises(LiveOnlySelectorError):
+            check_snapshot_selector(selector)
+
+    def test_other_keys_pass(self) -> None:
+        check_snapshot_selector({"class": "QDialog", "title_contains": "属性"})
