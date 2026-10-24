@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import warnings
 from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -90,6 +91,33 @@ class WidgetOperationError(RuntimeError):
         self.widget = result.get("widget")
         details = {k: v for k, v in result.items() if k not in ("success", "error")}
         super().__init__(f"{command} failed: {self.error} {details}")
+
+
+class QgisUnusedDialogHandlerWarning(UserWarning):
+    """``once`` の dialog handler が、一度も確認に答えずに外された（#40）。
+
+    来るはずの確認が来なかった（predicate が当たらなかった、確認の出る操作が
+    動かなかった）ことを知らせる。``-W error::...`` で失敗にもできる。
+    """
+
+
+@dataclass(frozen=True)
+class _DialogHandlerEntry:
+    """テストの終わりに外す handler の記録（#40）。"""
+
+    name: str
+    instance: str | None
+    predicate: dict[str, Any]
+    button: str | None
+    once: bool
+
+
+def _unused_message(entry: _DialogHandlerEntry, where: str) -> str:
+    button = f", button={entry.button!r}" if entry.button is not None else ""
+    return (
+        f"dialog handler {entry.name!r} (predicate={entry.predicate!r}{button}) answered no "
+        f"dialog before the end of {where}"
+    )
 
 
 def _raise_for_widget_result(command: str, result: Any) -> None:
@@ -208,6 +236,10 @@ class E2EAutomationClient:
         # への記録を **skip** する（screenshot 取得自体は qgis_screenshot を内部で
         # 呼ぶため、recorder に二重記録すると jsonl が膨らむ + 再帰条件が複雑になる）。
         self._capture_in_progress = False
+        # register_dialog_handler で登録した、テストの終わりに外す handler（#40）。
+        # キーは (instance, name)。persist=True のものは入れない
+        self._dialog_handlers: dict[tuple[str | None, str], _DialogHandlerEntry] = {}
+        self._dialog_handler_count = 0
 
     # ------------------------------------------------------------
     # ライフサイクル
@@ -1108,6 +1140,133 @@ class E2EAutomationClient:
     def get_layer_info(self, layer_name: str, *, instance: str | None = None) -> dict[str, Any]:
         """`qgis_get_layer_info` を呼ぶ。"""
         return self.call("qgis_get_layer_info", {"layer_name": layer_name}, instance=instance)
+
+    # ------------------------------------------------------------
+    # 確認に答える handler（#40）
+    # ------------------------------------------------------------
+
+    def register_dialog_handler(
+        self,
+        predicate: dict[str, Any],
+        *,
+        action: str = "button",
+        button: str | None = None,
+        once: bool = True,
+        name: str | None = None,
+        persist: bool = False,
+        instance: str | None = None,
+    ) -> str:
+        """出てくる確認（モーダルの窓・ポップアップ）に自動で答える handler を登録する。
+
+        ``qgis_register_dialog_handler`` を呼ぶ。``predicate`` はモーダルに当てる
+        selector（``class`` / ``object_name`` / ``title`` / ``class_inherits`` など）。
+        ``action="button"`` は ``button`` のボタンを押す（``"Yes"`` / ``"No"`` /
+        ``"Ok"`` などの標準ボタン名か、ボタンの文言）。ほかに ``"accept"`` /
+        ``"reject"`` / ``"close"``。``once=True`` は 1 度答えたら外れる。
+
+        テスト中に登録したものは、``qgis`` fixture の後片付けで外す。そのとき残っていた
+        ``once`` の handler（来るはずの確認が来なかった）は
+        :class:`QgisUnusedDialogHandlerWarning` で知らせる。``persist=True`` の
+        handler は外さない（session の fixture で登録するもの。QGIS を起こし直すと消える）。
+
+        Returns:
+            登録した名前（``name`` を省くと自動で付ける）。
+
+        Raises:
+            ValueError: QGIS 側が登録を断った（``button`` が無い、知らない ``action`` など）。
+        """
+        if name is None:
+            self._dialog_handler_count += 1
+            name = f"pytest-dialog-handler-{self._dialog_handler_count}"
+        params: dict[str, Any] = {
+            "name": name,
+            "predicate": dict(predicate),
+            "action": action,
+            "once": once,
+        }
+        if button is not None:
+            params["button"] = button
+        result = self.call("qgis_register_dialog_handler", params, instance=instance)
+        if not isinstance(result, dict) or result.get("success") is not True:
+            raise ValueError(f"qgis_register_dialog_handler failed: {result!r}")
+        key = (self._resolve_instance(instance), name)
+        if persist:
+            self._dialog_handlers.pop(key, None)
+        else:
+            self._dialog_handlers[key] = _DialogHandlerEntry(
+                name=name, instance=key[0], predicate=dict(predicate), button=button, once=once
+            )
+        return name
+
+    def unregister_dialog_handler(self, name: str, *, instance: str | None = None) -> bool:
+        """``name`` の handler を外す。
+
+        登録されていれば True（``once`` で使い切っていれば False）。
+        """
+        self._dialog_handlers.pop((self._resolve_instance(instance), name), None)
+        result = self.call("qgis_unregister_dialog_handler", {"name": name}, instance=instance)
+        return isinstance(result, dict) and result.get("success") is True
+
+    def list_dialog_handlers(self, *, instance: str | None = None) -> list[dict[str, Any]]:
+        """登録されている handler の一覧。
+
+        各要素は ``name`` / ``predicate`` / ``action`` / ``once`` / ``button``。
+        """
+        result = self.call("qgis_list_dialog_handlers", {}, instance=instance)
+        handlers = result.get("handlers") if isinstance(result, dict) else None
+        return list(handlers) if isinstance(handlers, list) else []
+
+    @contextmanager
+    def dialog_handler(
+        self,
+        predicate: dict[str, Any],
+        *,
+        action: str = "button",
+        button: str | None = None,
+        once: bool = True,
+        name: str | None = None,
+        instance: str | None = None,
+    ) -> Iterator[str]:
+        """``with`` の間だけ handler を登録する。抜けるときに外す。
+
+        ``once`` の handler が抜けるときまで使われなかったら（来るはずの確認が
+        来なかった）、:class:`QgisUnusedDialogHandlerWarning` で知らせる。
+        """
+        registered = self.register_dialog_handler(
+            predicate, action=action, button=button, once=once, name=name, instance=instance
+        )
+        entry = self._dialog_handlers.get((self._resolve_instance(instance), registered))
+        try:
+            yield registered
+        finally:
+            if self.unregister_dialog_handler(registered, instance=instance) and once:
+                assert entry is not None
+                warnings.warn(
+                    QgisUnusedDialogHandlerWarning(_unused_message(entry, "the with block")),
+                    stacklevel=3,
+                )
+
+    def _release_dialog_handlers(self) -> list[_DialogHandlerEntry]:
+        """テストで登録した handler を外し、使われずに残っていた ``once`` の handler を返す。
+
+        ``qgis`` fixture の後片付けから呼ぶ。外せなかった（QGIS が落ちたなど）ものは
+        記録だけ捨てる。
+        """
+        unused: list[_DialogHandlerEntry] = []
+        entries = list(self._dialog_handlers.values())
+        self._dialog_handlers.clear()
+        for entry in entries:
+            try:
+                found = self.unregister_dialog_handler(entry.name, instance=entry.instance)
+            except Exception:  # noqa: BLE001 - 後片付け。QGIS がもう居ないこともある
+                logger.warning("could not unregister dialog handler %r", entry.name, exc_info=True)
+                continue
+            if found and entry.once:
+                unused.append(entry)
+        return unused
+
+    def _resolve_instance(self, instance: str | None) -> str | None:
+        return instance if instance is not None else self._default_instance
 
     def check_actionability(
         self, selector: dict[str, Any], *, instance: str | None = None

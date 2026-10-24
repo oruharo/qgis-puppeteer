@@ -11,6 +11,8 @@ Public API:
       ことも含む）ときに上がる例外
     - ``QgisLeftoverWarning`` — ``qgis_leftover_warn`` の項目で、テストのあとに
       状態が残っていたときの警告
+    - ``QgisUnusedDialogHandlerWarning`` — ``once`` の dialog handler が、一度も
+      確認に答えずに外された
     - ``E2EAutomationClient`` — 同期版 AutomationClient ラッパ
     - ``ExecResult`` — ``execute_python_detailed`` の typed 戻り値
     - ``WorkerCodeError`` / ``ConfirmationRequiredError`` /
@@ -36,6 +38,7 @@ from pytest_qgis_puppeteer._message_check import unexpected_messages
 from pytest_qgis_puppeteer.automation_client import (
     E2EAutomationClient,
     ExecResult,
+    QgisUnusedDialogHandlerWarning,
     WidgetOperationError,
 )
 from pytest_qgis_puppeteer.locator import (
@@ -71,5 +74,6 @@ __all__ = [
     "unexpected_messages",
     "QgisLeftoverWarning",
     "QgisPluginMismatchWarning",
+    "QgisUnusedDialogHandlerWarning",
     "spawn_qgis_fixture",
 ]

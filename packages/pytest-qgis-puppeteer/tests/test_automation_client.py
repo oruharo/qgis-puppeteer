@@ -25,6 +25,7 @@ from pytest_qgis_puppeteer.automation_client import (
     E2EAutomationClient,
     ModalBlockedError,
     NonSerializableResultError,
+    QgisUnusedDialogHandlerWarning,
     RequestError,
     WidgetOperationError,
     WorkerCodeError,
@@ -1607,3 +1608,136 @@ class TestRecentMessages:
         e2e, inner = _make_client()
         e2e.clear_recent_messages()
         inner.call.assert_awaited_once_with("qgis_clear_recent_messages", {}, instance=None)
+
+
+class TestDialogHandlers:
+    """#40: 確認に答える handler のクライアントの口"""
+
+    _OK = {"success": True, "registered_count": 1}
+
+    def test_register_sends_the_defaults_and_names_the_handler(self) -> None:
+        e2e, inner = _make_client([self._OK, self._OK])
+        first = e2e.register_dialog_handler({"class": "QMessageBox"}, button="Yes")
+        second = e2e.register_dialog_handler({"title": "保存"}, action="reject", once=False)
+        assert first != second
+        sent = [c.args[:2] for c in inner.call.await_args_list]
+        assert sent == [
+            (
+                "qgis_register_dialog_handler",
+                {
+                    "name": first,
+                    "predicate": {"class": "QMessageBox"},
+                    "action": "button",
+                    "once": True,
+                    "button": "Yes",
+                },
+            ),
+            (
+                "qgis_register_dialog_handler",
+                {"name": second, "predicate": {"title": "保存"}, "action": "reject", "once": False},
+            ),
+        ]
+
+    def test_a_refused_registration_raises(self) -> None:
+        e2e, _ = _make_client([{"success": False, "error": "invalid_argument", "message": "x"}])
+        with pytest.raises(ValueError, match="invalid_argument"):
+            e2e.register_dialog_handler({"class": "QMessageBox"})  # button が無い
+
+    def test_release_unregisters_and_returns_unused_once_handlers(self) -> None:
+        e2e, inner = _make_client(
+            [
+                self._OK,  # register a (once)
+                self._OK,  # register b (once)
+                self._OK,  # register c (once=False)
+                self._OK,  # register d (persist)
+                {"success": False},  # unregister a: もう無い（答えて外れた）
+                {"success": True},  # unregister b: 残っていた → 使われなかった
+                {"success": True},  # unregister c: once でないので知らせない
+            ]
+        )
+        e2e.register_dialog_handler({"class": "A"}, button="Yes", name="a")
+        e2e.register_dialog_handler({"class": "B"}, button="No", name="b")
+        e2e.register_dialog_handler({"class": "C"}, button="Ok", name="c", once=False)
+        e2e.register_dialog_handler({"class": "D"}, button="Ok", name="d", persist=True)
+        unused = e2e._release_dialog_handlers()
+        assert [entry.name for entry in unused] == ["b"]
+        unregistered = [
+            c.args[1]["name"]
+            for c in inner.call.await_args_list
+            if c.args[0] == "qgis_unregister_dialog_handler"
+        ]
+        assert unregistered == ["a", "b", "c"]  # persist の d は外さない
+        assert e2e._release_dialog_handlers() == []  # 2 度は外さない
+
+    def test_an_explicit_unregister_is_not_released_again(self) -> None:
+        e2e, inner = _make_client([self._OK, {"success": True}])
+        name = e2e.register_dialog_handler({"class": "A"}, button="Yes")
+        assert e2e.unregister_dialog_handler(name) is True
+        assert e2e._release_dialog_handlers() == []
+        assert inner.call.await_count == 2
+
+    def test_release_survives_a_qgis_that_is_gone(self) -> None:
+        e2e, _ = _make_client([self._OK, RuntimeError("connection lost")])
+        e2e.register_dialog_handler({"class": "A"}, button="Yes")
+        assert e2e._release_dialog_handlers() == []
+
+    def test_the_with_block_unregisters_and_warns_when_unused(self) -> None:
+        e2e, inner = _make_client([self._OK, {"success": True}, self._OK, {"success": False}])
+        with (
+            pytest.warns(QgisUnusedDialogHandlerWarning, match="the with block"),
+            e2e.dialog_handler({"class": "QMessageBox"}, button="Yes") as name,
+        ):
+            assert name.startswith("pytest-dialog-handler-")
+        # 答えて外れていれば知らせない
+        with e2e.dialog_handler({"class": "QMessageBox"}, button="Yes"):
+            pass
+        assert e2e._release_dialog_handlers() == []
+        assert inner.call.await_args_list[1].args[0] == "qgis_unregister_dialog_handler"
+
+    def test_handlers_are_kept_per_instance(self) -> None:
+        e2e, inner = _make_client([self._OK, {"success": True}])
+        e2e.use_instance("fresh-1")
+        e2e.register_dialog_handler({"class": "A"}, button="Yes", name="a")
+        e2e.use_instance(None)
+        e2e._release_dialog_handlers()
+        assert inner.call.await_args_list[1].kwargs["instance"] == "fresh-1"
+
+    def test_list_dialog_handlers(self) -> None:
+        handlers = [{"name": "a", "predicate": {}, "action": "close", "once": True, "button": None}]
+        e2e, _ = _make_client([{"handlers": handlers}])
+        assert e2e.list_dialog_handlers() == handlers
+
+
+class TestReleaseDialogHandlersAtTheEndOfATest:
+    """#40: qgis fixture の後片付けで外し、使われなかった once を警告にする"""
+
+    class _Item:
+        def __init__(self, *, failed: bool) -> None:
+            from pytest_qgis_puppeteer.plugin import _CALL_FAILED_KEY
+
+            self.nodeid = "test_x.py::test_save"
+            self.stash = pytest.Stash()
+            self.stash[_CALL_FAILED_KEY] = failed
+
+    def _client(self) -> E2EAutomationClient:
+        ok = {"success": True}
+        e2e, _ = _make_client([ok, ok, {"success": True}, {"success": False}])
+        e2e.register_dialog_handler({"class": "QMessageBox"}, button="No", name="unused")
+        e2e.register_dialog_handler({"class": "QMessageBox"}, button="Yes", name="used")
+        return e2e
+
+    def test_an_unused_once_handler_warns_with_the_test_name(self) -> None:
+        from pytest_qgis_puppeteer.plugin import _release_dialog_handlers
+
+        with pytest.warns(QgisUnusedDialogHandlerWarning) as record:
+            _release_dialog_handlers(self._Item(failed=False), self._client())
+        assert len(record) == 1
+        message = str(record[0].message)
+        assert message.startswith("test_x.py::test_save: dialog handler 'unused'")
+        assert "button='No'" in message
+
+    def test_a_failed_test_does_not_warn(self, recwarn: pytest.WarningsRecorder) -> None:
+        from pytest_qgis_puppeteer.plugin import _release_dialog_handlers
+
+        _release_dialog_handlers(self._Item(failed=True), self._client())
+        assert not [w for w in recwarn if w.category is QgisUnusedDialogHandlerWarning]

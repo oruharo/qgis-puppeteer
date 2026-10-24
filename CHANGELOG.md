@@ -8,6 +8,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The pytest client answers dialogs** (#40). Dialog handlers had MCP
+  tools but no client methods, so tests sent `qgis_register_dialog_handler`
+  themselves, named each handler, and a handler they forgot to remove
+  stayed for the next test. `register_dialog_handler(predicate, button=...)`
+  registers one (by default it presses `button` once) and returns its name,
+  which is generated when not given; `unregister_dialog_handler(name)`,
+  `list_dialog_handlers()` and `with qgis.dialog_handler(...)` go with it.
+  The `qgis` fixture removes the handlers a test registered when the test's
+  fixtures have been torn down, and a `once` handler that answered no
+  dialog (the dialog the test expected did not come) raises
+  `QgisUnusedDialogHandlerWarning`, as does one left at the end of a
+  `with` block. `persist=True` keeps a handler across tests.
+
 - **`object_name_re` in selectors** (#39). `object_name` matched only the
   whole name, while QGIS names some windows by a pattern (the attribute
   form opened for a feature is `featureactiondlg:<layer>:<feature id>`).

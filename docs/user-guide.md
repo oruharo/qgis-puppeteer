@@ -1397,12 +1397,7 @@ action は Qt のイベントループに積んで行う（action の中でホ�
 `action="button"` を使う:
 
 ```python
-automation_client.call("qgis_register_dialog_handler", {
-    "name": "confirm-delete",
-    "predicate": {"title": "削除の確認"},
-    "action": "button",
-    "button": "Yes",
-})
+qgis.register_dialog_handler({"title": "削除の確認"}, button="Yes")
 ```
 
 - `QMessageBox` のほか、`QDialogButtonBox` を持つダイアログでも押せる
@@ -1422,14 +1417,9 @@ click が返らず、時間切れになる（操作は QGIS の GUI スレッド
 handler で答える:
 
 ```python
-automation_client.call("qgis_register_dialog_handler", {
-    "name": "confirm-delete",
-    "predicate": {"title": "削除の確認"},
-    "action": "button",
-    "button": "Yes",
-    "once": True,
-})
-qgis.locator({"object_name": "deleteButton"}).click(wait=False)
+with qgis.dialog_handler({"title": "削除の確認"}, button="Yes"):
+    qgis.locator({"object_name": "deleteButton"}).click(wait=False)
+    expect(qgis.locator({"scope": "any", "title": "削除の確認"})).to_have_count(0)
 ```
 
 - `wait=False` を受けるもの: `click_widget` / `set_widget_value` /
@@ -1447,19 +1437,48 @@ qgis.locator({"object_name": "deleteButton"}).click(wait=False)
 - `qgis_execute_python` のコードから確認を出す処理を呼ぶときも同じで、
   コードの中で `QTimer.singleShot(0, 処理)` と積めば、確認を待たずに返る
 
-### pytest からの利用例
+### pytest からの利用例（#40）
+
+pytest のクライアント（`qgis` / `automation_client`）は、RPC を包んだ口を持つ:
+
+| メソッド | 用途 |
+|---|---|
+| `register_dialog_handler(predicate, *, action="button", button=None, once=True, name=None, persist=False)` | 登録して名前を返す（`name` を省くと自動で付ける） |
+| `unregister_dialog_handler(name)` | 外す。登録されていれば `True`（`once` で使い切っていれば `False`） |
+| `list_dialog_handlers()` | 一覧 |
+| `with dialog_handler(predicate, ...)` | `with` の間だけ登録する |
+
+既定は「1 度だけ、`button` のボタンを押す」。QGIS 側が登録を断ったら（`button` が無い、
+知らない `action` など）`ValueError`。
+
+```python
+def test_delete(qgis):
+    qgis.register_dialog_handler({"class": "QMessageBox", "title": "削除の確認"}, button="Yes")
+    qgis.locator({"object_name": "deleteButton"}).click(wait=False)
+```
+
+テスト中に登録した handler は、`qgis` fixture の後片付け（テストの fixture の後片付けの
+あと）で外すので、次のテストに持ち越さない。そのとき残っていた `once` の handler は、
+来るはずの確認が来なかったということなので、`QgisUnusedDialogHandlerWarning` で知らせる
+（pytest の警告の一覧に出る。`-W error::pytest_qgis_puppeteer.QgisUnusedDialogHandlerWarning`
+で失敗にできる）。`with dialog_handler(...)` も、抜けるときまで使われなかった `once` の
+handler は同じ警告にする。落ちたテストでは知らせない。
+
+テストをまたいで残す handler（session の fixture で登録するもの）は `persist=True` にする。
+後片付けで外さないので、要らなくなったら自分で外す。QGIS を起こし直すと消える:
 
 ```python
 @pytest.fixture(scope="session", autouse=True)
 def auto_dismiss_bad_layers(automation_client):
-    automation_client.call("qgis_register_dialog_handler", {
-        "name": "bad-layers",
-        "predicate": {"title": "利用できないレイヤを処理する"},
-        "action": "accept",
-    })
+    name = automation_client.register_dialog_handler(
+        {"title": "利用できないレイヤを処理する"}, action="accept", once=False, persist=True
+    )
     yield
-    automation_client.call("qgis_clear_dialog_handlers", {})
+    automation_client.unregister_dialog_handler(name)
 ```
+
+`qgis` fixture を使わず `automation_client` だけを使うテストで登録したものは、後片付けで
+外さない（自分で外すか、`with` を使う）。
 
 ### Claude Desktop からの利用例
 
@@ -1488,12 +1507,7 @@ handler だけが答える（`{}` などの何にでも当たる handler が、�
 - `action="close"`: メニューを閉じる（`exec()` は何も返さない）
 
 ```python
-automation_client.call("qgis_register_dialog_handler", {
-    "name": "layer-menu",
-    "predicate": {"popup": True, "title": "レイヤ"},
-    "action": "button",
-    "button": "削除",
-})
+qgis.register_dialog_handler({"popup": True, "title": "レイヤ"}, button="削除")
 ```
 
 ### ネイティブのファイルダイアログ
@@ -1511,13 +1525,7 @@ Qt のダイアログなら、ファイル名を入れて「開く」を押せ�
 # ファイルを選ぶダイアログを開く操作（exec() で止まるので wait=False）
 qgis.locator({"object_name": "importButton"}).click(wait=False)
 qgis.locator({"object_name": "fileNameEdit"}).fill("data.gpkg")  # QFileDialog の欄
-automation_client.call("qgis_register_dialog_handler", {
-    "name": "open-file",
-    "predicate": {"class": "QFileDialog"},
-    "action": "button",
-    "button": "Open",  # 保存のダイアログなら "Save"
-    "once": True,
-})
+qgis.register_dialog_handler({"class": "QFileDialog"}, button="Open")  # 保存なら "Save"
 ```
 
 ファイル名の欄は、そのダイアログのフォルダからの相対か、絶対パス。

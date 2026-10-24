@@ -80,7 +80,11 @@ from pytest_qgis_puppeteer._environments import (
     resolve_qgis_setting,
     strip_env_args,
 )
-from pytest_qgis_puppeteer.automation_client import E2EAutomationClient
+from pytest_qgis_puppeteer.automation_client import (
+    E2EAutomationClient,
+    QgisUnusedDialogHandlerWarning,
+    _unused_message,
+)
 
 logger = logging.getLogger("pytest_qgis_puppeteer.plugin")
 
@@ -1853,6 +1857,8 @@ def qgis(
         # その準備より前に読める。fixture が作って片付けたものを「消えた」と出さない
         _take_leftover_baseline(request.node, automation_client)
         yield automation_client
+        # テストの fixture の後片付け（qgis に依存するので先に済む）のあとに外す（#40）
+        _release_dialog_handlers(request.node, automation_client)
         return
 
     # dev mode 下で fresh_qgis は意味を成さない（既存 QGIS を再起動できない）
@@ -1926,8 +1932,27 @@ def qgis(
         try:
             yield automation_client
         finally:
+            # fresh の QGIS が止まる前に外す（#40）
+            _release_dialog_handlers(request.node, automation_client)
             automation_client.use_instance(saved_default)
             active_fresh.pop(request.node.nodeid, None)
+
+
+def _release_dialog_handlers(item: pytest.Item, client: E2EAutomationClient) -> None:
+    """テスト中に ``register_dialog_handler`` で登録した handler を外す（#40）。
+
+    次のテストに持ち越さない。使われずに残っていた ``once`` の handler は
+    :class:`QgisUnusedDialogHandlerWarning` で知らせる（落ちたテストは途中で止まった
+    かもしれないので、知らせない）。
+    """
+    unused = client._release_dialog_handlers()
+    if not unused or item.stash.get(_CALL_FAILED_KEY, False):
+        return
+    for entry in unused:
+        warnings.warn(
+            QgisUnusedDialogHandlerWarning(f"{item.nodeid}: {_unused_message(entry, 'the test')}"),
+            stacklevel=1,
+        )
 
 
 def _capture_startup_messages(
