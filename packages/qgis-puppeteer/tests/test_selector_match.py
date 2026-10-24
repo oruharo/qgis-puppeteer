@@ -314,3 +314,14 @@ class TestCheckSnapshotSelector:
 
     def test_other_keys_pass(self) -> None:
         check_snapshot_selector({"class": "QDialog", "title_contains": "属性"})
+
+
+def test_object_name_re_searches_the_object_name() -> None:
+    """#39"""
+    form = {"class": "QDialog", "object_name": "featureactiondlg:建物_a1b2:12"}
+    assert record_matches_selector(form, {"object_name_re": r"^featureactiondlg:"}) is True
+    assert record_matches_selector(form, {"object_name_re": r":12$"}) is True
+    assert record_matches_selector(form, {"object_name_re": r"^layerprops"}) is False
+    assert record_matches_selector({"class": "QDialog"}, {"object_name_re": "x"}) is False
+    # 不正な正規表現は当たらない（text_re と同じ）
+    assert record_matches_selector(form, {"object_name_re": "("}) is False

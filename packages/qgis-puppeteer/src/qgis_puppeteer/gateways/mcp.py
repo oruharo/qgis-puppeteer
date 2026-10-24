@@ -175,7 +175,8 @@ SelectorArg = Annotated[
     dict[str, Any],
     Field(
         description=(
-            "対象ウィジェットの指定。照合キーは object_name（最も確実）/ text / class / "
+            "対象ウィジェットの指定。照合キーは object_name（最も確実）/ object_name_re / "
+            "text / class / "
             "title / title_contains / label / placeholder / role / text_contains / text_re / "
             "attr / window（true でトップレベルの窓だけ）/ class_inherits（Qt の型の系譜。"
             "class では QDialog に見える C++ の QgsAttributeDialog などにも当たる）。"

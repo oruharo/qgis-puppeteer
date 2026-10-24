@@ -8,6 +8,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`object_name_re` in selectors** (#39). `object_name` matched only the
+  whole name, while QGIS names some windows by a pattern (the attribute
+  form opened for a feature is `featureactiondlg:<layer>:<feature id>`).
+  `object_name_re` searches the name with a regular expression, as
+  `text_re` does the text, in the live resolution and in snapshots.
+
 - **`window` and `class_inherits` in selectors** (#38). No selector
   matched every top-level window, so a test could not wait for "no window
   is open" with `to_have_count(0)`; and `class` compares the Python type

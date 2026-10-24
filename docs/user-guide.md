@@ -793,6 +793,7 @@ selector dict の全キー。複数キー指定は AND セマンティクス。
 | キー | 型 | 用途 |
 |---|---|---|
 | `object_name` | str | Qt `objectName()` 完全一致。**最も推奨**（一意性が高い） |
+| `object_name_re` | str | `objectName()` の正規表現（`re.search`、#39）。QGIS が決まった形で名前を付ける窓（属性フォームの `featureactiondlg:<レイヤ>:<地物の ID>` など）を名前の一部で当てる |
 | `text` | str | ボタン / ラベル / QAction の `text()` 完全一致 |
 | `class` | str | Python クラス名完全一致（`"QPushButton"` 等） |
 | `title` | str | 人に見えている題名の完全一致（#37）。窓・ドック・`QMdiSubWindow` は `windowTitle()`、メニューは `title()`、`QGroupBox` は枠の `title()`。窓でない部品の `windowTitle()`（Designer の既定の `"Form"` など、人には見えない）には当たらない |
@@ -806,7 +807,7 @@ selector dict の全キー。複数キー指定は AND セマンティクス。
 | `window` | bool | `True` でトップレベルの窓（`isWindow()`）だけ、`False` で窓の中の部品だけ（#38） |
 | `class_inherits` | str | Qt の型がこのクラスか、それを継承している（`QObject.inherits()`、#38）。`class` と違い、C++ が作って sip が基底の型で包んだ widget（Python からは `QDialog` に見える `QgsAttributeDialog` など）にも、Python のサブクラスにも当たる |
 
-`title_contains` / `text_contains` / `text_re` / `role` / `attr` は、snapshot の node と
+`object_name_re` / `title_contains` / `text_contains` / `text_re` / `role` / `attr` は、snapshot の node と
 同じ形の情報で判定する。`expect` や `wait_for_widget`（snapshot で探す）でも、`click()`
 や `fill()`（その場で探す）でも同じ結果になる。
 

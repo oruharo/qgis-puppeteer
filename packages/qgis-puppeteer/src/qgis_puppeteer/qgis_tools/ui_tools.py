@@ -1668,6 +1668,7 @@ def _find_widget(selector: dict) -> tuple[QWidget | None, dict]:
 
     Selector keys (all optional; combined with AND semantics):
         object_name: Qt ``objectName()``.
+        object_name_re: Regular expression searched in ``objectName()`` (#39).
         text: Button text / label text / action text.
         class: Python class name (e.g. "QPushButton").
         title: Window title (for dialog selection).
@@ -2028,7 +2029,7 @@ def _title_of(widget: Any) -> str | None:
 
 
 # record で判定する selector のキー（snapshot の解決と同じ判定にする）
-_RECORD_KEYS = ("role", "text_contains", "text_re", "attr", "title_contains")
+_RECORD_KEYS = ("role", "text_contains", "text_re", "attr", "title_contains", "object_name_re")
 
 
 def _live_record(widget: QWidget) -> dict:

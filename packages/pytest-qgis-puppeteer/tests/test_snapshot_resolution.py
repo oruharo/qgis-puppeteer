@@ -100,3 +100,11 @@ class TestModelessDialogResolution:
         found = _find_in_snapshot(snap, {"class": "DemoDialog", "index": 0})
         assert found is not None
         assert found["object_name"] == "demo_dialog"
+
+
+def test_object_name_re_resolves_in_a_snapshot() -> None:
+    """#39"""
+    form = {"class": "QDialog", "object_name": "featureactiondlg:建物:12", "visible": True}
+    snap = {"active_modal": None, "visible_dialogs": [form], "active_window": None}
+    assert _find_in_snapshot(snap, {"object_name_re": r"^featureactiondlg:.*:12$"}) is form
+    assert _find_in_snapshot(snap, {"object_name_re": r":13$"}) is None

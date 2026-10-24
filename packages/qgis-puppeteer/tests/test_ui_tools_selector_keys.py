@@ -207,3 +207,9 @@ def test_class_inherits_sees_a_cpp_type_that_python_sees_as_its_base(dialog: Any
         {"scope": "any", "root_object_name": "keys", "class_inherits": "QComboBoxPrivateContainer"}
     )
     assert widget is container
+
+
+def test_object_name_re_picks_a_widget_by_part_of_its_name(dialog: Any) -> None:
+    """#39"""
+    assert _name({"class": "QPushButton", "object_name_re": r"^del"}) == "delete"
+    assert _name({"class": "QPushButton", "object_name_re": r"^nothing"}) is None

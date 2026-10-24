@@ -161,6 +161,17 @@ def record_matches_selector(record: dict[str, Any], selector: dict[str, Any]) ->
             # 不正な正規表現はマッチしない扱い（silently skip。呼び出し側で
             # バリデートする想定で、selector 全体を fail させない）。
             return False
+    object_name_re = selector.get("object_name_re")
+    if object_name_re is not None:
+        rec_name = record.get("object_name")
+        if not isinstance(rec_name, str):
+            return False
+        try:
+            if re.search(object_name_re, rec_name) is None:
+                return False
+        except re.error:
+            # text_re と同じく、不正な正規表現はマッチしない扱い
+            return False
     window = selector.get("window")
     if window is not None and record.get("is_window") is not bool(window):
         return False
