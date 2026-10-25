@@ -275,7 +275,6 @@ e2e = [
 ]
 
 [tool.pytest.ini_options]
-asyncio_mode = "auto"
 qgis_bin = "C:/Program Files/QGIS 3.34/bin/qgis-bin.exe"
 qgis_args = ["--profile=test"]
 qgis_startup_timeout = 60
@@ -296,12 +295,12 @@ env は引き続き Worker に継承されるので、launcher 側でそれを Q
 
 ### 3. 最小テスト
 
-```python
-import pytest
+テストは普通の（同期の）`def` で書く。`qgis` のメソッドは中で自分のイベントループを
+回すので、`async def` のテストの中から呼ぶと `RuntimeError`（別のループが動いている）になる。
 
-@pytest.mark.asyncio
-async def test_open_login_dialog(qgis):
-    """qgis fixture は E2EAutomationClient のラッパ。pytest-qgis-puppeteer が自動提供。"""
+```python
+def test_open_login_dialog(qgis):
+    """qgis fixture は E2EAutomationClient。pytest-qgis-puppeteer が自動提供。"""
 
     # Locator で対象を捕まえる
     username = qgis.locator({"object_name": "username", "scope": "modal"})
@@ -548,25 +547,29 @@ multi-instance テストや「テスト本体内で QGIS を 2 つ立てて比�
 ```python
 from pytest_qgis_puppeteer.spawn import spawn_qgis
 
-def test_two_workers_compare(automation_client, hub_port, qgis_bin):
+QGIS_BIN = "C:/Program Files/QGIS 3.34/bin/qgis-bin.exe"
+
+def test_two_workers_compare(automation_client, hub_port):
     with spawn_qgis(
         hub_port=hub_port,
         automation_client=automation_client,
-        qgis_bin=qgis_bin,
+        qgis_bin=QGIS_BIN,
         args=["--profile=A"],
         label="worker-A",
     ) as worker_a, spawn_qgis(
         hub_port=hub_port,
         automation_client=automation_client,
-        qgis_bin=qgis_bin,
+        qgis_bin=QGIS_BIN,
         args=["--profile=B"],
         label="worker-B",
     ) as worker_b:
         # per-call の instance routing
         snap_a = automation_client.snapshot_ui(instance=worker_a.instance_id)
         snap_b = automation_client.snapshot_ui(instance=worker_b.instance_id)
-        assert _equivalent(snap_a, snap_b)
+        assert _equivalent(snap_a, snap_b)  # 比べ方はテストが決める
 ```
+
+`qgis_bin` には実行ファイルのパスを渡す（ini の `qgis_bin` は自動では入らない）。
 
 `spawn_qgis()` は context exit で graceful → force kill する。
 
@@ -753,11 +756,15 @@ async def main():
         for layer in layers["layers"]:
             print(f"  - {layer['name']}")
 
-        # 任意の Python コードを QGIS 内で実行（要 confirm or 信頼モード）
-        result = await client.call(
-            "qgis_execute_python",
-            {"code": "print('hello from QGIS', QgsProject.instance().fileName())"},
-        )
+        # 任意の Python コードを QGIS 内で実行する。信頼モードでない QGIS は、
+        # 実行せずに確認を求める dict を返す（例外にはならない。Permissions を参照）
+        code = "print('hello from QGIS', QgsProject.instance().fileName())"
+        result = await client.call("qgis_execute_python", {"code": code})
+        if result.get("requires_confirmation"):
+            result = await client.call(
+                "qgis_execute_with_permission", {"code": code, "permission": "once"}
+            )
+        print(result["stdout"])
 
         # スクショを撮る
         await client.call(
@@ -770,14 +777,17 @@ asyncio.run(main())
 
 ### 3. instance を切り替える
 
-複数 QGIS が登録されている場合:
+複数の QGIS が登録されているときは、呼び出しごとに `instance=` で宛先を指定する。
+指定しないと、Hub がどれに送るか決められず `instance_ambiguous` のエラーになる。
 
 ```python
-# label or instance_id で指定
-await client.call("qgis_use_instance", {"label": "QGIS-A"})
-# 以降の call は QGIS-A を対象に
-layers_a = await client.call("qgis_list_layers")
+# label / instance_id / launch_token / プロジェクト名で指定
+layers_a = await client.call("qgis_list_layers", instance="QGIS-A")
+layers_b = await client.call("qgis_list_layers", instance="QGIS-B")
 ```
+
+`AutomationClient` には「以後の宛先を固定する」仕組みは無い（`qgis_use_instance` は
+MCP のツールで、スクリプトからは呼べない）。
 
 詳しくは [Multi-instance](#multi-instance) を参照。
 
@@ -2184,7 +2194,13 @@ start qgis-bin.exe --profile=qgis-b
 
 両者とも自動的に Hub に接続し、Worker として register される。
 
-### Claude Desktop / RPC からの選択
+### Claude Desktop / スクリプトからの選択
+
+Claude Desktop（MCP）では、`qgis_list_instances` で一覧を見て、`qgis_use_instance` に
+`selector`（label など）を渡すと、以後の呼び出しの宛先がその QGIS に固定される。
+各ツールの `instance` 引数で、その呼び出しだけ宛先を変えることもできる。
+
+スクリプト（`AutomationClient`）では、呼び出しごとに `instance=` を渡す:
 
 ```python
 # 一覧
@@ -2207,32 +2223,25 @@ instances = await client.list_instances()
 # レイヤも出そろっている。使えるまで待つなら qgis_wait_ready / wait_for_ready
 # （レイヤを触るなら require_project=True）。
 
-# A に切り替え
-await client.call("qgis_use_instance", {"label": "A"})
-# 以降のコマンドは A 宛
-await client.call("qgis_list_layers")  # ← A の layers
+# A に送る
+await client.call("qgis_list_layers", instance="A")  # ← A の layers
 ```
 
 ### pytest からの multi-instance テスト
 
-`automation_client.use_instance()` で sticky な default instance を設定する
-パターン（既に register 済みの複数 Worker がある前提）:
+呼び出しごとに `instance=` で宛先を指定する（既に register 済みの複数 Worker が
+ある前提）。Locator は作るときに `instance=` を渡す:
 
 ```python
-@pytest.fixture
-def qgis_a(automation_client):
-    automation_client.use_instance("A")
-    return automation_client
-
-@pytest.fixture
-def qgis_b(automation_client):
-    automation_client.use_instance("B")
-    return automation_client
-
-def test_cross_instance(qgis_a, qgis_b):
-    qgis_a.click_widget({"object_name": "open_btn"})
-    qgis_b.click_widget({"object_name": "save_btn"})
+def test_cross_instance(automation_client):
+    automation_client.click_widget({"object_name": "open_btn"}, instance="A")
+    automation_client.locator({"object_name": "save_btn"}, instance="B").click()
 ```
+
+`automation_client.use_instance(...)` でも以後の宛先を固定できる。ただし固定は
+クライアント 1 つにつき 1 つで、`automation_client` は session で 1 つしかない。
+「A 用」「B 用」の fixture をそれぞれ `use_instance` で作っても、後から呼んだ方の
+宛先に揃ってしまう。2 台を交互に操作するときは `instance=` を使う。
 
 `spawn_qgis()` で test 内から QGIS を立てる場合（ADR-0004、Phase 1 実装済）は
 [Quickstart §7](#quickstart-pytest-e2e) を参照。`per-call` の `instance=` 指定 >
@@ -2307,9 +2316,12 @@ takeover を既定にしないのは同時 multi-instance の安全性を守る�
 
 | Tier | 挙動 |
 |---|---|
-| **whitelist** | 既知の安全コード（`QgsProject.instance().fileName()` 等の参照系）→ 即実行 |
-| **session** | テスト session 内で 1 度許可されたパターン → 即実行 |
+| **whitelist** | whitelist に入っているコードと**文字列が一致する**もの（前後の空白は無視）→ 即実行。whitelist は既定では空 |
+| **session** | `qgis_execute_with_permission` に `session` を渡して実行したのと同じコード（その QGIS が動いている間）→ 即実行 |
 | **confirm** | 上記以外 → **実行せず** `requires_confirmation` と危険度分析を返す |
+
+コードの意味を見て安全なものを通す仕組みではない。一致を見るのはコードの文字列だけで、
+1 文字でも違えば別のコードとして扱う。
 
 confirm は「QGIS 側で止めて人に聞く」仕組みではない。**QGIS に確認 UI は無く**、
 `qgis_execute_python` は実行せずに `requires_confirmation: true` と危険度分析を
@@ -2318,13 +2330,37 @@ confirm は「QGIS 側で止めて人に聞く」仕組みではない。**QGIS 
 - **Claude（MCP）**: 内容をユーザーに示して承認を取り、`qgis_execute_with_permission`
   に `once`（この 1 回だけ）か `session`（この QGIS が動いている間）を渡して再実行する。
   **`always` は MCP からは選べない** — ホワイトリストへの永続追加は人間の操作に限る。
-- **pytest / スクリプト**: ラッパが `ConfirmationRequiredError` を投げる。呼び出し元が
-  本人のコードである前提なので、`always` も使える。
+- **pytest**: `qgis.execute_python(...)` が `ConfirmationRequiredError` を投げる。
+  ただし pytest が起こす QGIS は信頼モード（下）なので、普段は出ない
+- **スクリプト（`AutomationClient.call`）**: 例外にはならない。`success: False` と
+  `requires_confirmation: True` の dict が**そのまま返る**ので、戻り値を確かめる。
+  実行してよければ `qgis_execute_with_permission` で実行し直す。呼び出し元が本人の
+  コードである前提なので、`always` も使える:
+
+  ```python
+  result = await client.call("qgis_execute_python", {"code": code})
+  if result.get("requires_confirmation"):
+      result = await client.call(
+          "qgis_execute_with_permission",
+          {"code": code, "permission": "once"},  # once / session / always
+      )
+  ```
 
 つまり、実際に人へ確認を出しているのは **MCP クライアント側の承認 UI**（Claude Code
 なら呼び出しごとの確認）であり、qgis-puppeteer 自身は「何を実行しようとしているか」を
-判断材料として返すところまでを担う。恒久的に許可を足したいときは
-`<project root>/.claude/qgis_whitelist.json` を直接編集する。
+判断材料として返すところまでを担う。
+
+`always` を選んだコードは whitelist のファイル `.claude/qgis_whitelist.json` に書き足され、
+次からは確認なしで実行される。ファイルの置き場所は、QGIS Puppeteer プラグインのフォルダから
+上へたどって最初に `.git` か `pyproject.toml` があるフォルダ、どちらも無ければ QGIS の
+作業フォルダ（カレントディレクトリ）。中身は次の形で、手で編集してもよい（QGIS を
+起動し直すと読み直す）:
+
+```json
+{"always_allowed": ["print(QgsProject.instance().fileName())"]}
+```
+
+今の whitelist の中身は `qgis_get_whitelist` で確かめられる（下）。
 
 ### 信頼モード（CI / E2E 向け）
 
