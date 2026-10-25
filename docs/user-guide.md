@@ -2401,10 +2401,20 @@ await client.call("qgis_clear_session_permissions")
 
 | 変数 | 既定 | 用途 |
 |---|---|---|
-| `QPUPPETEER_HUB_HOST` | `127.0.0.1` | Hub の bind / connect ホスト |
-| `QPUPPETEER_HUB_PORT` | `9876` | Hub の port |
-| `QPUPPETEER_HUB_URL` | — | `ws://host:port` を直接指定（host/port を上書き） |
+| `QPUPPETEER_HUB_HOST` | `127.0.0.1` | QGIS プラグインが繋ぐ Hub のホスト |
+| `QPUPPETEER_HUB_PORT` | `9876` | QGIS プラグインが繋ぐ Hub のポート |
+| `QPUPPETEER_HUB_URL` | — | `ws://host:port` を直接指定（host/port より優先）。MCP gateway が読むのはこちらだけ |
 | `QPUPPETEER_HUB_ORIGIN` | `http://localhost` | register 時の Origin ヘッダ |
+
+QGIS プラグインは、`QPUPPETEER_HUB_HOST` / `QPUPPETEER_HUB_PORT` /
+`QPUPPETEER_HUB_URL` のどれかが立っていると、**Hub を自分では起動しない**。
+既に動いている Hub に繋ぐだけで、Hub が無ければ現れるまで繋ぎ直し続ける。
+pytest の fixture のように、Hub を別に起こす使い方のための動きである。
+
+- プラグインが自分で起こす Hub は、いつも既定のポート `9876` で立つ。
+- 別のポートを使うなら、そのポートの Hub を先に起こしてから QGIS を起動する。
+- Claude Desktop などの MCP gateway を別のポートに向けるときは、
+  `QPUPPETEER_HUB_PORT` ではなく `QPUPPETEER_HUB_URL` を立てる。
 
 ### Worker 関連
 
