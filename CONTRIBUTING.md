@@ -70,7 +70,47 @@ uv run pytest plugins/tests
 ```
 
 All tests are mocked — you do **not** need a running QGIS to run the test
-suite. Real-QGIS integration tests are out-of-tree and run manually.
+suite. Tests that need real Qt or QGIS are skipped there; see below.
+
+### Qt / QGIS integration tests
+
+`uv run pytest` does not go through the Hub / Worker Qt wiring, and it does
+not run the UI tools against real widgets. On Windows the venv has neither
+PyQt5 nor `qgis`, so these tests are skipped: the Hub / Worker integration
+tests (`test_worker_integration`, `test_integration_hub_client`,
+`test_hub_spawn_integration`, `test_worker_liveness_integration`) and the
+tests that build real widgets or need `qgis` (the `test_ui_tools_*` and
+`test_*_integration` files listed in `scripts/qt_tests.py`). Heartbeats,
+reconnection, re-spawning the Hub and updating the instance info all live in
+this layer. After touching `hub.py`, `worker.py`, the UI tools or
+`plugins/qgis_puppeteer/qgis_plugin/`, run them with the Python bundled with
+QGIS before pushing:
+
+```bash
+uv run python scripts/qt_tests.py                 # every file in the script's list
+uv run python scripts/qt_tests.py -k respawn -v   # arguments go to pytest as-is
+```
+
+On the first run the script installs pytest, pytest-asyncio and websockets
+into `.qgis-site/` (git-ignored) with QGIS's pip. Set `QGIS_ROOT` to choose
+the QGIS install (by default, the newest `QGIS 3.*` under Program Files).
+
+Why not install PyQt5 into the venv instead: on Windows the PyQt5 wheel
+(5.15.11) and the Qt it ships (5.15.2) do not match, and the Hub subprocess
+dies with heap corruption when a client disconnects. This does not happen
+with QGIS's Qt.
+
+On CI the Ubuntu jobs get PyQt5 as a dev dependency, so the Hub / Worker
+integration tests run there under `uv run pytest`. The tests that need `qgis`
+are skipped on CI too.
+
+`test_worker_liveness_integration.py` reproduces what was found while testing
+against a real QGIS: the Hub dies (the Worker starts it again and registers
+again), the GUI thread is blocked (the instance shows as `unresponsive` but
+stays in the list, and goes back to `active`), `update_project` (the Hub's
+`project` is updated and the project's basename routes to the instance), and
+the Worker disconnects without `bye` (`instance_disconnected` with
+`grace_expires_in`).
 
 ## Code style
 

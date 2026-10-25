@@ -12,25 +12,29 @@ selector・Locator・dialog handler 等の機能リファレンスをまとめ�
 2. [インストール](#インストール)
 3. ペルソナ別 quickstart
    - [Claude Desktop ユーザー](#quickstart-claude-desktop)
-   - [pytest E2E 作者](#quickstart-pytest-e2e)
-     - 失敗時の診断バンドル / Test Environments / `fresh_qgis` / `spawn_qgis()`
    - [Python スクリプト作者](#quickstart-python-script)
-4. [Selector リファレンス](#selector-リファレンス)
-5. [Locator API](#locator-api)
-6. [Dialog handler（想定外モーダルの自動応答）](#dialog-handler)
-7. [Signal spy / wait_for_signal](#signal-spy--wait_for_signal)
-8. [E2E カバレッジ計測](#e2e-カバレッジ計測)
-9. [地図のキャンバスの操作（マウスとキー）](#map-canvas-input)
-10. [地図の画像スナップショット（`qgis_render_map`）](#map-image-snapshot)
-11. [Uncaught Qt/Python 例外と test fail linkage](#uncaught-exceptions)
-12. [QgsMessageLog の記録と判定](#message-log)
-13. [テストのあとに残った状態の検査](#leftover-state)
-14. [MCP の操作記録](#mcp-recording)
-15. [複数 QGIS（multi-instance）](#multi-instance)
-16. [Permissions / 信頼モード](#permissions)
-17. [環境変数リファレンス](#環境変数リファレンス)
-18. [Troubleshooting](#troubleshooting)
-19. [Roadmap](#roadmap)
+   - [pytest E2E 作者](#quickstart-pytest-e2e)
+4. [pytest の応用](#pytest-の応用)
+   - 独自の launcher / 失敗時の診断バンドル / Test Environments / `fresh_qgis` /
+     `spawn_qgis()` / dev モード / `pytest_qgis_before_spawn` / fixture オーバーライド
+5. [Selector リファレンス](#selector-リファレンス)
+6. [Locator API](#locator-api)
+7. [Dialog handler（想定外モーダルの自動応答）](#dialog-handler)
+8. [Signal spy / wait_for_signal](#signal-spy--wait_for_signal)
+9. [E2E カバレッジ計測](#e2e-カバレッジ計測)
+10. [地図のキャンバスの操作（マウスとキー）](#map-canvas-input)
+11. [地図の画像スナップショット（`qgis_render_map`）](#map-image-snapshot)
+12. [Uncaught Qt/Python 例外と test fail linkage](#uncaught-exceptions)
+13. [QgsMessageLog の記録と判定](#message-log)
+14. [テストのあとに残った状態の検査](#leftover-state)
+15. [MCP の操作記録](#mcp-recording)
+16. [複数 QGIS（multi-instance）](#multi-instance)
+17. [Permissions / 信頼モード](#permissions)
+18. [環境変数リファレンス](#環境変数リファレンス)
+19. [Troubleshooting](#troubleshooting)
+20. [Roadmap](#roadmap)
+21. [ライセンスとサポート](#ライセンスとサポート)
+22. 付録: [アップグレード（dev を追いかけている場合）](#アップグレードdev-を追いかけている場合)
 
 ---
 
@@ -116,98 +120,6 @@ pip install "qgis-puppeteer[mcp] @ git+https://github.com/oruharo/qgis-puppeteer
 pip install "pytest-qgis-puppeteer @ git+https://github.com/oruharo/qgis-puppeteer.git@dev#subdirectory=packages/pytest-qgis-puppeteer"
 ```
 
-### アップグレード（dev を追いかけている場合）
-
-動いているプロセスは 3 種類あり、それぞれ入れ替わるタイミングが違う。
-**全部そろえないと、進行中のセッションでは MCP ツールが落ちる。**
-
-| プロセス | コードの出どころ | 新しくなるのは |
-|---|---|---|
-| MCP gateway | `uvx --from ...@dev`（MCP クライアントが起動） | **MCP クライアントのセッションを張り直したとき**。セッション開始時に取得したものに固定される |
-| Hub | プラグインが auto-spawn。プラグインと同じ `qgis_puppeteer` のコピーで動く | Hub プロセスを kill したとき。Worker が数秒で新しい Hub を立て直して再接続する。MCP クライアントが繋がっている間は idle 終了しないので、放っておくと古いまま |
-| Worker（プラグイン） | QGIS のプラグインフォルダ（`QGIS_PLUGINPATH` 等）の `qgis_puppeteer` | QGIS を起動し直したとき |
-
-手順:
-
-1. コードを更新する（`git pull` / vendor 更新）
-2. Hub プロセスを kill する。QGIS は起動したままでよい — Worker が数秒で
-   Hub を立て直して再接続する。**instance_id は変わる**（grace は Hub の
-   メモリ上の状態なので、Hub と一緒に消える。引き継がれるのは Worker 側だけが
-   切れて同じ Hub に戻る場合）。`launch_token` / label のセレクタと sticky は
-   そのまま効く。プラグイン側（`qgis_plugin/`、Worker）も変えたなら QGIS を
-   起動し直す
-3. **MCP クライアントのセッションを張り直す**（Claude Desktop なら再起動、
-   Claude Code なら `/mcp` で reconnect か新セッション）
-
-3 を飛ばすと、古い gateway が新しい Hub に繋ぎに行く。gateway は再起動された
-Hub への再接続を自分で張り直すが、新しいフィールドやツールは知らないままなので
-挙動が食い違う。
-
-#### gateway が二重に立っていないか確認する
-
-Claude Desktop の `claude_desktop_config.json` にも `qgis-puppeteer` を定義して
-いると、Desktop の Code タブのセッションには **Desktop が立てた gateway と
-`.mcp.json` の gateway の両方**が同じ名前で注入される。ツール一覧と呼び出しは
-片方（Desktop 側）に流れるので、`.mcp.json` をいくら新しくしても効かない。
-症状は「ツール一覧に新しいツール（`qgis_wait_ready` など）が無い」「gateway.log
-に何も書かれない」「一部のツールだけ本文なしの `Error executing tool` で落ちる」。
-
-```powershell
-Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'gateways\.mcp' } |
-  Select-Object ProcessId, ParentProcessId, CreationDate, CommandLine
-```
-
-`python -m qgis_puppeteer.gateways.mcp` が複数あり、親が `Claude.exe`（Desktop）
-と `claude.exe`（Code CLI）に分かれていればこれ。Desktop 側の定義を消すか、
-両方を同じスペック（git の `@dev`）に揃える。
-
-どのビルドが応答しているかは、gateway が起動時に名乗る 1 行で照合できる
-（stderr と `gateway.log` の両方に出る）:
-
-```
-INFO Gateway qgis-puppeteer 0.1.0, commit 1c1ff51… (git+https://…@dev), code at C:\…\site-packages\qgis_puppeteer, pid 12345, python 3.13.5
-```
-
-git インストールなら `serverInfo.version` も `0.1.0+g1c1ff51` の形になるので、
-Claude Code の MCP ログ（`Connection established with capabilities: … "version"`）
-でも commit が分かる。
-
-#### QGIS のプラグインと pytest 側の版の食い違い
-
-QGIS のプラグインのフォルダはライブラリの写しで、版や commit を持たない。そこで
-両方が、写しの対象になるファイルの中身から**指紋**（12 桁の 16 進）を作る。
-`sync_plugin.py --check` が通る組み合わせなら同じになり、改行の違いは数えない。
-
-- Worker は登録のときに指紋を送り、`list_instances` / MCP の `qgis_list_instances`
-  の `source_fingerprint` に出る（旧プラグインは `null`）
-- pytest は session の QGIS が使える状態になったとき（`hub_ready`）に 1 回、
-  自分の qgis-puppeteer の指紋と比べる。食い違っていれば
-  `pytest_qgis_puppeteer.QgisPluginMismatchWarning` を出す（失敗にはしない）。
-  旧プラグインで指紋が無いときも、比べられないことを警告する。失敗にしたいときは
-  `-W error::pytest_qgis_puppeteer.QgisPluginMismatchWarning`
-- MCP の gateway は、起動時に名乗る 1 行に自分の指紋を入れる（`fingerprint …`）。
-  `qgis_list_instances` の `source_fingerprint` と比べる
-
-片側にしか入っていない修正は効かないので、uv.lock の固定とプラグインの入れ直しは
-同じ commit にそろえる。
-
-#### `uvx --from <ローカルディレクトリ>` は src の変更で再ビルドしない
-
-vendor コピーなどローカルパスを `uvx --from` に渡すと、uvx はその環境を
-キャッシュして **src が変わっても作り直さない**（uv 0.8 で確認。pyproject.toml
-を書き換えても気づかない）。`make vendor` で更新したつもりが古いビルドのまま、
-が起きる。回避:
-
-- `uvx --reinstall-package qgis-puppeteer --from <dir> ...`（毎回ビルド、数秒）
-- または git スペック `--from "qgis-puppeteer[mcp] @ git+...@dev#subdirectory=..."`
-  （commit が変われば作り直す）
-- `uv run --project <dir>` なら `[tool.uv] cache-keys` で src の変更に追従する
-
-`--with mcp` は上限なしで最新の mcp を連れてくるので、`[mcp]` extra
-（`mcp>=2,<3`）で入れること。
-
----
-
 ## Quickstart: Claude Desktop
 
 Claude Desktop の MCP 機能を介して QGIS を制御する。
@@ -260,6 +172,70 @@ Claude 側で以下のような MCP ツール呼び出しが行われる:
 
 ---
 
+## Quickstart: Python script
+
+Claude や pytest を介さず、自動化スクリプトから直接 QGIS を操作する。
+`AutomationClient` は **async API**。
+
+### 1. QGIS を起動
+
+QGIS Puppeteer プラグインを有効化した QGIS を起動しておく。Hub は自動 spawn。
+
+### 2. スクリプト
+
+```python
+import asyncio
+from qgis_puppeteer import AutomationClient
+
+async def main():
+    async with AutomationClient(url="ws://127.0.0.1:9876") as client:
+        # 利用可能な instance（QGIS プロセス）を一覧
+        instances = await client.list_instances()
+        print(f"Found {len(instances)} QGIS instance(s)")
+
+        # コマンド呼び出し
+        layers = await client.call("qgis_list_layers")
+        for layer in layers["layers"]:
+            print(f"  - {layer['name']}")
+
+        # 任意の Python コードを QGIS 内で実行する。信頼モードでない QGIS は、
+        # 実行せずに確認を求める dict を返す（例外にはならない。Permissions を参照）
+        code = "print('hello from QGIS', QgsProject.instance().fileName())"
+        result = await client.call("qgis_execute_python", {"code": code})
+        if result.get("requires_confirmation"):
+            result = await client.call(
+                "qgis_execute_with_permission", {"code": code, "permission": "once"}
+            )
+        print(result["stdout"])
+
+        # スクショを撮る。プロジェクトもレイヤも開いていない QGIS はキャンバスの
+        # 代わりにようこそ画面を出しているので、失敗が返る
+        await client.call(
+            "qgis_screenshot",
+            {"output_path": "C:/tmp/screenshot.png"},
+        )
+
+asyncio.run(main())
+```
+
+### 3. instance を切り替える
+
+複数の QGIS が登録されているときは、呼び出しごとに `instance=` で宛先を指定する。
+指定しないと、Hub がどれに送るか決められず `instance_ambiguous` のエラーになる。
+
+```python
+# label / instance_id / launch_token / プロジェクト名で指定
+layers_a = await client.call("qgis_list_layers", instance="QGIS-A")
+layers_b = await client.call("qgis_list_layers", instance="QGIS-B")
+```
+
+`AutomationClient` には「以後の宛先を固定する」仕組みは無い（`qgis_use_instance` は
+MCP のツールで、スクリプトからは呼べない）。
+
+詳しくは [Multi-instance](#multi-instance) を参照。
+
+---
+
 ## Quickstart: pytest E2E
 
 QGIS の E2E テスト（モーダル操作含む）を書く。
@@ -281,19 +257,7 @@ qgis_startup_timeout = 60
 # qgis_python は未指定なら OSGEO4W_ROOT から自動検出される
 ```
 
-### 2. ホストアプリ独自の launcher を使いたい場合
-
-例: ホスト固有の env / DB 接続情報を立ててから QGIS を起動する `.bat` を経由する場合。
-
-```toml
-[tool.pytest.ini_options]
-qgis_command = ["scripts/launcher.bat", "--config", "e2e", "--feature", "auth"]
-```
-
-`qgis_command` は `qgis_bin` / `qgis_args` と排他。`QPUPPETEER_HUB_PORT` 等の
-env は引き続き Worker に継承されるので、launcher 側でそれを QGIS に渡せばよい。
-
-### 3. 最小テスト
+### 2. 最小テスト
 
 テストは普通の（同期の）`def` で書く。`qgis` のメソッドは中で自分のイベントループを
 回すので、`async def` のテストの中から呼ぶと `RuntimeError`（別のループが動いている）になる。
@@ -320,7 +284,26 @@ def test_open_login_dialog(qgis):
     assert snap.get("active_modal") is None
 ```
 
-### 4. 失敗時の診断バンドル
+---
+
+## pytest の応用
+
+Quickstart の先で使う機能: 独自の launcher、失敗時の診断バンドル、複数の QGIS 構成の切り替え、
+テスト中の QGIS の起こし直し、dev モード、起動ごとの準備、fixture オーバーライド。
+
+### 1. ホストアプリ独自の launcher を使いたい場合
+
+例: ホスト固有の env / DB 接続情報を立ててから QGIS を起動する `.bat` を経由する場合。
+
+```toml
+[tool.pytest.ini_options]
+qgis_command = ["scripts/launcher.bat", "--config", "e2e", "--feature", "auth"]
+```
+
+`qgis_command` は `qgis_bin` / `qgis_args` と排他。`QPUPPETEER_HUB_PORT` 等の
+env は引き続き Worker に継承されるので、launcher 側でそれを QGIS に渡せばよい。
+
+### 2. 失敗時の診断バンドル
 
 テストが失敗すると `outputs/diagnostics/<test_name>_<timestamp>/`
 （`environments.toml` 利用時は `outputs/<env_name>/diagnostics/...`）に
@@ -342,7 +325,7 @@ def test_open_login_dialog(qgis):
 CI 上で diagnostic バンドルだけ artifact として upload しておくと、
 失敗時に full transcript を読まずに原因の当たりが付けやすくなる。
 
-### 5. Test Environments（複数 QGIS 構成の宣言的切替）
+### 3. Test Environments（複数 QGIS 構成の宣言的切替）
 
 QGIS の起動構成（プロファイル / 認証有無 / バージョン / launcher）が
 テストごとに異なる場合、`environments.toml` で宣言し、`@pytest.mark.qgis_env`
@@ -459,7 +442,7 @@ spawn する直前に `--maxfail=<remaining>` を inject するので、child �
 fail-fast 挙動も活きる。skip された env は `summary.json` 内で
 `skipped_reason="not_run_due_to_cumulative_maxfail"` として記録される。
 
-### 6. テスト中だけ QGIS を再起動する: `@pytest.mark.fresh_qgis`
+### 4. テスト中だけ QGIS を再起動する: `@pytest.mark.fresh_qgis`
 
 「このテストだけ別構成で QGIS を立ち上げ直したい」「session worker を汚さず
 canvas クリアな状態で 1 件動かしたい」ケース向け（ADR-0002 §10.4 / ADR-0003 §fresh_qgis）。
@@ -527,7 +510,7 @@ qgis_auto_fresh_after_failure = "session"   # または "true"
 - 起こし直しの呼び出し（閉じる依頼、起動の待ち）は、次のテストの操作記録に入らない
 - 起こし直せなかったときは、そのテストを error にして、次に `qgis` を使うテストで
   もう一度試す
-- dev モードや、`qgis_process` fixture を override している場合（[10.](#10-完全制御が必要な場合-fixture-オーバーライド)）は
+- dev モードや、`qgis_process` fixture を override している場合（[8.](#8-完全制御が必要な場合-fixture-オーバーライド)）は
   起こし直せないので、警告だけ出して何もしない
 - conftest から自分で起こし直すこともできる。`qgis_process` fixture の値
   （`SessionQgis`）の `restart()` を呼ぶ
@@ -539,7 +522,7 @@ qgis_auto_fresh_after_failure = "session"   # または "true"
   （データベースを戻した後の確認、ログインを待つ、など）はそこに書く
   （[QGIS の起動の間のメッセージ](#qgis-の起動の間のメッセージ)）
 
-### 7. 任意のタイミングで QGIS を立てる: `spawn_qgis()`
+### 5. 任意のタイミングで QGIS を立てる: `spawn_qgis()`
 
 multi-instance テストや「テスト本体内で QGIS を 2 つ立てて比較したい」場合は
 `spawn_qgis()` context manager（ADR-0004）を直接使う:
@@ -612,7 +595,7 @@ def test_two_workers_compare(automation_client, hub_port):
 20 秒の開きがあった。
 register タイムアウト（既定 60s）は `register_timeout_s=` で上書き可能。
 
-### 8. dev モード（既存 QGIS に相乗り）
+### 6. dev モード（既存 QGIS に相乗り）
 
 新しい QGIS を spawn せず、既に開いている QGIS でテストを走らせるモード。
 書き始め・UI 操作系のデバッグ用途。
@@ -627,7 +610,7 @@ pytest test_e2e/
 （`ConfirmationRequiredError`）ので、dev モードでは UI 操作系のみ走らせるのが
 安全（または対象 QGIS で `QPUPPETEER_TRUSTED_MODE=1` を立てておく）。
 
-### 9. 起動ごとの準備: `pytest_qgis_before_spawn`
+### 7. 起動ごとの準備: `pytest_qgis_before_spawn`
 
 pytest が QGIS を起こす**直前**に、conftest のフック `pytest_qgis_before_spawn` が
 呼ばれる（#29）。起動のたびに準備が要るもの（新しいプロファイルを一時フォルダに
@@ -698,7 +681,7 @@ QGIS 3.34 で、session・起こし直し・`fresh_qgis` のそれぞれが別�
 プロファイルで起き、有効なプラグインがコアと `qgis_puppeteer` だけになることを
 確かめている。
 
-### 10. 完全制御が必要な場合: fixture オーバーライド
+### 8. 完全制御が必要な場合: fixture オーバーライド
 
 `qgis_command` だけでは足りない（テスト session 内で複数 launcher を使い分け
 たい等）場合は、ユーザー側 `conftest.py` で `qgis_process` fixture を override:
@@ -727,70 +710,6 @@ def qgis_process(automation_client, hub_port):
 ```
 
 `hub_process` / `automation_client` / `qgis` fixture はそのまま使える。
-
----
-
-## Quickstart: Python script
-
-Claude や pytest を介さず、自動化スクリプトから直接 QGIS を操作する。
-`AutomationClient` は **async API**。
-
-### 1. QGIS を起動
-
-QGIS Puppeteer プラグインを有効化した QGIS を起動しておく。Hub は自動 spawn。
-
-### 2. スクリプト
-
-```python
-import asyncio
-from qgis_puppeteer import AutomationClient
-
-async def main():
-    async with AutomationClient(url="ws://127.0.0.1:9876") as client:
-        # 利用可能な instance（QGIS プロセス）を一覧
-        instances = await client.list_instances()
-        print(f"Found {len(instances)} QGIS instance(s)")
-
-        # コマンド呼び出し
-        layers = await client.call("qgis_list_layers")
-        for layer in layers["layers"]:
-            print(f"  - {layer['name']}")
-
-        # 任意の Python コードを QGIS 内で実行する。信頼モードでない QGIS は、
-        # 実行せずに確認を求める dict を返す（例外にはならない。Permissions を参照）
-        code = "print('hello from QGIS', QgsProject.instance().fileName())"
-        result = await client.call("qgis_execute_python", {"code": code})
-        if result.get("requires_confirmation"):
-            result = await client.call(
-                "qgis_execute_with_permission", {"code": code, "permission": "once"}
-            )
-        print(result["stdout"])
-
-        # スクショを撮る。プロジェクトもレイヤも開いていない QGIS はキャンバスの
-        # 代わりにようこそ画面を出しているので、失敗が返る
-        await client.call(
-            "qgis_screenshot",
-            {"output_path": "C:/tmp/screenshot.png"},
-        )
-
-asyncio.run(main())
-```
-
-### 3. instance を切り替える
-
-複数の QGIS が登録されているときは、呼び出しごとに `instance=` で宛先を指定する。
-指定しないと、Hub がどれに送るか決められず `instance_ambiguous` のエラーになる。
-
-```python
-# label / instance_id / launch_token / プロジェクト名で指定
-layers_a = await client.call("qgis_list_layers", instance="QGIS-A")
-layers_b = await client.call("qgis_list_layers", instance="QGIS-B")
-```
-
-`AutomationClient` には「以後の宛先を固定する」仕組みは無い（`qgis_use_instance` は
-MCP のツールで、スクリプトからは呼べない）。
-
-詳しくは [Multi-instance](#multi-instance) を参照。
 
 ---
 
@@ -2476,36 +2395,6 @@ coverage が有効化される。
 
 ---
 
-## 開発者向け: Qt / QGIS 統合テスト
-
-`uv run pytest` は Hub / Worker の Qt 配線を **通らない**。venv には PyQt5 も
-qgis も無いので、`test_worker_integration` / `test_integration_hub_client` /
-`test_hub_spawn_integration` / `test_worker_liveness_integration` /
-`test_ui_tools_snapshot` は skip される（`5 skipped` の正体）。ハートビート・
-再接続・Hub の立て直し・`update_info` のような「現場で壊れた」挙動は全部この層に
-あるので、`hub.py` / `worker.py` / `plugins/qgis_puppeteer/qgis_plugin/` を触ったら push 前に
-QGIS 同梱の Python で回す:
-
-```bash
-python scripts/qt_tests.py            # 上記 5 ファイル（約 1 分）
-python scripts/qt_tests.py -k respawn -v
-```
-
-初回は QGIS の pip で `.qgis-site/` に pytest を入れる。`QGIS_ROOT` で
-インストール先を指定できる。venv に PyQt5 を入れて済ませない理由: Windows の
-PyQt5 wheel（5.15.11）と Qt（5.15.2）の版がずれていて、Hub subprocess が
-client 切断時に heap corruption で落ちる（QGIS の Qt では起きない）。
-
-CI の ubuntu ジョブには PyQt5 が dev 依存で入るので、同じテストが `uv run pytest`
-で走る（`qgis` が要る `test_ui_tools_snapshot` を除く）。
-
-`test_worker_liveness_integration.py` は実機検証で見つかった
-シナリオをそのまま再現している: Hub kill → Worker が立て直して再登録、GUI を
-28 秒止める → `unresponsive` のまま一覧に残り復帰、`update_project` →
-`project` が入り basename で引ける、bye 無し切断 → `instance_disconnected`。
-
----
-
 ## Troubleshooting
 
 ### `label_conflict`（同時同 label）
@@ -2868,3 +2757,96 @@ Locator が timeout するが、失敗理由が「ウィジェットが見つか
 Issue / PR: <https://github.com/oruharo/qgis-puppeteer/issues>
 
 質問や非自明な変更は Issue を立ててください。
+
+---
+
+## アップグレード（dev を追いかけている場合）
+
+動いているプロセスは 3 種類あり、それぞれ入れ替わるタイミングが違う。
+**全部そろえないと、進行中のセッションでは MCP ツールが落ちる。**
+
+| プロセス | コードの出どころ | 新しくなるのは |
+|---|---|---|
+| MCP gateway | `uvx --from ...@dev`（MCP クライアントが起動） | **MCP クライアントのセッションを張り直したとき**。セッション開始時に取得したものに固定される |
+| Hub | プラグインが auto-spawn。プラグインと同じ `qgis_puppeteer` のコピーで動く | Hub プロセスを kill したとき。Worker が数秒で新しい Hub を立て直して再接続する。MCP クライアントが繋がっている間は idle 終了しないので、放っておくと古いまま |
+| Worker（プラグイン） | QGIS のプラグインフォルダ（`QGIS_PLUGINPATH` 等）の `qgis_puppeteer` | QGIS を起動し直したとき |
+
+手順:
+
+1. コードを更新する（`git pull` / vendor 更新）
+2. Hub プロセスを kill する。QGIS は起動したままでよい — Worker が数秒で
+   Hub を立て直して再接続する。**instance_id は変わる**（grace は Hub の
+   メモリ上の状態なので、Hub と一緒に消える。引き継がれるのは Worker 側だけが
+   切れて同じ Hub に戻る場合）。`launch_token` / label のセレクタと sticky は
+   そのまま効く。プラグイン側（`qgis_plugin/`、Worker）も変えたなら QGIS を
+   起動し直す
+3. **MCP クライアントのセッションを張り直す**（Claude Desktop なら再起動、
+   Claude Code なら `/mcp` で reconnect か新セッション）
+
+3 を飛ばすと、古い gateway が新しい Hub に繋ぎに行く。gateway は再起動された
+Hub への再接続を自分で張り直すが、新しいフィールドやツールは知らないままなので
+挙動が食い違う。
+
+### gateway が二重に立っていないか確認する
+
+Claude Desktop の `claude_desktop_config.json` にも `qgis-puppeteer` を定義して
+いると、Desktop の Code タブのセッションには **Desktop が立てた gateway と
+`.mcp.json` の gateway の両方**が同じ名前で注入される。ツール一覧と呼び出しは
+片方（Desktop 側）に流れるので、`.mcp.json` をいくら新しくしても効かない。
+症状は「ツール一覧に新しいツール（`qgis_wait_ready` など）が無い」「gateway.log
+に何も書かれない」「一部のツールだけ本文なしの `Error executing tool` で落ちる」。
+
+```powershell
+Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'gateways\.mcp' } |
+  Select-Object ProcessId, ParentProcessId, CreationDate, CommandLine
+```
+
+`python -m qgis_puppeteer.gateways.mcp` が複数あり、親が `Claude.exe`（Desktop）
+と `claude.exe`（Code CLI）に分かれていればこれ。Desktop 側の定義を消すか、
+両方を同じスペック（git の `@dev`）に揃える。
+
+どのビルドが応答しているかは、gateway が起動時に名乗る 1 行で照合できる
+（stderr と `gateway.log` の両方に出る）:
+
+```
+INFO Gateway qgis-puppeteer 0.1.0, commit 1c1ff51… (git+https://…@dev), code at C:\…\site-packages\qgis_puppeteer, pid 12345, python 3.13.5
+```
+
+git インストールなら `serverInfo.version` も `0.1.0+g1c1ff51` の形になるので、
+Claude Code の MCP ログ（`Connection established with capabilities: … "version"`）
+でも commit が分かる。
+
+### QGIS のプラグインと pytest 側の版の食い違い
+
+QGIS のプラグインのフォルダはライブラリの写しで、版や commit を持たない。そこで
+両方が、写しの対象になるファイルの中身から**指紋**（12 桁の 16 進）を作る。
+`sync_plugin.py --check` が通る組み合わせなら同じになり、改行の違いは数えない。
+
+- Worker は登録のときに指紋を送り、`list_instances` / MCP の `qgis_list_instances`
+  の `source_fingerprint` に出る（旧プラグインは `null`）
+- pytest は session の QGIS が使える状態になったとき（`hub_ready`）に 1 回、
+  自分の qgis-puppeteer の指紋と比べる。食い違っていれば
+  `pytest_qgis_puppeteer.QgisPluginMismatchWarning` を出す（失敗にはしない）。
+  旧プラグインで指紋が無いときも、比べられないことを警告する。失敗にしたいときは
+  `-W error::pytest_qgis_puppeteer.QgisPluginMismatchWarning`
+- MCP の gateway は、起動時に名乗る 1 行に自分の指紋を入れる（`fingerprint …`）。
+  `qgis_list_instances` の `source_fingerprint` と比べる
+
+片側にしか入っていない修正は効かないので、uv.lock の固定とプラグインの入れ直しは
+同じ commit にそろえる。
+
+### `uvx --from <ローカルディレクトリ>` は src の変更で再ビルドしない
+
+vendor コピーなどローカルパスを `uvx --from` に渡すと、uvx はその環境を
+キャッシュして **src が変わっても作り直さない**（uv 0.8 で確認。pyproject.toml
+を書き換えても気づかない）。`make vendor` で更新したつもりが古いビルドのまま、
+が起きる。回避:
+
+- `uvx --reinstall-package qgis-puppeteer --from <dir> ...`（毎回ビルド、数秒）
+- または git スペック `--from "qgis-puppeteer[mcp] @ git+...@dev#subdirectory=..."`
+  （commit が変われば作り直す）
+- `uv run --project <dir>` なら `[tool.uv] cache-keys` で src の変更に追従する
+
+`--with mcp` は上限なしで最新の mcp を連れてくるので、`[mcp]` extra
+（`mcp>=2,<3`）で入れること。
+
