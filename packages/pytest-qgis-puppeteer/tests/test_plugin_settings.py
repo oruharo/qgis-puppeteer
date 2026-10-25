@@ -7,6 +7,7 @@ spawn するもの）は実 QGIS が要るので別経路（integration test）�
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -20,6 +21,7 @@ from pytest_qgis_puppeteer.plugin import (
     _resolve_auto_fresh_after_failure,
     _resolve_diag_capture_screenshots,
     _resolve_fail_on_uncaught_exception,
+    _resolve_hub_qgis_python,
     _resolve_qgis_args,
     _resolve_qgis_command,
     _resolve_setting,
@@ -448,3 +450,59 @@ class TestPluginFingerprintCheck:
     def test_an_old_plugin_without_a_fingerprint_warns(self) -> None:
         [w] = self._check(None)
         assert "older than the version check" in str(w.message)
+
+
+# ============================================================
+# _resolve_hub_qgis_python（Hub を起こす QGIS の Python launcher）
+# ============================================================
+
+
+class TestResolveHubQgisPython:
+    @pytest.fixture(autouse=True)
+    def _no_discovery_elsewhere(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 手元の QGIS や venv の隣を拾わないようにする
+        monkeypatch.delenv("OSGEO4W_ROOT", raising=False)
+        monkeypatch.setattr("sys.executable", str(tmp_path / "venv" / "python.exe"))
+
+    @staticmethod
+    def _touch(path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("")
+        return path
+
+    def test_configured_value_is_used(self, tmp_path: Path) -> None:
+        bat = self._touch(tmp_path / "custom.bat")
+        config = _FakeConfig(ini={"qgis_python": str(bat)})
+        assert _resolve_hub_qgis_python(config, None) == str(bat)  # type: ignore[arg-type]
+
+    def test_configured_value_must_exist(self, tmp_path: Path) -> None:
+        config = _FakeConfig(ini={"qgis_python": str(tmp_path / "nope.bat")})
+        with pytest.raises(pytest.UsageError, match="qgis_python does not exist"):
+            _resolve_hub_qgis_python(config, None)  # type: ignore[arg-type]
+
+    def test_found_next_to_qgis_bin(self, tmp_path: Path) -> None:
+        # qgis_bin だけ設定すれば、その隣の同じ版の bat で Hub を起こす
+        bin_dir = tmp_path / "QGIS 3.40.1" / "bin"
+        qgis_bin = self._touch(bin_dir / "qgis-bin.exe")
+        self._touch(bin_dir / "python-qgis-ltr.bat")
+        bat = self._touch(bin_dir / "python-qgis.bat")
+        config = _FakeConfig(ini={"qgis_bin": str(qgis_bin)})
+        assert _resolve_hub_qgis_python(config, None) == str(bat)  # type: ignore[arg-type]
+
+    def test_qgis_bin_from_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        bin_dir = tmp_path / "QGIS 3.34.6" / "bin"
+        qgis_bin = self._touch(bin_dir / "qgis-ltr-bin.exe")
+        bat = self._touch(bin_dir / "python-qgis-ltr.bat")
+        monkeypatch.setenv(ENV_QGIS_BIN, str(qgis_bin))
+        assert _resolve_hub_qgis_python(_FakeConfig(), None) == str(bat)  # type: ignore[arg-type]
+
+    def test_error_names_where_it_looked(self, tmp_path: Path) -> None:
+        qgis_bin = self._touch(tmp_path / "app" / "qgis-bin.exe")
+        config = _FakeConfig(ini={"qgis_bin": str(qgis_bin)})
+        with pytest.raises(pytest.UsageError, match=r"next to qgis_bin \(.*qgis-bin\.exe\)"):
+            _resolve_hub_qgis_python(config, None)  # type: ignore[arg-type]
+
+    def test_error_without_qgis_bin(self) -> None:
+        with pytest.raises(pytest.UsageError, match="qgis_python is not configured") as exc:
+            _resolve_hub_qgis_python(_FakeConfig(), None)  # type: ignore[arg-type]
+        assert "next to qgis_bin" not in str(exc.value)

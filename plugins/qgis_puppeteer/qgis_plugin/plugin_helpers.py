@@ -70,7 +70,7 @@ DEFAULT_HUB_HOST = "127.0.0.1"
 # 未捕捉例外の traceback）を拾うためのもの。
 DEFAULT_SPAWN_LOG_FILENAME = "qgis_puppeteer.spawn.log"
 
-# QGIS 同梱の Python launcher (`python-qgis-ltr.bat`) 探索ロジックは
+# QGIS 同梱の Python launcher (`python-qgis-ltr.bat` / `python-qgis.bat`) 探索ロジックは
 # `qgis_puppeteer.find_qgis_python_launcher()` に集約済み（OSS 公開 API）。
 # `_resolve_hub_python` はそれを呼び、プラグイン固有のフォールバックを足す。
 
@@ -121,20 +121,21 @@ def _find_python_in_dir(directory: Path) -> Path | None:
 
 
 def _resolve_hub_python() -> Path | None:
-    """Hub subprocess を起動する launcher（`python-qgis-ltr.bat` か Python exe）を解決する。
+    """Hub subprocess を起動する launcher（QGIS 同梱の bat か Python exe）を解決する。
 
     QGIS プラグイン内では `sys.executable = qgis-ltr-bin.exe` になるため、
     そのまま `subprocess.Popen` すると新しい QGIS プロセスが立ち上がってしまう
     （かつ引数 `9876` が "プロジェクトファイルパス" として解釈される）。
     明示的に launcher のパスを見つけて使う必要がある。
 
-    QGIS 環境下では `python-qgis-ltr.bat` を優先する：これを使うと QGIS が
+    QGIS 環境下では QGIS 同梱の bat（LTR 版は `python-qgis-ltr.bat`、通常版は
+    `python-qgis.bat`）を優先する：これを使うと QGIS が
     `QT_PLUGIN_PATH` / `GDAL_DATA` / `PROJ_LIB` / `PYTHONPATH` 等を正しくセット
     した上で Python を起動してくれるので、Hub subprocess 側でも PyQt5 / GDAL /
     PROJ がそのまま使える。
 
     優先順：
-        1. `python-qgis-ltr.bat` — `qgis_puppeteer.find_qgis_python_launcher()`
+        1. QGIS 同梱の bat — `qgis_puppeteer.find_qgis_python_launcher()`
            に委譲。`QPUPPETEER_HUB_PYTHON` env 上書き → `OSGEO4W_ROOT/bin/` →
            `sys.executable` 兄弟、の順で探す（OSS 共通ロジック）
         2. `sys.executable` の basename が python 系なら → そのまま

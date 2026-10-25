@@ -683,6 +683,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The QGIS Python launcher was found only for an LTR QGIS, and in pytest
+  hardly ever.** Discovery looked only for `python-qgis-ltr.bat`, the name in
+  an LTR install; a regular install has `python-qgis.bat` next to
+  `qgis-bin.exe`. It also looked only under `OSGEO4W_ROOT/bin` and next to
+  `sys.executable`. pytest runs on a venv's Python and a plain shell does not
+  set `OSGEO4W_ROOT`, so without `qgis_python` the Hub could not start even
+  with `qgis_bin` set. `find_qgis_python_launcher()` now takes `qgis_bin` and
+  looks next to it first, and in each folder picks the launcher matching the
+  QGIS executable's name (`qgis-ltr-bin.exe` → `python-qgis-ltr.bat`,
+  `qgis-bin.exe` → `python-qgis.bat`), then either name. pytest passes
+  `qgis_bin`, so setting `qgis_bin` is enough. In a regular QGIS, the plugin
+  now starts the Hub through `python-qgis.bat` instead of the bare
+  `pythonw.exe` next to `qgis-bin.exe`.
+
 - **`qgis_screenshot` failed on a canvas that had drawn nothing** (#42).
   A canvas to which no layer was ever added has an empty extent and never
   draws, so `saveAsImage` left only a `.pgw` and the tool reported that the

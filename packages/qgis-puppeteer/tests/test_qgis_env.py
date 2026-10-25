@@ -1,8 +1,9 @@
 """qgis_puppeteer.qgis_env のユニットテスト。
 
 `find_qgis_python_launcher()` の探索順を網羅する。tmp_path に偽の
-`python-qgis-ltr.bat` を配置して `OSGEO4W_ROOT` / `sys.executable` を
-monkeypatch することで、実際の QGIS インストールに依存せずに検証する。
+`python-qgis-ltr.bat` / `python-qgis.bat` を配置して `OSGEO4W_ROOT` /
+`sys.executable` を monkeypatch することで、実際の QGIS インストールに依存せずに
+検証する。
 """
 
 from __future__ import annotations
@@ -11,13 +12,21 @@ from pathlib import Path
 
 import pytest
 from qgis_puppeteer import find_qgis_python_launcher
-from qgis_puppeteer.qgis_env import _QGIS_PYTHON_LAUNCHER_BAT
+
+# LTR 版の名前。通常版は python-qgis.bat
+_QGIS_PYTHON_LAUNCHER_BAT = "python-qgis-ltr.bat"
 
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """親プロセスの OSGEO4W_ROOT 等を毎テスト確実にクリア。"""
     monkeypatch.delenv("OSGEO4W_ROOT", raising=False)
+
+
+def _touch(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("")
+    return path
 
 
 # ==============================================================
@@ -173,3 +182,115 @@ class TestNotFound:
         monkeypatch.setattr("sys.executable", str(empty / "python.exe"))
 
         assert find_qgis_python_launcher() is None
+
+
+# ==============================================================
+# 通常版（LTR でない QGIS）の launcher
+# ==============================================================
+
+
+class TestRegularRelease:
+    def test_regular_bat_found_under_osgeo4w_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # 通常版のインストールには python-qgis.bat しか無い
+        bat = _touch(tmp_path / "QGIS" / "bin" / "python-qgis.bat")
+        monkeypatch.setenv("OSGEO4W_ROOT", str(tmp_path / "QGIS"))
+        monkeypatch.setattr("sys.executable", str(tmp_path / "venv" / "python.exe"))
+
+        assert find_qgis_python_launcher() == bat
+
+    def test_sys_executable_name_picks_matching_bat(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # OSGeo4W に LTR 版と通常版を両方入れていても、動いている QGIS
+        # （QGIS の中では sys.executable）と同じ版の bat を選ぶ
+        bin_dir = tmp_path / "OSGeo4W" / "bin"
+        _touch(bin_dir / "python-qgis-ltr.bat")
+        regular = _touch(bin_dir / "python-qgis.bat")
+        monkeypatch.setenv("OSGEO4W_ROOT", str(tmp_path / "OSGeo4W"))
+        monkeypatch.setattr("sys.executable", str(_touch(bin_dir / "qgis-bin.exe")))
+
+        assert find_qgis_python_launcher() == regular
+
+    def test_unknown_executable_prefers_ltr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # 実行ファイルから版が分からなければ、これまでどおり LTR を先に
+        bin_dir = tmp_path / "OSGeo4W" / "bin"
+        ltr = _touch(bin_dir / "python-qgis-ltr.bat")
+        _touch(bin_dir / "python-qgis.bat")
+        monkeypatch.setenv("OSGEO4W_ROOT", str(tmp_path / "OSGeo4W"))
+        monkeypatch.setattr("sys.executable", str(tmp_path / "venv" / "python.exe"))
+
+        assert find_qgis_python_launcher() == ltr
+
+
+# ==============================================================
+# qgis_bin の隣
+# ==============================================================
+
+
+class TestQgisBin:
+    @pytest.fixture(autouse=True)
+    def _venv_python(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # pytest は venv の Python で動き、その隣に bat は無い
+        monkeypatch.setattr("sys.executable", str(tmp_path / "venv" / "python.exe"))
+
+    @pytest.mark.parametrize(
+        ("exe", "bat"),
+        [
+            ("qgis-ltr-bin.exe", "python-qgis-ltr.bat"),
+            ("qgis-bin.exe", "python-qgis.bat"),
+            ("qgis-ltr.bat", "python-qgis-ltr.bat"),
+            ("qgis.bat", "python-qgis.bat"),
+            ("qgis-dev-bin.exe", "python-qgis-dev.bat"),
+            ("QGIS-LTR-BIN.EXE", "python-qgis-ltr.bat"),
+        ],
+    )
+    def test_bat_matching_the_executable(self, tmp_path: Path, exe: str, bat: str) -> None:
+        bin_dir = tmp_path / "QGIS 3.40.1" / "bin"
+        for name in ("python-qgis-ltr.bat", "python-qgis.bat", "python-qgis-dev.bat"):
+            _touch(bin_dir / name)
+        qgis_bin = _touch(bin_dir / exe)
+
+        found = find_qgis_python_launcher(qgis_bin=qgis_bin)
+        assert found is not None and found.name == bat
+
+    def test_qgis_bin_wins_over_osgeo4w_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _touch(tmp_path / "other" / "bin" / _QGIS_PYTHON_LAUNCHER_BAT)
+        monkeypatch.setenv("OSGEO4W_ROOT", str(tmp_path / "other"))
+        bat = _touch(tmp_path / "QGIS" / "bin" / "python-qgis.bat")
+
+        found = find_qgis_python_launcher(qgis_bin=str(tmp_path / "QGIS" / "bin" / "qgis-bin.exe"))
+        assert found == bat
+
+    def test_other_name_next_to_qgis_bin(self, tmp_path: Path) -> None:
+        # 名前から決まる bat が無ければ、隣にある方を使う
+        bat = _touch(tmp_path / "bin" / _QGIS_PYTHON_LAUNCHER_BAT)
+
+        assert find_qgis_python_launcher(qgis_bin=tmp_path / "bin" / "qgis-bin.exe") == bat
+
+    def test_falls_back_to_osgeo4w_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bat = _touch(tmp_path / "QGIS" / "bin" / "python-qgis.bat")
+        monkeypatch.setenv("OSGEO4W_ROOT", str(tmp_path / "QGIS"))
+        # qgis_bin は launcher の無い場所（ホスト側の配布物など）
+        qgis_bin = _touch(tmp_path / "app" / "qgis-bin.exe")
+
+        assert find_qgis_python_launcher(qgis_bin=qgis_bin) == bat
+
+    def test_override_env_wins_over_qgis_bin(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        explicit = _touch(tmp_path / "my-launcher.bat")
+        monkeypatch.setenv("MY_OVERRIDE", str(explicit))
+        _touch(tmp_path / "bin" / "python-qgis.bat")
+
+        found = find_qgis_python_launcher(
+            override_env="MY_OVERRIDE", qgis_bin=tmp_path / "bin" / "qgis-bin.exe"
+        )
+        assert found == explicit

@@ -21,7 +21,7 @@ CLI 引数 > 環境変数 > pyproject.toml の `[tool.pytest.ini_options]`
 独自の launcher (例: ホスト固有の env / DB 接続情報を立てる .bat) 経由で QGIS
 を起動する場合に利用する。`qgis_python` を未指定にすると
 `qgis_puppeteer.find_qgis_python_launcher()` で自動検出を試みる
-（OSGEO4W_ROOT または `sys.executable` 兄弟）。
+（`qgis_bin` の隣、次に `OSGEO4W_ROOT/bin`）。
 
 ## fixture 依存順
 
@@ -1177,15 +1177,56 @@ def hub_url(hub_port: int) -> str:
     return f"ws://127.0.0.1:{hub_port}"
 
 
+def _resolve_hub_qgis_python(config: pytest.Config, active_env: EnvironmentSpec | None) -> str:
+    """Hub を起こす QGIS 付属の Python launcher を決める。
+
+    設定（CLI > 環境変数 > environments.toml > ini）が無ければ探す。``qgis_bin`` を
+    設定していればその隣（``qgis-ltr-bin.exe`` なら ``python-qgis-ltr.bat``、
+    ``qgis-bin.exe`` なら ``python-qgis.bat``）、次に ``OSGEO4W_ROOT/bin``。
+    """
+    qgis_python = resolve_qgis_setting(
+        cli_value=config.getoption("qgis_python", default=None),
+        env_value=os.environ.get(ENV_QGIS_PYTHON),
+        env_spec_value=active_env.qgis_python if active_env is not None else None,
+        ini_value=config.getini("qgis_python"),
+    )
+    if qgis_python:
+        if not Path(qgis_python).is_file():
+            raise pytest.UsageError(f"qgis_python does not exist: {qgis_python}")
+        return qgis_python
+
+    from qgis_puppeteer import find_qgis_python_launcher
+
+    qgis_bin = resolve_qgis_setting(
+        cli_value=config.getoption("qgis_bin", default=None),
+        env_value=os.environ.get(ENV_QGIS_BIN),
+        env_spec_value=active_env.qgis_bin if active_env is not None else None,
+        ini_value=config.getini("qgis_bin"),
+    )
+    discovered = find_qgis_python_launcher(qgis_bin=qgis_bin or None)
+    if discovered is None:
+        where = f"next to qgis_bin ({qgis_bin}) or " if qgis_bin else ""
+        raise pytest.UsageError(
+            "qgis_python is not configured, and no QGIS Python launcher "
+            f"(python-qgis-ltr.bat / python-qgis.bat) was found {where}under "
+            f"$OSGEO4W_ROOT/bin. Set --qgis-python, ${ENV_QGIS_PYTHON} or "
+            "[tool.pytest.ini_options] qgis_python, or set qgis_bin to the QGIS "
+            "executable so the launcher next to it is used."
+        )
+    logger.info("Auto-discovered qgis_python: %s", discovered)
+    return str(discovered)
+
+
 @pytest.fixture(scope="session")
 def hub_process(
     pytestconfig: pytest.Config, hub_port: int
 ) -> Iterator[subprocess.Popen[bytes] | None]:
     """Hub を QGIS 付属 Python launcher 経由で spawn し、listen 確認後に yield。
 
-    venv の python では PyQt5 が解決できないので、`qgis_python` ini /
-    `QPUPPETEER_QGIS_PYTHON` env / `--qgis-python` CLI で QGIS 付属 Python
-    launcher（例: `python-qgis-ltr.bat`）を指定する必要がある。
+    venv の python では PyQt5 が解決できないので、QGIS 付属の Python launcher
+    （例: `python-qgis-ltr.bat`）で起こす。`qgis_python` ini /
+    `QPUPPETEER_QGIS_PYTHON` env / `--qgis-python` CLI で指定するか、
+    `qgis_bin` の隣から見つける（`_resolve_hub_qgis_python`）。
 
     dev モードでは spawn せず、既存 Hub が listen 済みであることだけ確認。
     """
@@ -1201,30 +1242,7 @@ def hub_process(
         yield None
         return
 
-    active_env = _get_active_env(pytestconfig)
-    qgis_python = resolve_qgis_setting(
-        cli_value=pytestconfig.getoption("qgis_python", default=None),
-        env_value=os.environ.get(ENV_QGIS_PYTHON),
-        env_spec_value=active_env.qgis_python if active_env is not None else None,
-        ini_value=pytestconfig.getini("qgis_python"),
-    )
-    if not qgis_python:
-        # 未指定なら OSS 公開 API でフォールバック：
-        # OSGEO4W_ROOT/bin/python-qgis-ltr.bat または sys.executable 兄弟を探す。
-        from qgis_puppeteer import find_qgis_python_launcher
-
-        discovered = find_qgis_python_launcher()
-        if discovered is None:
-            raise pytest.UsageError(
-                "qgis_python is not configured and could not be auto-discovered. "
-                f"Set --qgis-python, ${ENV_QGIS_PYTHON}, [tool.pytest.ini_options] "
-                "qgis_python, or set OSGEO4W_ROOT to enable auto-discovery."
-            )
-        qgis_python = str(discovered)
-        logger.info("Auto-discovered qgis_python: %s", qgis_python)
-    elif not Path(qgis_python).is_file():
-        raise pytest.UsageError(f"qgis_python does not exist: {qgis_python}")
-
+    qgis_python = _resolve_hub_qgis_python(pytestconfig, _get_active_env(pytestconfig))
     cmd = [
         qgis_python,
         str(_hub_bootstrap_path()),

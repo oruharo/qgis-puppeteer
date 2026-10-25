@@ -184,7 +184,7 @@ class QgisPuppeteerPlugin:
             if hub_python is None:
                 logger.warning(
                     "No suitable Python launcher for Hub auto-spawn (sys.executable=%r). "
-                    "Expected OSGEO4W_ROOT/bin/python-qgis-ltr.bat. "
+                    "Expected python-qgis-ltr.bat or python-qgis.bat in OSGEO4W_ROOT/bin. "
                     "Override with %s=<path>. "
                     "Hub auto-spawn disabled; Worker will connect if Hub is already running.",
                     sys.executable,
