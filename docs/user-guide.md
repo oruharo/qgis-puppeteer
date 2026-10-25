@@ -252,12 +252,37 @@ e2e = [
 
 [tool.pytest.ini_options]
 qgis_bin = "C:/Program Files/QGIS 3.34/bin/qgis-bin.exe"
-qgis_args = ["--profile=test"]
+qgis_args = ["--profile", "test"]
 qgis_startup_timeout = 60
 # qgis_python は未指定なら OSGEO4W_ROOT から自動検出される
 ```
 
-### 2. 最小テスト
+`--profile` と名前は別の要素に書く。`--profile=test` と 1 つにつなげると、QGIS は
+それを読まず、何も言わずに `default` プロファイルで起きる。
+
+### 2. テスト用プロファイルにプラグインを入れる
+
+`--profile test` で起きる QGIS は、`default` とは別のプロファイル `test` を使う。
+[インストール](#共通-qgis-plugin-の配置) で `default` に入れたプラグインはそこから
+見えないので、`test` にも入れて有効にする（Windows の例。`<qgis_bin>` は上で
+`qgis_bin` に書いた実行ファイル）:
+
+1. QGIS を一度 `--profile test` で起こして閉じる。プロファイル `test` が作られる:
+   ```bat
+   "<qgis_bin>" --profile test
+   ```
+2. `test` のプラグインディレクトリにプラグインのフォルダを置く:
+   ```bat
+   set PLUGINS=%APPDATA%\QGIS\QGIS3\profiles\test\python\plugins
+   if not exist "%PLUGINS%" mkdir "%PLUGINS%"
+   mklink /J "%PLUGINS%\qgis_puppeteer" "<repo>\plugins\qgis_puppeteer"
+   ```
+3. もう一度 `--profile test` で起こし、Plugin Manager で `QGIS Puppeteer` を有効にして閉じる
+
+テストのたびに新しいプロファイルを作り、要るプラグインだけを有効にして起こすなら、
+この手順の代わりに [pytest の応用 7 の例](#例-起動ごとに新しいプロファイルを作る) を使う。
+
+### 3. 最小テスト
 
 テストは普通の（同期の）`def` で書く。`qgis` のメソッドは中で自分のイベントループを
 回すので、`async def` のテストの中から呼ぶと `RuntimeError`（別のループが動いている）になる。
@@ -336,18 +361,18 @@ QGIS の起動構成（プロファイル / 認証有無 / バージョン / lau
 ```toml
 [[environments]]
 name = "smoke"
-qgis_args = ["--profile=test"]
+qgis_args = ["--profile", "test"]
 description = "最小プロファイルのスモーク"
 
 [[environments]]
 name = "with_auth"
-qgis_args = ["--profile=auth_test"]
+qgis_args = ["--profile", "auth_test"]
 env = { MYAPP_AUTH_ENABLED = "1" }
 
 [[environments]]
 name = "qgis_lts"
 qgis_bin = "C:/Program Files/QGIS 3.34/bin/qgis-bin.exe"
-qgis_args = ["--profile=regression"]
+qgis_args = ["--profile", "regression"]
 
 [default_environment]
 strategy = "named"      # "fail" にすると marker 必須（推奨は段階移行）
@@ -361,7 +386,7 @@ default_name = "smoke"
 ```toml
 [[environments]]
 name = "base"
-qgis_args = ["--profile=test"]
+qgis_args = ["--profile", "test"]
 env = { MYAPP_LOG_LEVEL = "DEBUG" }
 
 [[environments]]
@@ -537,13 +562,13 @@ def test_two_workers_compare(automation_client, hub_port):
         hub_port=hub_port,
         automation_client=automation_client,
         qgis_bin=QGIS_BIN,
-        args=["--profile=A"],
+        args=["--profile", "A"],
         label="worker-A",
     ) as worker_a, spawn_qgis(
         hub_port=hub_port,
         automation_client=automation_client,
         qgis_bin=QGIS_BIN,
-        args=["--profile=B"],
+        args=["--profile", "B"],
         label="worker-B",
     ) as worker_b:
         # per-call の instance routing
@@ -2106,10 +2131,10 @@ QGIS インスタンスごとに `QPUPPETEER_WORKER_LABEL` を立てて起動:
 
 ```bat
 set QPUPPETEER_WORKER_LABEL=A
-start qgis-bin.exe --profile=qgis-a
+start qgis-bin.exe --profile qgis-a
 
 set QPUPPETEER_WORKER_LABEL=B
-start qgis-bin.exe --profile=qgis-b
+start qgis-bin.exe --profile qgis-b
 ```
 
 両者とも自動的に Hub に接続し、Worker として register される。
@@ -2187,7 +2212,7 @@ sticky `use_instance()` > Hub 既定、の優先順位で routing される。
 env 注入し、stdout に返す:
 
 ```bat
-qgis-puppeteer-launch --label A -- qgis-bin.exe --profile=qgis-a
+qgis-puppeteer-launch --label A -- qgis-bin.exe --profile qgis-a
 :: stdout: launch_token=lt-7k3p9q2m4x8a0b1c
 ```
 

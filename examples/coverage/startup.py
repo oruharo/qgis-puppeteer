@@ -1,7 +1,7 @@
 """QGIS profile startup hook that enables coverage.py subprocess measurement.
 
 Recommended over the site-wide ``.pth`` file because it is scoped to a single
-QGIS *profile* (e.g. your dedicated ``--profile=test``) and does not touch the
+QGIS *profile* (e.g. your dedicated ``--profile test``) and does not touch the
 QGIS Python's ``site-packages``.
 
 Install — copy this file to your test profile's python startup path:

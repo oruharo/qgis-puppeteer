@@ -38,7 +38,7 @@ so a couple of env vars are enough to switch coverage on inside QGIS.
 
    - *Profile hook (recommended):* copy `startup.py` to your test profile's
      `python/startup.py` (see the header in that file for the per-OS path). If
-     you launch QGIS with a dedicated `--profile=test`, this only affects that
+     you launch QGIS with a dedicated `--profile test`, this only affects that
      profile.
    - *Interpreter-wide:* copy `coverage_subprocess.pth` into the QGIS Python's
      `site-packages/`. The filename only needs to end in `.pth`. This activates

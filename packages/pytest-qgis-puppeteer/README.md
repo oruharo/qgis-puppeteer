@@ -33,10 +33,17 @@ You also need the QGIS Puppeteer plugin inside QGIS. `qgis-puppeteer` core is in
 # Your project's pyproject.toml
 [tool.pytest.ini_options]
 qgis_bin = "C:/Program Files/QGIS 3.34/bin/qgis-bin.exe"
-qgis_args = ["--profile=test"]
+qgis_args = ["--profile", "test"]
 qgis_startup_timeout = 30
 asyncio_mode = "auto"
 ```
+
+Pass `--profile` and the profile name as separate items: QGIS ignores
+`--profile=test` and silently starts with the `default` profile. The QGIS
+Puppeteer plugin must be installed and enabled in the profile the tests use
+(`test` here), not only in `default`; see the
+[pytest quickstart](https://github.com/oruharo/qgis-puppeteer/blob/main/docs/user-guide.md#quickstart-pytest-e2e)
+in the user guide.
 
 `qgis_python` (the QGIS-bundled Python launcher used to spawn the Hub
 subprocess) is auto-detected from `OSGEO4W_ROOT` or `sys.executable`'s sibling.
@@ -99,11 +106,11 @@ Define environments in `environments.toml` at your project root (or under
 ```toml
 [[environments]]
 name = "smoke"
-qgis_args = ["--profile=test"]
+qgis_args = ["--profile", "test"]
 
 [[environments]]
 name = "with_authentication"
-qgis_args = ["--profile=auth_test"]
+qgis_args = ["--profile", "auth_test"]
 env = { MYAPP_AUTH_ENABLED = "1" }
 
 [[environments]]
@@ -142,7 +149,7 @@ lists are Phase 2. See the ADR for the full design.
 ### Inline spawn — when startup options are the test subject
 
 When the test's purpose is to verify the QGIS startup option itself
-(e.g., does `--clean-canvas` actually clear state? does `--profile=X`
+(e.g., does `--clean-canvas` actually clear state? does `--profile X`
 load the right plugins?), put the option directly in test code instead
 of hiding it behind a fixture or `environments.toml`
 ([ADR-0004](https://github.com/oruharo/qgis-puppeteer/blob/main/docs/architecture/0004-inline-qgis-spawn-helper.md)):
