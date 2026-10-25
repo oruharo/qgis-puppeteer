@@ -88,7 +88,7 @@ pip install pytest-qgis-puppeteer
 In your project's `pyproject.toml`:
 ```toml
 [tool.pytest.ini_options]
-qgis_bin = "C:/Program Files/QGIS 3.34/bin/qgis-bin.exe"
+qgis_bin = "C:/Program Files/QGIS 3.34.6/bin/qgis-ltr-bin.exe"
 ```
 
 Write a test:

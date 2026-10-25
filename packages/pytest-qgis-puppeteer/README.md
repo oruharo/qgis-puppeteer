@@ -32,7 +32,7 @@ You also need the QGIS Puppeteer plugin inside QGIS. `qgis-puppeteer` core is in
 ```toml
 # Your project's pyproject.toml
 [tool.pytest.ini_options]
-qgis_bin = "C:/Program Files/QGIS 3.34/bin/qgis-bin.exe"
+qgis_bin = "C:/Program Files/QGIS 3.34.6/bin/qgis-ltr-bin.exe"
 qgis_args = ["--profile", "test"]
 qgis_startup_timeout = 30
 asyncio_mode = "auto"
@@ -46,11 +46,13 @@ Puppeteer plugin must be installed and enabled in the profile the tests use
 in the user guide.
 
 `qgis_python` (the QGIS-bundled Python launcher used to spawn the Hub
-subprocess) is auto-detected from `OSGEO4W_ROOT` or `sys.executable`'s sibling.
-Set it explicitly only if auto-detection fails:
+subprocess) is found next to `qgis_bin`: `python-qgis-ltr.bat` for
+`qgis-ltr-bin.exe`, `python-qgis.bat` for `qgis-bin.exe`. If it is not there,
+`$OSGEO4W_ROOT/bin` is searched. Set it explicitly only if neither has it, for
+example when you start QGIS through `qgis_command`:
 
 ```toml
-qgis_python = "C:/Program Files/QGIS 3.34/bin/python-qgis-ltr.bat"
+qgis_python = "C:/Program Files/QGIS 3.34.6/bin/python-qgis-ltr.bat"
 ```
 
 ### Custom launcher — host-specific spawn
@@ -115,7 +117,7 @@ env = { MYAPP_AUTH_ENABLED = "1" }
 
 [[environments]]
 name = "qgis_lts"
-qgis_bin = "C:/Program Files/QGIS 3.34/bin/qgis-bin.exe"
+qgis_bin = "C:/Program Files/QGIS 3.34.6/bin/qgis-ltr-bin.exe"
 
 [default_environment]
 strategy = "named"
@@ -157,7 +159,7 @@ of hiding it behind a fixture or `environments.toml`
 ```python
 from pytest_qgis_puppeteer import spawn_qgis
 
-QGIS_BIN = "C:/Program Files/QGIS 3.34/bin/qgis-bin.exe"
+QGIS_BIN = "C:/Program Files/QGIS 3.34.6/bin/qgis-ltr-bin.exe"
 
 def test_clean_canvas_clears_layers(hub_port, automation_client):
     with spawn_qgis(

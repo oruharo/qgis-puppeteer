@@ -251,10 +251,10 @@ e2e = [
 ]
 
 [tool.pytest.ini_options]
-qgis_bin = "C:/Program Files/QGIS 3.34/bin/qgis-bin.exe"
+qgis_bin = "C:/Program Files/QGIS 3.34.6/bin/qgis-ltr-bin.exe"
 qgis_args = ["--profile", "test"]
 qgis_startup_timeout = 60
-# qgis_python は未指定なら OSGEO4W_ROOT から自動検出される
+# qgis_python（Hub を起こす QGIS 付属の Python）は、未指定なら qgis_bin の隣から探す
 ```
 
 `--profile` と名前は別の要素に書く。`--profile=test` と 1 つにつなげると、QGIS は
@@ -371,7 +371,7 @@ env = { MYAPP_AUTH_ENABLED = "1" }
 
 [[environments]]
 name = "qgis_lts"
-qgis_bin = "C:/Program Files/QGIS 3.34/bin/qgis-bin.exe"
+qgis_bin = "C:/Program Files/QGIS 3.34.6/bin/qgis-ltr-bin.exe"
 qgis_args = ["--profile", "regression"]
 
 [default_environment]
@@ -555,7 +555,7 @@ multi-instance テストや「テスト本体内で QGIS を 2 つ立てて比�
 ```python
 from pytest_qgis_puppeteer.spawn import spawn_qgis
 
-QGIS_BIN = "C:/Program Files/QGIS 3.34/bin/qgis-bin.exe"
+QGIS_BIN = "C:/Program Files/QGIS 3.34.6/bin/qgis-ltr-bin.exe"
 
 def test_two_workers_compare(automation_client, hub_port):
     with spawn_qgis(
@@ -2385,9 +2385,9 @@ pytest の fixture のように、Hub を別に起こす使い方のための動
 
 | 変数 | 用途 |
 |---|---|
-| `QPUPPETEER_QGIS_BIN` | `qgis-bin.exe` パス（`qgis_command` 未指定時） |
+| `QPUPPETEER_QGIS_BIN` | QGIS の実行ファイル（`qgis-ltr-bin.exe` / `qgis-bin.exe`）のパス（`qgis_command` 未指定時） |
 | `QPUPPETEER_QGIS_COMMAND` | QGIS 起動コマンド全体（host 独自 launcher 用） |
-| `QPUPPETEER_QGIS_PYTHON` | QGIS 同梱 Python launcher（未指定なら自動検出） |
+| `QPUPPETEER_QGIS_PYTHON` | QGIS 同梱 Python launcher（未指定なら `qgis_bin` の隣、次に `OSGEO4W_ROOT/bin` から探す） |
 | `QPUPPETEER_QGIS_ARGS` | 追加引数（shell-style） |
 | `QPUPPETEER_E2E_USE_RUNNING_QGIS` | `1` で既存 QGIS に相乗り（dev モード） |
 | `QPUPPETEER_E2E_HUB_URL` | dev モード時の既存 Hub URL（既定 `ws://127.0.0.1:9876`） |
@@ -2543,25 +2543,30 @@ client は起動時点で identity を取得できず当て推量に頼ってい
 1. `<TEMP>/qgis_puppeteer.spawn.log` を確認（Python 起動前の fatal がここに出る）
 2. `<TEMP>/qgis_puppeteer/hub.log` を確認（Python 側の logger 出力）
 3. ポート衝突: 既に何かが `127.0.0.1:9876` を使ってないか
-4. `QPUPPETEER_HUB_PYTHON` 未設定で `python-qgis-ltr.bat` が見つからない
-   → 環境変数で明示指定するか OSGEO4W_ROOT を確認
+4. QGIS 付属の Python launcher（`python-qgis-ltr.bat` / `python-qgis.bat`）が
+   見つからない。プラグインは `OSGEO4W_ROOT/bin` と QGIS の実行ファイルの隣を探す
+   → `QPUPPETEER_HUB_PYTHON` に launcher のパスを書く
 
-### `qgis_python` auto-discovery 失敗（pytest）
+### `qgis_python` が見つからない（pytest）
 
-**症状**: `qgis_python is not configured and could not be auto-discovered.`
+**症状**: `qgis_python is not configured, and no QGIS Python launcher
+(python-qgis-ltr.bat / python-qgis.bat) was found ...`
+
+**原因**: Hub を起こす QGIS 付属の Python launcher が、`qgis_bin` の隣にも
+`$OSGEO4W_ROOT/bin` にも無かった。`qgis_bin` を書かずに `qgis_command` で
+QGIS を起こしているときや、`qgis_bin` が QGIS の `bin` を指していないときに出る。
 
 **対処**: 以下のいずれか:
 
 ```toml
-# pyproject.toml で明示
 [tool.pytest.ini_options]
-qgis_python = "C:/Program Files/QGIS 3.34/bin/python-qgis-ltr.bat"
+# qgis_bin を QGIS の実行ファイルにすれば、その隣の launcher を使う
+qgis_bin = "C:/Program Files/QGIS 3.34.6/bin/qgis-ltr-bin.exe"
+# または launcher を直接書く
+qgis_python = "C:/Program Files/QGIS 3.34.6/bin/python-qgis-ltr.bat"
 ```
 
-```bash
-# OSGEO4W_ROOT を立てれば auto-discovery される
-set OSGEO4W_ROOT=C:\Program Files\QGIS 3.34
-```
+`--qgis-python` や環境変数 `QPUPPETEER_QGIS_PYTHON` でも指定できる。
 
 ### `instance_not_found`
 
