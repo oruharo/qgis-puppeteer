@@ -230,6 +230,15 @@ def spawn_qgis(
         _join_drain_threads(drain_threads, timeout_s=2.0)
         raise
 
+    # QGIS 本体の pid（#43）。一覧から外れた後の後片付けで使う
+    known_qgis = _KnownQgis(
+        pid=_registered_pid(automation_client, instance_id),
+        launch_token=launch_token,
+        launched_at=launched_at,
+        registered_at=time.time(),
+        group=proc.pid,
+    )
+
     effective_label = label or f"worker-{proc.pid}"
     worker = SpawnedWorker(
         instance_id=instance_id,
@@ -253,6 +262,7 @@ def spawn_qgis(
             automation_client=automation_client,
             instance_id=instance_id,
             graceful_timeout_s=graceful_shutdown_timeout_s,
+            known_qgis=known_qgis,
         )
         _join_drain_threads(drain_threads, timeout_s=2.0)
 
@@ -557,18 +567,11 @@ def _kill_qgis_with_token(
             unreadable += 1
             continue
         try:
-            created = process.created_at()
-            if created is None:
+            ours = _is_our_qgis(process, launch_token, since=since, until=until)
+            if ours is None:
                 unreadable += 1
                 continue
-            if not since <= created <= until:
-                continue
-            environ = process.environ()
-            if environ is None:
-                unreadable += 1
-                continue
-            token = next((v for k, v in environ.items() if k.upper() == ENV_LAUNCH_TOKEN), None)
-            if token != launch_token:
+            if not ours:
                 continue
             if process.terminate():
                 killed.append(pid)
@@ -577,6 +580,26 @@ def _kill_qgis_with_token(
         finally:
             process.close()
     return killed, unreadable
+
+
+def _is_our_qgis(
+    process: _WindowsProcess, launch_token: str, *, since: float, until: float
+) -> bool | None:
+    """開いたプロセスが、``launch_token`` で起こした QGIS か（Windows）。
+
+    作られた時刻が ``since``〜``until``（エポック秒）で、環境変数の token が
+    ``launch_token`` なら True。時刻や環境変数を読めなければ None。
+    """
+    created = process.created_at()
+    if created is None:
+        return None
+    if not since <= created <= until:
+        return False
+    environ = process.environ()
+    if environ is None:
+        return None
+    token = next((v for k, v in environ.items() if k.upper() == ENV_LAUNCH_TOKEN), None)
+    return token == launch_token
 
 
 class _WindowsProcess:
@@ -664,6 +687,10 @@ class _WindowsProcess:
             if sep and key:  # "=C:=C:\..." のような隠しの項目は key が空になる
                 environ[key] = value
         return environ
+
+    def wait(self, timeout_s: float) -> bool:
+        """終わるまで最大 ``timeout_s`` 秒待つ。終わったら True。"""
+        return _kernel32().WaitForSingleObject(self._handle, int(timeout_s * 1000)) == 0
 
     def terminate(self) -> bool:
         """強制終了し、終わるまで最大 2 秒待つ。終わったら True。"""
@@ -788,12 +815,48 @@ def _kill_rejected_worker(rejection: RejectedRegistration) -> None:
         logger.warning("Rejected QGIS still alive after force kill (pid=%d)", pid)
 
 
+@dataclass(frozen=True)
+class _KnownQgis:
+    """``spawn_qgis`` が起こして登録された QGIS 本体（#43）。
+
+    Attributes:
+        pid: 登録したときの一覧の pid。引けなかったら None。
+        launch_token: 起こすときに渡した token。
+        launched_at: 起こした時刻（エポック秒、時計の粒度の分だけ前）。
+        registered_at: 登録を確かめた時刻（エポック秒）。QGIS はこの間に作られている。
+        group: posix で QGIS を起こしたコマンドのプロセスグループ（起動した
+            プロセスの pid）。
+    """
+
+    pid: int | None
+    launch_token: str
+    launched_at: float
+    registered_at: float
+    group: int
+
+
+def _registered_pid(automation_client: E2EAutomationClient, instance_id: str) -> int | None:
+    """登録された QGIS の pid を一覧から引く（#43）。引けなければ None。"""
+    try:
+        for info in automation_client.list_instances():
+            if info.instance_id == instance_id:
+                return info.pid
+    except Exception:  # noqa: BLE001 - 引けなくても起動は成功している
+        logger.warning(
+            "list_instances() failed after QGIS registered (instance_id=%s)",
+            instance_id,
+            exc_info=True,
+        )
+    return None
+
+
 def _shutdown_worker_best_effort(
     proc: subprocess.Popen[bytes],
     *,
     automation_client: E2EAutomationClient,
     instance_id: str,
     graceful_timeout_s: float,
+    known_qgis: _KnownQgis | None = None,
 ) -> None:
     """spawn した QGIS と、起動に使ったプロセスを片付ける。
 
@@ -803,10 +866,12 @@ def _shutdown_worker_best_effort(
 
     1. Worker がまだ一覧に居れば `stop_registered_worker` で閉じる（閉じるよう
        頼み、消えなければその pid だけを強制終了）
-    2. ``proc`` が残っていれば従来どおり止める。``qgis_bin`` を直接起こした場合は
-       1 で同じプロセスが終わっているので何もしない。Worker が一覧に居ない
-       （登録が外れた、Hub に聞けない）場合はここが唯一の片付けになる
-    3. 失敗は warning ログだけ出す（次のテストに進む方を優先）
+    2. 一覧に居なければ（固まって登録が外れた、Hub に聞けない）、登録したときに
+       覚えた ``known_qgis`` を `_stop_unlisted_qgis` で止める（#43）。ランチャー
+       経由だと ``proc`` を止めても QGIS 本体は残るため
+    3. ``proc`` が残っていれば従来どおり止める。``qgis_bin`` を直接起こした場合は
+       ``proc`` が QGIS 本体なので、2 ではなくここで止める
+    4. 失敗は warning ログだけ出す（次のテストに進む方を優先）
     """
     worker_pid: int | None = None
     try:
@@ -828,9 +893,107 @@ def _shutdown_worker_best_effort(
             pid=worker_pid,
             graceful_timeout_s=graceful_timeout_s,
         )
+    elif known_qgis is not None and known_qgis.pid is not None:
+        if known_qgis.pid != proc.pid:
+            _stop_unlisted_qgis(known_qgis, graceful_timeout_s=graceful_timeout_s)
+        elif proc.poll() is None:
+            logger.warning(
+                "QGIS (pid=%d, launch_token=%s) is no longer registered with the Hub "
+                "(it may have hung); stopping it",
+                proc.pid,
+                known_qgis.launch_token,
+            )
 
     if proc.poll() is None:
         _terminate_worker(proc, graceful_timeout_s=graceful_timeout_s)
+
+
+def _stop_unlisted_qgis(known: _KnownQgis, *, graceful_timeout_s: float) -> None:
+    """Hub の一覧から外れた QGIS 本体を止める（#43、best-effort）。
+
+    固まって heartbeat が切れた QGIS は、Hub が接続を切り、猶予の後に一覧から
+    外す。閉じるよう頼めないので、外から止める。
+
+    - Windows: pid を開き、作られた時刻（起こしてから登録を確かめるまで）と
+      環境変数の launch_token で同じ QGIS かを確かめる（pid の使い回しで無関係の
+      プロセスを止めないため）。``taskkill``（``/F`` なし、窓に閉じるよう伝える）
+      で穏やかに止め、``graceful_timeout_s`` 待っても残れば、同じハンドルで
+      強制終了する
+    - posix: QGIS を起こしたコマンドのプロセスグループに居れば、SIGTERM、
+      残れば SIGKILL
+    - 止めるときは warning を出す（固まった QGIS があったことを知らせる）
+    """
+    pid = known.pid
+    if pid is None:
+        return
+    if sys.platform != "win32":
+        _stop_unlisted_qgis_posix(known, pid, graceful_timeout_s=graceful_timeout_s)
+        return
+    process = _open_process(pid)
+    if process is None:
+        if _pid_alive(pid):
+            logger.warning(
+                "Could not open QGIS (pid=%d) that is no longer registered with the Hub; "
+                "it may still be running",
+                pid,
+            )
+        return
+    try:
+        ours = _is_our_qgis(
+            process, known.launch_token, since=known.launched_at, until=known.registered_at
+        )
+        if ours is None:
+            logger.warning(
+                "Could not inspect QGIS (pid=%d) that is no longer registered with the Hub; "
+                "if it is ours, it is still running",
+                pid,
+            )
+            return
+        if not ours or process.wait(0):
+            return  # 別のプロセス（pid が使い回された）か、もう終わっている
+        logger.warning(
+            "QGIS (pid=%d, launch_token=%s) is no longer registered with the Hub "
+            "(it may have hung); stopping it",
+            pid,
+            known.launch_token,
+        )
+        subprocess.run(["taskkill", "/PID", str(pid)], check=False, capture_output=True)
+        if process.wait(graceful_timeout_s):
+            return
+        logger.warning(
+            "QGIS (pid=%d) did not close within %.1fs; killing it", pid, graceful_timeout_s
+        )
+        if not process.terminate():
+            logger.warning("QGIS still alive after force kill (pid=%d)", pid)
+    finally:
+        process.close()
+
+
+def _stop_unlisted_qgis_posix(known: _KnownQgis, pid: int, *, graceful_timeout_s: float) -> None:
+    """`_stop_unlisted_qgis` の posix 版。プロセスグループで自分の QGIS か確かめる。"""
+    import signal as _signal
+
+    try:
+        if os.getpgid(pid) != known.group:
+            return
+    except OSError:
+        return  # もう居ない
+    logger.warning(
+        "QGIS (pid=%d, launch_token=%s) is no longer registered with the Hub "
+        "(it may have hung); stopping it",
+        pid,
+        known.launch_token,
+    )
+    try:
+        os.kill(pid, _signal.SIGTERM)
+    except OSError:
+        return
+    if _wait_pid_dead(pid, timeout_s=graceful_timeout_s):
+        return
+    logger.warning("QGIS (pid=%d) did not close within %.1fs; killing it", pid, graceful_timeout_s)
+    _force_kill_pid(pid)
+    if not _wait_pid_dead(pid, timeout_s=2.0):
+        logger.warning("QGIS still alive after force kill (pid=%d)", pid)
 
 
 # QGIS に自分で閉じてもらうコード。手順は QGIS 側の

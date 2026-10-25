@@ -893,6 +893,115 @@ class TestSpawnQgisContextManager:
         assert processes.force_killed == []
         assert mock_popen[0].terminated or mock_popen[0].killed
 
+    def test_qgis_that_left_the_list_is_stopped_by_the_pid_it_registered_with(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_popen: list[_FakePopen],
+    ) -> None:
+        """#43: 固まって一覧から外れた QGIS 本体を、登録したときの pid で止める。
+
+        ランチャー経由だと、起動したプロセスを止めても QGIS 本体は残る。
+        """
+        monkeypatch.delenv("QPUPPETEER_E2E_USE_RUNNING_QGIS", raising=False)
+        stopped: list[Any] = []
+        monkeypatch.setattr(
+            spawn_module,
+            "_stop_unlisted_qgis",
+            lambda known, *, graceful_timeout_s: stopped.append(known),
+        )
+        client = _FakeAutomationClient()
+        client.bind_popens(mock_popen)
+        client.feed(
+            [_FakeInstance(instance_id="inst-1", pid=23456)],  # register 検出
+            [_FakeInstance(instance_id="inst-1", pid=23456)],  # pid を覚える
+            [],  # teardown のときには一覧から外れている
+        )
+        before = time.time()
+        with spawn_qgis(
+            hub_port=9876,
+            automation_client=client,  # type: ignore[arg-type]
+            command=["launcher.bat"],
+            register_timeout_s=2.0,
+            graceful_shutdown_timeout_s=0.1,
+        ):
+            mock_popen[0].returncode = 0  # ランチャーは QGIS を起こして終わった
+        assert len(stopped) == 1
+        known = stopped[0]
+        assert known.pid == 23456
+        assert known.launch_token == mock_popen[0].env["QPUPPETEER_LAUNCH_TOKEN"]
+        assert known.launched_at <= before <= known.registered_at <= time.time()
+        assert known.group == mock_popen[0].pid
+        assert client.execute_python_calls == []
+
+    def test_listed_qgis_is_not_stopped_from_outside(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_popen: list[_FakePopen],
+        processes: _FakeProcesses,
+    ) -> None:
+        """一覧に居る QGIS は、今までどおり閉じるよう頼む（#43 の止め方は使わない）。"""
+        monkeypatch.delenv("QPUPPETEER_E2E_USE_RUNNING_QGIS", raising=False)
+        stopped: list[Any] = []
+        monkeypatch.setattr(
+            spawn_module,
+            "_stop_unlisted_qgis",
+            lambda known, *, graceful_timeout_s: stopped.append(known),
+        )
+        client = _FakeAutomationClient()
+        client.bind_popens(mock_popen)
+        client.feed([_FakeInstance(instance_id="inst-1", pid=23456)])
+        processes.alive.add(23456)
+        client.on_execute_python = lambda code, instance: processes.alive.discard(23456)
+        with spawn_qgis(
+            hub_port=9876,
+            automation_client=client,  # type: ignore[arg-type]
+            command=["launcher.bat"],
+            register_timeout_s=2.0,
+            graceful_shutdown_timeout_s=0.5,
+        ):
+            mock_popen[0].returncode = 0
+        assert stopped == []
+        assert len(client.execute_python_calls) == 1
+
+    def test_directly_started_qgis_that_left_the_list_is_stopped_with_a_warning(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_popen: list[_FakePopen],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """``qgis_bin`` を直接起こしたなら、起動したプロセスが QGIS 本体。それを止める。"""
+        import logging
+
+        monkeypatch.delenv("QPUPPETEER_E2E_USE_RUNNING_QGIS", raising=False)
+        stopped: list[Any] = []
+        monkeypatch.setattr(
+            spawn_module,
+            "_stop_unlisted_qgis",
+            lambda known, *, graceful_timeout_s: stopped.append(known),
+        )
+        client = _FakeAutomationClient()
+        client.bind_popens(mock_popen)
+        client.feed(
+            [_FakeInstance(instance_id="inst-1", pid=12345)],
+            [_FakeInstance(instance_id="inst-1", pid=12345)],
+            [],
+        )
+        with (
+            caplog.at_level(logging.WARNING, logger="pytest_qgis_puppeteer.spawn"),
+            spawn_qgis(
+                hub_port=9876,
+                automation_client=client,  # type: ignore[arg-type]
+                qgis_bin="qgis-bin.exe",
+                register_timeout_s=2.0,
+                graceful_shutdown_timeout_s=0.1,
+            ),
+        ):
+            pass
+        assert stopped == []
+        assert mock_popen[0].terminated or mock_popen[0].killed
+        assert "pid=12345" in caplog.text
+        assert "no longer registered with the Hub" in caplog.text
+
 
 # ============================================================
 # stop_registered_worker / _force_kill_pid（#9）
@@ -1052,6 +1161,10 @@ class _FakeWindowsProcess:
         self._environ = environ
         self.terminated = False
         self.closed = False
+        # 終わっているか。taskkill（/F なし）で閉じるなら closes_on_request
+        self.exited = False
+        self.closes_on_request = False
+        self.waits: list[float] = []
 
     def created_at(self) -> float | None:
         return self._created
@@ -1059,8 +1172,13 @@ class _FakeWindowsProcess:
     def environ(self) -> dict[str, str] | None:
         return self._environ
 
+    def wait(self, timeout_s: float) -> bool:
+        self.waits.append(timeout_s)
+        return self.exited
+
     def terminate(self) -> bool:
         self.terminated = True
+        self.exited = True
         return True
 
     def close(self) -> None:
@@ -1125,6 +1243,145 @@ class TestKillQgisWithToken:
         assert "pid=300" in caplog.text
 
 
+class TestStopUnlistedQgis:
+    """一覧から外れた QGIS 本体を、覚えた pid で止める（#43）。"""
+
+    TOKEN = "lt-mine"
+
+    def _known(self, pid: int = 300) -> Any:
+        return spawn_module._KnownQgis(
+            pid=pid,
+            launch_token=self.TOKEN,
+            launched_at=1000.0,
+            registered_at=1500.0,
+            group=100,
+        )
+
+    def _windows(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        handle: _FakeWindowsProcess | None,
+    ) -> list[list[str]]:
+        """Windows の経路にし、pid 300 を開くと ``handle`` が返るようにする。"""
+        taskkills: list[list[str]] = []
+
+        def _run(cmd: list[str], **kwargs: Any) -> None:
+            taskkills.append(cmd)
+            if handle is not None and handle.closes_on_request:
+                handle.exited = True
+
+        monkeypatch.setattr(spawn_module.sys, "platform", "win32")
+        monkeypatch.setattr(spawn_module.subprocess, "run", _run)
+        monkeypatch.setattr(spawn_module, "_open_process", lambda pid: handle)
+        return taskkills
+
+    def _ours(self) -> _FakeWindowsProcess:
+        return _FakeWindowsProcess(300, 1200.0, {"QPUPPETEER_LAUNCH_TOKEN": self.TOKEN})
+
+    def test_hung_qgis_is_asked_then_force_killed_with_a_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        handle = self._ours()
+        taskkills = self._windows(monkeypatch, handle)
+        with caplog.at_level(logging.WARNING, logger="pytest_qgis_puppeteer.spawn"):
+            spawn_module._stop_unlisted_qgis(self._known(), graceful_timeout_s=3.0)
+        assert taskkills == [["taskkill", "/PID", "300"]]  # /F なし（穏やかに）
+        assert handle.waits == [0, 3.0]
+        assert handle.terminated  # 同じハンドルで強制終了
+        assert handle.closed
+        assert "pid=300" in caplog.text
+        assert "no longer registered with the Hub" in caplog.text
+        assert "did not close within 3.0s" in caplog.text
+
+    def test_qgis_that_closes_when_asked_is_not_force_killed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        handle = self._ours()
+        handle.closes_on_request = True
+        taskkills = self._windows(monkeypatch, handle)
+        spawn_module._stop_unlisted_qgis(self._known(), graceful_timeout_s=3.0)
+        assert taskkills == [["taskkill", "/PID", "300"]]
+        assert not handle.terminated
+        assert handle.closed
+
+    @pytest.mark.parametrize(
+        ("created", "environ"),
+        [
+            (1200.0, {"QPUPPETEER_LAUNCH_TOKEN": "lt-other"}),  # 別の起動の QGIS
+            (1200.0, {}),  # 人が起こしたプロセス
+            (1600.0, {"QPUPPETEER_LAUNCH_TOKEN": TOKEN}),  # 登録の後に作られた（pid の使い回し）
+            (900.0, {"QPUPPETEER_LAUNCH_TOKEN": TOKEN}),  # 起こす前からある
+        ],
+        ids=["other-token", "no-token", "created-after", "created-before"],
+    )
+    def test_a_process_that_reuses_the_pid_is_left_alone(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        created: float,
+        environ: dict[str, str],
+    ) -> None:
+        handle = _FakeWindowsProcess(300, created, environ)
+        taskkills = self._windows(monkeypatch, handle)
+        spawn_module._stop_unlisted_qgis(self._known(), graceful_timeout_s=3.0)
+        assert taskkills == []
+        assert not handle.terminated
+        assert handle.closed
+
+    def test_qgis_that_already_exited_is_left_alone(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        handle = self._ours()
+        handle.exited = True
+        taskkills = self._windows(monkeypatch, handle)
+        spawn_module._stop_unlisted_qgis(self._known(), graceful_timeout_s=3.0)
+        assert taskkills == []
+        assert not handle.terminated
+
+    def test_unreadable_qgis_is_reported_and_left_alone(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        handle = _FakeWindowsProcess(300, 1200.0, None)
+        taskkills = self._windows(monkeypatch, handle)
+        with caplog.at_level(logging.WARNING, logger="pytest_qgis_puppeteer.spawn"):
+            spawn_module._stop_unlisted_qgis(self._known(), graceful_timeout_s=3.0)
+        assert taskkills == []
+        assert not handle.terminated
+        assert "Could not inspect QGIS (pid=300)" in caplog.text
+
+    def test_qgis_that_cannot_be_opened_is_reported_when_alive(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        processes: _FakeProcesses,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+
+        self._windows(monkeypatch, None)
+        processes.alive.add(300)
+        with caplog.at_level(logging.WARNING, logger="pytest_qgis_puppeteer.spawn"):
+            spawn_module._stop_unlisted_qgis(self._known(), graceful_timeout_s=3.0)
+        assert "Could not open QGIS (pid=300)" in caplog.text
+        assert processes.force_killed == []
+
+    def test_posix_stops_qgis_only_in_our_process_group(
+        self, monkeypatch: pytest.MonkeyPatch, processes: _FakeProcesses
+    ) -> None:
+        import signal
+
+        sent: list[tuple[int, int]] = []
+        groups = {300: 100, 400: 999}
+        monkeypatch.setattr(spawn_module.sys, "platform", "linux")
+        monkeypatch.setattr(spawn_module.os, "getpgid", groups.__getitem__, raising=False)
+        monkeypatch.setattr(spawn_module.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+        processes.alive.update({300, 400})  # SIGTERM では終わらない
+        spawn_module._stop_unlisted_qgis(self._known(300), graceful_timeout_s=0.1)
+        spawn_module._stop_unlisted_qgis(self._known(400), graceful_timeout_s=0.1)
+        assert sent == [(300, signal.SIGTERM)]
+        assert processes.force_killed == [300]
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows API")
 def test_windows_process_list_and_creation_time_are_real() -> None:
     import os
@@ -1162,6 +1419,33 @@ def test_windows_process_handle_reads_the_token_and_kills() -> None:
             assert process.terminate() is True
         finally:
             process.close()
+        assert child.wait(timeout=5) is not None
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows API")
+def test_unlisted_qgis_is_stopped_through_a_real_handle() -> None:
+    """#43: 覚えた pid を開いて確かめ、閉じなければ強制終了する（本物のプロセス）。"""
+    import os
+    import subprocess
+
+    launched_at = time.time() - 1.0
+    env = dict(os.environ, QPUPPETEER_LAUNCH_TOKEN="lt-probe")
+    # 窓の無いプロセスは taskkill（/F なし）では閉じないので、固まった QGIS の代わりになる
+    child = subprocess.Popen(["ping", "-n", "30", "127.0.0.1"], env=env, stdout=subprocess.DEVNULL)
+    try:
+        time.sleep(0.3)
+        known = spawn_module._KnownQgis(
+            pid=child.pid,
+            launch_token="lt-probe",
+            launched_at=launched_at,
+            registered_at=time.time(),
+            group=child.pid,
+        )
+        spawn_module._stop_unlisted_qgis(known, graceful_timeout_s=0.5)
         assert child.wait(timeout=5) is not None
     finally:
         if child.poll() is None:

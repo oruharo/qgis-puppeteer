@@ -683,6 +683,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A hung QGIS started through a launcher was left running** (#43). When
+  QGIS stops answering heartbeats for long enough, the Hub drops it from
+  the instance list. `spawn_qgis` (and so the session QGIS, its restart and
+  the session teardown) looked up the QGIS pid in that list when cleaning
+  up, so it stopped only the launcher, and the QGIS window stayed open,
+  slowing anything that walks the desktop's windows. `spawn_qgis` now
+  remembers the QGIS pid when it registers. If the QGIS is no longer
+  listed at teardown, it checks that the pid is still the QGIS it started
+  (creation time and launch token on Windows, process group on posix),
+  asks it to close, kills it if it is still there after the graceful
+  timeout, and logs a warning.
+
 - **The QGIS Python launcher was found only for an LTR QGIS, and in pytest
   hardly ever.** Discovery looked only for `python-qgis-ltr.bat`, the name in
   an LTR install; a regular install has `python-qgis.bat` next to
