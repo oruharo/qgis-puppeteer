@@ -8,6 +8,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`Locator.count()`** (#41). `expect(locator).to_have_count(n)` waits
+  until the count is `n`, so there was no way to read how many widgets match
+  right now; tests read `diagnostics.match_count` from `check_actionability`,
+  which breaks when the diagnostics change shape. `count()` counts once,
+  without waiting, and returns 0 when nothing matches; several matches are not
+  an ambiguity error. It counts as `to_have_count` does (visible widgets only,
+  `index` ignored), and `to_have_count` now polls it.
+
 - **The pytest client answers dialogs** (#40). Dialog handlers had MCP
   tools but no client methods, so tests sent `qgis_register_dialog_handler`
   themselves, named each handler, and a handler they forgot to remove

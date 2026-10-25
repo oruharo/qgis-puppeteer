@@ -812,8 +812,8 @@ selector dict の全キー。複数キー指定は AND セマンティクス。
 や `fill()`（その場で探す）でも同じ結果になる。
 
 `window` と `class_inherits` は snapshot の node に無い情報なので、その場で探す経路
-（操作、`close()`、`expect` の `to_be_visible` / `to_be_hidden` / `to_be_enabled` /
-`to_be_disabled` / `to_have_count`）だけで使える。snapshot で探す API（`snapshot()` /
+（操作、`close()`、`exists()` / `is_visible()` / `is_enabled()` / `count()`、`expect` の
+`to_be_visible` / `to_be_hidden` / `to_be_enabled` / `to_be_disabled` / `to_have_count`）だけで使える。snapshot で探す API（`snapshot()` /
 `get_text()` / `get_value()` / `wait_for_widget`、`expect` の `to_have_text` /
 `to_contain_text` / `to_have_value` / `to_be_checked` / `to_have_row_count`）に渡すと
 `LiveOnlySelectorError` になる（黙って当たらないのではなく）。
@@ -1157,6 +1157,19 @@ timeout を超えると `WidgetNotActionableError`。strict mode で複数マッ
 | `exists()` | bool |
 | `is_visible()` | bool |
 | `is_enabled()` | bool |
+| `count()` | int — selector に当たる見えている widget の数（#41） |
+
+`count()` は待たずに 1 回だけ数え、当たらなければ 0 を返す。2 件以上に当たっても
+`SelectorAmbiguousError` にしない。数え方は `expect(...).to_have_count(n)` と同じ
+（見えていない widget は数えない。`index` は無視する）。`to_have_count` は数が合うまで
+待ち、`count()` は今の数を読む:
+
+```python
+forms = qgis.locator({"scope": "any", "class_inherits": "QgsAttributeDialog"})
+assert forms.count() == 1  # 閉じる前に、ちょうど 1 つ開いていることを確かめる
+forms.close()
+expect(forms).to_have_count(0)
+```
 
 ### 値取得（snapshot ベース）
 
@@ -1348,6 +1361,7 @@ expect(qgis.locator({"scope": "any", "class": "QDialog"})).to_have_count(0)  # �
 - `scope="any"` は見えている一番上の窓をすべて探すので、モーダルでない窓も対象
 - `to_have_count` は見えている widget だけを数える（閉じたがまだ消えていない窓は
   数えない）。`index` は無視する
+- 待たずに今の数を読むなら `locator.count()`（[Locator API](#locator-api) の「即時状態チェック」）
 
 ---
 

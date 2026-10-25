@@ -75,7 +75,8 @@ def check_snapshot_selector(selector: dict[str, Any]) -> None:
     if keys:
         raise LiveOnlySelectorError(
             f"selector keys {keys} are not in snapshots and work only where the widget is "
-            "looked up in QGIS: actions, close(), and expect's to_be_visible / to_be_hidden / "
+            "looked up in QGIS: actions, close(), exists() / is_visible() / is_enabled() / "
+            "count(), and expect's to_be_visible / to_be_hidden / "
             "to_be_enabled / to_be_disabled / to_have_count. They cannot be used with "
             "snapshot(), get_text(), get_value(), wait_for_widget, or expect's to_have_text / "
             f"to_contain_text / to_have_value / to_be_checked / to_have_row_count: {selector!r}"

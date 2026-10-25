@@ -137,6 +137,51 @@ class TestImmediateChecks:
         assert loc.is_enabled() is False
 
 
+class TestCount:
+    """#41: 待たずに 1 回だけ数える。数え方は to_have_count と同じ"""
+
+    @staticmethod
+    def _several(n: int) -> dict[str, Any]:
+        return {
+            "exists": False,
+            "actionable": False,
+            "diagnostics": {"reason": "selector_ambiguous", "match_count": n},
+        }
+
+    def test_counts_several_without_an_ambiguity_error(self) -> None:
+        client = _FakeClient({"qgis_check_actionability": [self._several(3)]})
+        loc = Locator(client, {"scope": "any", "class": "QDialog"}, instance="w1")
+        assert loc.count() == 3
+        assert len(client.calls) == 1  # 待たない
+        _, params, instance = client.calls[0]
+        assert params["selector"] == {"scope": "any", "class": "QDialog", "attr": {"visible": True}}
+        assert instance == "w1"
+
+    def test_one_and_none(self) -> None:
+        found = {"exists": True, "actionable": True, "diagnostics": {"match_count": 1}}
+        missing = {"exists": False, "actionable": False, "diagnostics": {"reason": "no_match"}}
+        client = _FakeClient({"qgis_check_actionability": [found, missing]})
+        loc = Locator(client, {"object_name": "btn"})
+        assert loc.count() == 1
+        assert loc.count() == 0
+
+    def test_ignores_index_and_keeps_an_explicit_visible(self) -> None:
+        client = _FakeClient({"qgis_check_actionability": [self._several(2)]})
+        loc = Locator(client, {"class": "QDialog", "index": 1, "attr": {"visible": False}})
+        assert loc.count() == 2
+        sent = client.calls[0][1]["selector"]
+        assert "index" not in sent
+        assert sent["attr"] == {"visible": False}
+
+    def test_counts_inside_the_parent(self) -> None:
+        client = _FakeClient({"qgis_check_actionability": [self._several(2)]})
+        loc = Locator(client, {"object_name": "form"}).locator({"class": "QLineEdit"})
+        assert loc.count() == 2
+        sent = client.calls[0][1]["selector"]
+        assert sent["_scope_chain"] == [{"object_name": "form"}]
+        assert sent["class"] == "QLineEdit"
+
+
 # ============================================================
 # auto-wait（操作系）
 # ============================================================

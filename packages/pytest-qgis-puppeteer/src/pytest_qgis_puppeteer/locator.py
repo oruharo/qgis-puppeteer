@@ -16,6 +16,7 @@ widget pointer が無効化されても影響を受けない（§11.1 stale widg
 | `check() / uncheck()` | CheckBox / RadioButton |
 | `get_text() / get_value()` | snapshot ベースの現在値取得 |
 | `is_visible() / is_enabled() / exists()` | 即時状態チェック（wait なし） |
+| `count()` | 当たる見えている widget の数（wait なし） |
 | `snapshot()` | 配下のウィジェットツリー取得 |
 
 ## auto-wait（ADR-0002 §8.3）
@@ -357,6 +358,26 @@ class Locator:
     def is_enabled(self) -> bool:
         """selector が指す widget が現在 enabled か（wait なし）。"""
         return bool(self._check_actionability().get("enabled", False))
+
+    def count(self) -> int:
+        """selector に当たる**見えている** widget の数を、待たずに 1 回だけ数える（#41）。
+
+        当たらなければ 0。2 件以上でも曖昧さのエラーにしない（数えるのが目的なので）。
+        数え方は ``expect(locator).to_have_count(n)`` と同じで、``index`` は無視し、
+        見えていない widget は数えない（数えるなら ``attr={"visible": False}`` などで
+        明示する）。``to_have_count`` はこれを数が合うまで繰り返し呼ぶ。
+        """
+        selector = self._effective_selector()
+        selector.pop("index", None)
+        attr = dict(selector.get("attr") or {})
+        attr.setdefault("visible", True)
+        selector["attr"] = attr
+        check = self._client.check_actionability(selector, instance=self._instance)
+        diagnostics = check.get("diagnostics") or {}
+        match_count = diagnostics.get("match_count")
+        if isinstance(match_count, int):
+            return match_count
+        return 1 if check.get("exists") else 0
 
     # ------------------------------------------------------------
     # snapshot / 値取得
