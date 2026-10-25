@@ -1117,7 +1117,9 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
         キャンバス次第で、width / height はキャンバスの無い headless のときだけ効く。
         結果の width / height は保存した画像の実サイズ。範囲・サイズ・DPI を固定
         したいときは qgis_render_map を使う。output_path を省略すると一時ファイルに
-        保存する。
+        保存する。まだ何も描いていないキャンバスは背景色だけの画像になる。
+        プロジェクトもレイヤも開いていない QGIS はキャンバスの代わりにようこそ画面を
+        出しているので、そのあいだは失敗する。
         """
         params: dict[str, Any] = {}
         if output_path is not None:

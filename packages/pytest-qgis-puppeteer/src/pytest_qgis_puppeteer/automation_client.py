@@ -854,7 +854,9 @@ class E2EAutomationClient:
         写るのはキャンバスだけ。サイズはキャンバス次第で、`width` / `height` は
         キャンバスの無い headless のときだけ効く。戻り値の ``width`` /
         ``height`` は保存した画像の実サイズ。画像を比べるなら `render_map()`
-        を使う。`None` の引数は省略して送る。
+        を使う。`None` の引数は省略して送る。まだ何も描いていないキャンバスは
+        背景色だけの画像になる。ようこそ画面が出ているあいだ（プロジェクトも
+        レイヤも開いていない）は失敗が返る。
         """
         params: dict[str, Any] = {}
         if output_path is not None:

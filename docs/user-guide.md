@@ -766,7 +766,8 @@ async def main():
             )
         print(result["stdout"])
 
-        # スクショを撮る
+        # スクショを撮る。プロジェクトもレイヤも開いていない QGIS はキャンバスの
+        # 代わりにようこそ画面を出しているので、失敗が返る
         await client.call(
             "qgis_screenshot",
             {"output_path": "C:/tmp/screenshot.png"},
@@ -1783,7 +1784,7 @@ qgis.locator({"title": form["title"], "scope": "any"}).locator(
 
 | | `qgis_screenshot` | `qgis_render_map` |
 |---|---|---|
-| 写るもの | キャンバスに今映っている画像 | 指定した条件で描き直した地図 |
+| 写るもの | キャンバスに今映っている画像。まだ何も描いていないキャンバスは背景色だけ。ようこそ画面が出ているあいだは撮れない | 指定した条件で描き直した地図 |
 | サイズ | キャンバスの大きさ（表示スケール込み）。指定できない | `width` / `height` / `dpi` で固定 |
 | 範囲・CRS | キャンバスのまま | `extent` / `crs` で指定（省略時はキャンバス） |
 | 用途 | 失敗時の様子見、診断バンドル | 画像スナップショットの比較 |

@@ -11,7 +11,7 @@ import tempfile
 import uuid
 
 from qgis.core import QgsProject
-from qgis.gui import QgisInterface
+from qgis.gui import QgisInterface, QgsMapCanvas
 
 from . import queued
 
@@ -29,6 +29,10 @@ def take_screenshot(
     changes with the window size and the display scale; ``width`` / ``height``
     are ignored, and the returned ``width`` / ``height`` are read back from the
     saved file. For a fixed size, DPI or extent use ``qgis_render_map``.
+    A canvas that has drawn nothing yet (no layer was ever added, so its
+    extent is empty) is saved as its background colour. Fails while the
+    canvas is not shown (QGIS shows its welcome page until a project or a
+    layer is opened).
 
     Headless (no ``iface``): renders the layers shown in the layer tree over
     their combined extent at ``width`` x ``height`` (default 800 x 600), with
@@ -57,11 +61,29 @@ def take_screenshot(
         if iface is None:
             return _render_project_headless(output_path, width, height)
 
+        canvas = iface.mapCanvas()
+        if not canvas.isVisible():
+            # プロジェクトもレイヤも開いていない QGIS は、キャンバスの代わりに
+            # ようこそ画面を出している。隠れたキャンバスの大きさは意味が無い
+            return {
+                "success": False,
+                "error": (
+                    "the map canvas is not shown (QGIS shows its welcome page "
+                    "until a project or a layer is opened)"
+                ),
+            }
+
         # saveAsImage は失敗しても何も言わない。古いファイルが残っていると、その
         # サイズを成功として返してしまうので先に消す
         with contextlib.suppress(FileNotFoundError):
             os.remove(output_path)
-        iface.mapCanvas().saveAsImage(output_path)
+        if canvas.mapSettings().hasValidSettings():
+            canvas.saveAsImage(output_path)
+        else:
+            # レイヤを一度も足していないキャンバスは範囲が空で、一度も描かない。
+            # saveAsImage は空の画像を書けずに .pgw だけ残すので、画面と同じ
+            # 背景色だけの画像を自分で書く
+            _save_blank_canvas(canvas, output_path)
         size = _saved_image_size(output_path)
         if size is None:
             return {
@@ -104,6 +126,20 @@ def _render_project_headless(output_path: str, width: int | None, height: int | 
         "mode": "headless",
         "render_errors": result["render_errors"],
     }
+
+
+def _save_blank_canvas(canvas: QgsMapCanvas, path: str) -> None:
+    """まだ何も描いていないキャンバスの見た目（背景色だけ）を PNG で書く。
+
+    大きさは描いたときに saveAsImage が書く画像と同じ（デバイスピクセル）。
+    """
+    from qgis.PyQt.QtGui import QImage
+
+    settings = canvas.mapSettings()
+    size = settings.deviceOutputSize()
+    image = QImage(size.width(), size.height(), QImage.Format_ARGB32)
+    image.fill(settings.backgroundColor())
+    image.save(path, "PNG")
 
 
 def _saved_image_size(path: str) -> tuple[int, int] | None:

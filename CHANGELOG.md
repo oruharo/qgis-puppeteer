@@ -683,6 +683,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`qgis_screenshot` failed on a canvas that had drawn nothing** (#42).
+  A canvas to which no layer was ever added has an empty extent and never
+  draws, so `saveAsImage` left only a `.pgw` and the tool reported that the
+  image was not written. Such a canvas is now saved as its background
+  colour, at the canvas's size. While QGIS shows its welcome page instead
+  of the canvas (no project or layer opened yet), the tool says so instead
+  of saving the hidden canvas.
+
 - **`text_contains`, `text_re`, `role` and `attr` were ignored when acting
   on a widget** (#35). They were applied when a selector was resolved in a
   snapshot (`expect`, `wait_for_widget`, `snapshot()`), but not when one

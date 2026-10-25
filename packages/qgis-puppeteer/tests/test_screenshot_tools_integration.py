@@ -37,6 +37,15 @@ class _Canvas:
     def __init__(self, size):
         self.size = size
 
+    def isVisible(self):
+        return True
+
+    def mapSettings(self):
+        return self
+
+    def hasValidSettings(self):
+        return True
+
     def saveAsImage(self, path):
         if self.size is None:
             return  # 何も書かない（保存に失敗したキャンバス）
@@ -110,3 +119,88 @@ def test_a_stale_file_is_not_reported_as_the_new_image(shots: dict[str, Any]) ->
 
 def test_default_paths_do_not_collide(shots: dict[str, Any]) -> None:
     assert shots["default_1"]["path"] != shots["default_2"]["path"]
+
+
+@pytest.fixture(scope="module")
+def canvas_shots(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
+    """本物の QgsMapCanvas で、隠れている・まだ描いていない・描いた後を撮る。"""
+    out = tmp_path_factory.mktemp("canvas")
+    return run_in_qgis(
+        f"""
+from qgis.PyQt.QtCore import QEventLoop, QTimer
+from qgis.PyQt.QtGui import QColor, QImage
+from qgis.gui import QgsMapCanvas
+from qgis_puppeteer.qgis_tools.screenshot_tools import take_screenshot
+
+OUT = {str(out)!r}
+
+
+class _Iface:
+    def __init__(self, canvas):
+        self.canvas = canvas
+
+    def mapCanvas(self):
+        return self.canvas
+
+
+def shot(name):
+    res = take_screenshot(os.path.join(OUT, name + ".png"), None, None, _Iface(canvas))
+    if res.get("success"):
+        img = QImage(res["path"])
+        res["center_rgba"] = hex(img.pixel(img.width() // 2, img.height() // 2))
+    res["files"] = sorted(f for f in os.listdir(OUT) if f.startswith(name + "."))
+    return res
+
+
+canvas = QgsMapCanvas()
+canvas.setCanvasColor(QColor("#123456"))
+canvas.resize(160, 90)
+hidden = shot("hidden")
+
+canvas.show()
+for _ in range(5):
+    _app.processEvents()
+blank = shot("blank")
+blank["viewport"] = [canvas.viewport().width(), canvas.viewport().height()]
+
+{RED_BOX_LAYER}
+canvas.setDestinationCrs(layer.crs())
+canvas.setLayers([layer])
+canvas.setExtent(layer.extent())
+loop = QEventLoop()
+canvas.mapCanvasRefreshed.connect(loop.quit)
+QTimer.singleShot(10000, loop.quit)
+canvas.refresh()
+loop.exec_()
+drawn = shot("drawn")
+
+RESULT = {{"hidden": hidden, "blank": blank, "drawn": drawn}}
+""",
+        gui=True,
+    )
+
+
+def test_a_hidden_canvas_is_an_error_that_says_why(canvas_shots: dict[str, Any]) -> None:
+    """起動直後の QGIS はようこそ画面を出していて、キャンバスは隠れている。"""
+    res = canvas_shots["hidden"]
+    assert res["success"] is False
+    assert "not shown" in res["error"]
+    assert res["files"] == []
+
+
+def test_a_canvas_that_has_drawn_nothing_is_saved_as_its_background(
+    canvas_shots: dict[str, Any],
+) -> None:
+    """レイヤを一度も足していないキャンバスは描かない。以前は .pgw だけ残して失敗した。"""
+    res = canvas_shots["blank"]
+    assert res["success"], res
+    assert [res["width"], res["height"]] == res["viewport"]
+    assert res["center_rgba"] == "0xff123456"
+    assert res["files"] == ["blank.png"]  # 範囲が無いので .pgw は書かない
+
+
+def test_a_drawn_canvas_is_saved_as_drawn(canvas_shots: dict[str, Any]) -> None:
+    res = canvas_shots["drawn"]
+    assert res["success"], res
+    assert res["center_rgba"] == "0xffff0000"  # 赤いポリゴン
+    assert res["files"] == ["drawn.pgw", "drawn.png"]
