@@ -30,10 +30,13 @@ selector・Locator・dialog handler 等の機能リファレンスをまとめ�
 15. [MCP の操作記録](#mcp-recording)
 16. [複数 QGIS（multi-instance）](#multi-instance)
 17. [Permissions / 信頼モード](#permissions)
-18. [環境変数リファレンス](#環境変数リファレンス)
-19. [Troubleshooting](#troubleshooting)
-20. [Roadmap](#roadmap)
-21. [ライセンスとサポート](#ライセンスとサポート)
+18. [ini 設定・CLI オプション・marker（pytest）](#ini-reference)
+19. [MCP ツール一覧](#mcp-tools)
+20. [`qgis` fixture のメソッド一覧](#qgis-methods)
+21. [環境変数リファレンス](#環境変数リファレンス)
+22. [Troubleshooting](#troubleshooting)
+23. [Roadmap](#roadmap)
+24. [ライセンスとサポート](#ライセンスとサポート)
 22. 付録: [アップグレード（dev を追いかけている場合）](#アップグレードdev-を追いかけている場合)
 
 ---
@@ -2336,6 +2339,171 @@ result = await client.call("qgis_get_whitelist")
 # session に追加された分をクリア
 await client.call("qgis_clear_session_permissions")
 ```
+
+---
+
+<a id="ini-reference"></a>
+
+## ini 設定・CLI オプション・marker（pytest）
+
+pytest-qgis-puppeteer の設定は `pyproject.toml` の `[tool.pytest.ini_options]`
+（または `pytest.ini`）に書く。`pytest --help` の `[pytest] ini-options` と
+`qgis-puppeteer E2E options` にも同じ一覧が出る。
+
+### QGIS の起動
+
+この 4 つは CLI 引数・環境変数でも渡せる。効く順は
+**CLI 引数 > 環境変数 > `environments.toml` の env > ini**。
+
+| ini | CLI 引数 | 環境変数 | 用途 |
+|---|---|---|---|
+| `qgis_bin` | `--qgis-bin` | `QPUPPETEER_QGIS_BIN` | QGIS の実行ファイル（`qgis-ltr-bin.exe` / `qgis-bin.exe`） |
+| `qgis_args` | `--qgis-args` | `QPUPPETEER_QGIS_ARGS` | QGIS に渡す追加の引数。ini はリスト、CLI 引数と環境変数は shell と同じ書き方の 1 つの文字列 |
+| `qgis_command` | `--qgis-command` | `QPUPPETEER_QGIS_COMMAND` | QGIS を起動するコマンド全体。あれば `qgis_bin` と `qgis_args` の代わりに使う（[独自の launcher](#1-ホストアプリ独自の-launcher-を使いたい場合)） |
+| `qgis_python` | `--qgis-python` | `QPUPPETEER_QGIS_PYTHON` | Hub を起こす QGIS 付属の Python launcher（`python-qgis-ltr.bat` / `python-qgis.bat`）。未指定なら `qgis_bin` の隣、次に `OSGEO4W_ROOT/bin` から探す（[見つからないとき](#qgis_python-が見つからないpytest)） |
+
+| ini | 既定 | 用途 |
+|---|---|---|
+| `qgis_startup_timeout` | `60` | QGIS が Hub に登録して呼び出しに答えるまで待つ秒数。重いプロジェクトを開くなら伸ばす（[届かないとき](#did-not-register-to-hub-and-answer-a-command-within-nspytest)） |
+
+### 失敗時の診断
+
+| ini | 既定 | 用途 |
+|---|---|---|
+| `qgis_diag_dir` | `outputs/diagnostics` | [診断バンドル](#2-失敗時の診断バンドル)の出力先。`environments.toml` の env で動くときは、最後のフォルダの前に env 名が入る（`outputs/<env 名>/diagnostics`） |
+| `qgis_diag_capture_screenshots` | `true` | 呼び出しのたびにキャンバスを撮り、失敗したテストの診断バンドルに入れる。`false` で撮らない |
+
+### テストの判定
+
+| ini | 既定 | 用途 |
+|---|---|---|
+| `qgis_fail_on_uncaught_exception` | `true` | テスト中に QGIS 内で誰にも捕まらなかった Python 例外（Qt の slot 内のものなど）があれば、テストを落とす（[Uncaught exceptions](#uncaught-exceptions)） |
+| `qgis_fail_on_message_level` | 空（見ない） | QgsMessageLog（メッセージバーを含む）にこの重さ以上のメッセージが出たら、テストを落とす。`info` / `warning` / `critical`（[pytest で落とす](#pytest-で落とすopt-in)） |
+| `qgis_message_allowlist` | なし | `qgis_fail_on_message_level` で無視するメッセージ。1 行に 1 つ、メッセージを探す正規表現か `<tag>::<正規表現>`。`#` で始まる行はコメント |
+| `qgis_leftover_fail` | なし | テストのあとに残っていてはいけない状態。残っていればテストを error にする。項目: `dialogs` `popup` `editing` `editing_modified` `map_tool` `selection` `layer_tree` `layers` `active_layer` `project_dirty` `message_bar`（[残った状態の検査](#leftover-state)） |
+| `qgis_leftover_warn` | なし | `qgis_leftover_fail` と同じ項目で、警告（`QgisLeftoverWarning`）だけ出す |
+| `qgis_auto_fresh_after_failure` | `false` | テストが失敗したあと、`true` なら次のテストを新しい QGIS で動かす（`fresh_qgis` と同じ）。`session` なら、次に `qgis` を使うテストの前に session の QGIS を起こし直す（[失敗の後に起こし直す](#失敗の後に-qgis-を起こし直す-qgis_auto_fresh_after_failure)） |
+
+### CLI 引数だけのもの
+
+| CLI 引数 | 用途 |
+|---|---|
+| `--env` | `environments.toml` の env を選ぶ。`--env=NAME` / `--env=A,B`（順に回す）/ `--env=all`（[Test Environments](#3-test-environments複数-qgis-構成の宣言的切替)） |
+| `--list-envs` | `environments.toml` の env を一覧して終わる |
+| `--env-strict` | `--env=A,B` / `--env=all` のとき、テストが 1 つも集まらなかった env を失敗として数える |
+
+### marker
+
+| marker | 用途 |
+|---|---|
+| `@pytest.mark.qgis_env(*names)` | テストを `environments.toml` の env に割り当てる。`--env` で選んだ env のものだけが動く（[Test Environments](#3-test-environments複数-qgis-構成の宣言的切替)） |
+| `@pytest.mark.fresh_qgis(args=[...], env={...})` | そのテストだけ新しい QGIS を起こして動かす（[`fresh_qgis`](#4-テスト中だけ-qgis-を再起動する-pytestmarkfresh_qgis)） |
+| `@pytest.mark.qgis_restart_before` | そのテストの前に session の QGIS を起こし直す。`fresh_qgis` のテスト、dev モード、`qgis_process` を上書きしたときは効かない |
+| `@pytest.mark.qgis_allow_message(pattern=None, *, tag=None, source=None)` | そのテストでは、当てはまるメッセージを `qgis_fail_on_message_level` で見ない（[pytest で落とす](#pytest-で落とすopt-in)） |
+| `@pytest.mark.qgis_leftover_expected(*items, reason=None)` | そのテストが残すと分かっている状態の項目を、`qgis_leftover_fail` / `qgis_leftover_warn` で知らせない。どれも残らなければ `QgisLeftoverWarning` で知らせる |
+
+---
+
+<a id="mcp-tools"></a>
+
+## MCP ツール一覧
+
+Claude Desktop などの MCP クライアントから使えるツール。`qgis_list_instances` /
+`qgis_use_instance` と `qgis_record_*` 以外は `instance` 引数で宛先の QGIS を選べる。
+省くと `qgis_use_instance` で選んだ QGIS に送る（選んでいなければ Hub が決める。
+QGIS が複数あると `instance_ambiguous`）。
+
+| 分類 | ツール | 内容 |
+|---|---|---|
+| QGIS の選択（[Multi-instance](#multi-instance)） | `qgis_list_instances` | QGIS インスタンスの一覧（切断直後のものも含む） |
+| | `qgis_use_instance` | 以後のツール呼び出しの宛先を決める |
+| | `qgis_wait_ready` | QGIS が呼び出しを処理できるようになるまで待つ |
+| レイヤ・選択 | `qgis_list_layers` | プロジェクトのレイヤ一覧 |
+| | `qgis_get_layer_info` | レイヤのメタデータ |
+| | `qgis_select_features` | 式（QGIS の式構文）に当てはまるフィーチャを選択する |
+| | `qgis_get_selected_features` | 選択中のフィーチャの属性（最大 `limit` 件） |
+| キャンバス（[操作](#map-canvas-input)） | `qgis_get_canvas_extent` / `qgis_set_canvas_extent` | キャンバスの範囲を読む / 決める |
+| | `qgis_canvas_mouse` | キャンバスにマウスの操作を送る（マップツールが受ける） |
+| | `qgis_canvas_key` | キャンバスなどにキーを送る |
+| 画像 | `qgis_screenshot` | キャンバスに今映っている画像を保存する |
+| | `qgis_render_map` | 範囲・CRS・サイズ・DPI・レイヤを決めて地図を PNG に描く（[画像スナップショット](#map-image-snapshot)） |
+| UI（[Selector](#selector-リファレンス)） | `qgis_snapshot_ui` | UI のウィジェットツリーを JSON で返す |
+| | `qgis_click_widget` | ウィジェットをクリックする |
+| | `qgis_set_widget_value` | ウィジェットに値を入れる |
+| | `qgis_read_rows` | 表・ツリー・リストの行を読む（snapshot の 100 行の上限なし） |
+| | `qgis_close_widget` | ウィジェットの窓を、人が × を押したときと同じく閉じる |
+| ダイアログ（[Dialog handler](#dialog-handler)） | `qgis_register_dialog_handler` | モーダルの窓が出たときの自動の答えを登録する |
+| | `qgis_unregister_dialog_handler` / `qgis_list_dialog_handlers` / `qgis_clear_dialog_handlers` | 名前で外す / 一覧 / 全部外す |
+| Python（[Permissions](#permissions)） | `qgis_execute_python` | ホワイトリストで許された Python コードを QGIS 内で実行する |
+| | `qgis_execute_with_permission` | ユーザーの許可を付けて Python コードを実行する |
+| | `qgis_get_whitelist` / `qgis_clear_session_permissions` | ホワイトリストを読む / この session で与えた許可を消す |
+| 画面の裏で起きたこと | `qgis_get_recent_exceptions` / `qgis_clear_recent_exceptions` | 誰にも捕まらなかった Python 例外を読む / 記録を消す（[Uncaught exceptions](#uncaught-exceptions)） |
+| | `qgis_get_recent_messages` / `qgis_clear_recent_messages` | QgsMessageLog のメッセージを読む / 記録を消す（[QgsMessageLog](#message-log)） |
+| | `qgis_get_leftover_state` | 作業のあとに確かめたい状態を 1 回で読む（[残った状態の検査](#leftover-state)） |
+| 操作の記録（[MCP の操作記録](#mcp-recording)） | `qgis_record_start` / `qgis_record_step` / `qgis_record_stop` | ツール呼び出しを JSONL に記録する / 区切りを付ける / 止める |
+
+QGIS の選択と操作の記録の 6 つ以外は、QGIS 側のコマンドとしても同じ名前で呼べる
+（Python スクリプトの `await client.call("qgis_list_layers")`）。QGIS 側のコマンドには
+ほかに、MCP には出していない [`qgis_check_actionability`](#qgis_check_actionabilitylow-level-rpc) と
+[`test.signal_spy_*` / `test.wait_for_signal`](#signal-spy--wait_for_signal) がある。
+
+---
+
+<a id="qgis-methods"></a>
+
+## `qgis` fixture のメソッド一覧
+
+pytest の `qgis` fixture は、同期のメソッドで QGIS を操作する。多くのメソッドは
+同じ名前の QGIS 側のコマンドを呼ぶ（`click_widget` → `qgis_click_widget`）。
+QGIS を操作するメソッドは `instance=` で宛先の QGIS を選べる。省くと `use_instance()` で
+選んだ QGIS に送る（選んでいなければ Hub が決める）。
+
+| 分類 | メソッド | 内容 |
+|---|---|---|
+| 呼び出し | `call(command, params=None)` | QGIS 側のコマンドを名前で呼ぶ。下のメソッドが無いコマンドもこれで呼べる |
+| | `step(name)` | `with` の中の呼び出しを、操作記録（`actions.jsonl`）の 1 つのステップにまとめる |
+| | `unrecorded()` | `with` の中の呼び出しを操作記録に残さない（テストの操作ではない呼び出し用） |
+| 宛先と待ち合わせ（[Multi-instance](#multi-instance)） | `list_instances()` | Hub に登録している QGIS の一覧 |
+| | `use_instance(instance_id)` / `get_default_instance()` | 以後の宛先を決める（`None` で戻す） / 今の宛先を読む |
+| | `wait_for_worker()` | QGIS が 1 つ以上登録するまで待つ |
+| | `wait_for_ready(selector=None, *, require_project=False)` | QGIS が呼び出しを処理できるようになるまで待ち、`instance_id` を返す |
+| | `wait_for_project_loaded()` | プロジェクトが読み込まれてレイヤが取れるようになるまで待つ |
+| | `list_rejected()` | Hub が断った QGIS の登録 |
+| | `abandon_launch(launch_token)` | この `launch_token` で起こした QGIS をもう待たない、と Hub に知らせる |
+| UI（[Locator API](#locator-api)） | `locator(selector)` | ウィジェットを指す `Locator` を作る。ふだんの UI 操作はこちら |
+| | `snapshot_ui()` | UI のウィジェットツリー |
+| | `click_widget(selector)` / `set_widget_value(selector, value)` | クリックする / 値を入れる |
+| | `read_rows(selector)` | 表・ツリー・リストの行を読む（[表の行を全部読む](#表の行を全部読むread_rows)） |
+| | `close_widget(selector)` | ウィジェットの窓を × と同じく閉じる |
+| | `check_actionability(selector)` | 操作できる状態か（見えているか、有効か、覆われていないか…）を読む |
+| | `wait_for_widget(selector, *, visible=True)` | ウィジェットが見える（見えない）ようになるまで待つ |
+| | `wait_for_modal(title_contains)` / `wait_for_modal_closed()` | モーダルの窓が出る / 閉じるまで待つ（[窓を待つ](#窓ダイアログを待つ)） |
+| | `wait_for_popup(title_contains)` / `wait_for_popup_closed()` | ポップアップのメニューが出る / 閉じるまで待つ（[ポップアップのメニュー](#ポップアップのメニューqmenuexec)） |
+| ダイアログ（[Dialog handler](#dialog-handler)） | `register_dialog_handler(predicate, *, action, button, once, persist)` | モーダルの窓・ポップアップに自動で答える handler を登録する |
+| | `dialog_handler(predicate, ...)` | `with` の間だけ handler を登録する |
+| | `unregister_dialog_handler(name)` / `list_dialog_handlers()` | 名前で外す / 一覧 |
+| キャンバス（[操作](#map-canvas-input)） | `canvas(selector=None, *, crs=None)` | キャンバスを操作する道具（`Canvas`）。ふだんのマウスとキーの操作はこちら |
+| | `canvas_mouse(action, point)` / `canvas_key(key)` | マウスの操作 / キーを直接送る |
+| | `get_canvas_extent()` / `set_canvas_extent(xmin, ymin, xmax, ymax)` | キャンバスの範囲を読む / 決める |
+| 画像 | `screenshot()` | キャンバスに今映っている画像を保存する |
+| | `render_map(...)` | 条件を決めて地図を PNG に描く（[画像スナップショット](#map-image-snapshot)） |
+| レイヤ・選択 | `list_layers()` / `get_layer_info(layer_name)` | レイヤ一覧 / レイヤのメタデータ |
+| | `select_features(layer_name, expression)` / `get_selected_features(layer_name)` | 式でフィーチャを選択する / 選択中のフィーチャを読む |
+| Python | `execute_python(code)` | QGIS 内でコードを実行し、コードが `_result` に入れた値を返す。コードの例外は `WorkerCodeError` になる |
+| | `execute_python_detailed(code)` | 同じく実行し、成否・標準出力・traceback を持つ `ExecResult` を返す（失敗しても例外にしない） |
+| signal（[Signal spy](#signal-spy--wait_for_signal)） | `signal_spy_start(selector, signal_name)` / `signal_spy_get_emissions(spy_id)` / `signal_spy_count(spy_id)` / `signal_spy_stop(spy_id)` | ウィジェットの signal の発火を記録する / 読む / 数える / やめる |
+| | `wait_for_signal(selector, signal_name)` | signal が発火するまで待つ |
+| 画面の裏で起きたこと | `get_recent_exceptions()` / `clear_recent_exceptions()` | 誰にも捕まらなかった Python 例外を読む / 記録を消す（[手動 API](#手動-api)） |
+| | `get_recent_messages()` / `clear_recent_messages()` | QgsMessageLog のメッセージを読む / 記録を消す（[手動 API / MCP](#手動-api--mcp)） |
+| 操作記録 | `set_recorder(recorder)` / `get_recorder()` | 呼び出しの記録先を付け替える / 読む。ふつうは plugin が付けるので触らない |
+| 接続 | `connect()` / `close()` | Hub に繋ぐ / 切る。`qgis` fixture では plugin が済ませている |
+
+Python スクリプトで使う `AutomationClient`（async）は、接続・一覧・待ち合わせの
+メソッドだけを持つ: `connect()` / `close()`（`async with` でも使える）、`call()`、
+`list_instances(include_disconnected=False)`、`wait_for_ready()`、`wait_for_instance()`、
+`wait_for_new_instance()`、`current_max_seq()`、`list_rejected()`、`abandon_launch()`。
+QGIS の操作は `await client.call("qgis_list_layers")` のように、
+[MCP ツール一覧](#mcp-tools) と同じ名前のコマンドで送る。
 
 ---
 

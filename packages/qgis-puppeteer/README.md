@@ -70,16 +70,17 @@ async with AutomationClient() as client:
 | Category | Commands |
 |---|---|
 | Layers | `qgis_list_layers`, `qgis_get_layer_info` |
-| Canvas | `qgis_get_canvas_extent`, `qgis_set_canvas_extent` |
+| Canvas | `qgis_get_canvas_extent`, `qgis_set_canvas_extent`, `qgis_canvas_mouse`, `qgis_canvas_key` (mouse and key input the map tool receives) |
 | Selection | `qgis_select_features`, `qgis_get_selected_features` |
-| UI | `qgis_snapshot_ui`, `qgis_click_widget`, `qgis_set_widget_value`, `qgis_check_actionability` |
+| UI | `qgis_snapshot_ui`, `qgis_click_widget`, `qgis_set_widget_value`, `qgis_read_rows`, `qgis_close_widget`, `qgis_check_actionability` (not an MCP tool) |
+| Dialogs | `qgis_register_dialog_handler`, `qgis_unregister_dialog_handler`, `qgis_list_dialog_handlers`, `qgis_clear_dialog_handlers` — answer modal dialogs automatically |
 | Capture | `qgis_screenshot` (what the canvas shows), `qgis_render_map` (fixed extent / size / DPI, for image snapshots) |
 | Code | `qgis_execute_python`, `qgis_execute_with_permission`, `qgis_get_whitelist`, `qgis_clear_session_permissions` |
-| Discovery | `qgis_list_instances`, `qgis_use_instance`, `qgis_wait_ready` |
-| Behind the screen | `qgis_get_recent_exceptions`, `qgis_get_recent_messages` (QgsMessageLog, incl. message bar), and their `qgis_clear_*` |
+| Discovery (MCP only) | `qgis_list_instances`, `qgis_use_instance`, `qgis_wait_ready` — from Python, use `list_instances()` / `wait_for_ready()` |
+| Behind the screen | `qgis_get_recent_exceptions`, `qgis_get_recent_messages` (QgsMessageLog, incl. message bar), and their `qgis_clear_*`; `qgis_get_leftover_state` (open dialogs, layers in editing, … after a task) |
 | Recording (MCP only) | `qgis_record_start`, `qgis_record_step`, `qgis_record_stop` — the calls go to a JSONL file in the `actions.jsonl` shape |
 
-For full schemas and examples, see [Architecture document](https://github.com/oruharo/qgis-puppeteer/blob/main/docs/architecture/0001-qgis-puppeteer-architecture.md).
+For a description of each tool, see the [MCP tool list](https://github.com/oruharo/qgis-puppeteer/blob/main/docs/user-guide.md#mcp-tools) in the user guide. For full schemas and examples, see [Architecture document](https://github.com/oruharo/qgis-puppeteer/blob/main/docs/architecture/0001-qgis-puppeteer-architecture.md).
 
 ## Architecture
 
