@@ -77,6 +77,27 @@ class WorkerRegisterRejected(WorkerRegisterTimeout):
         self.rejection = rejection
 
 
+class WorkerLaunchFailed(WorkerRegisterTimeout):
+    """QGIS が登録する前に、起動のコマンドが 0 以外の終了コードで終わった。
+
+    ランチャー（bat など）が構成の誤りで止まると、QGIS は来ないので、
+    ``register_timeout_s`` を待たずに出す。0 で終わったときは待ち続ける
+    （``start`` で QGIS を起こしてすぐ 0 で終わるランチャーがあるため）。
+    ``WorkerRegisterTimeout`` の下位型なので、「QGIS が登録されなかった」として
+    既存の ``except`` でも拾える。``returncode`` に終了コード、``stderr_tail`` に
+    stderr の最後の数行（空行を除く）が入り、メッセージにも載る。
+    """
+
+    def __init__(self, message: str, *, returncode: int, stderr_tail: list[str]) -> None:
+        super().__init__(message)
+        self.returncode = returncode
+        self.stderr_tail = stderr_tail
+
+
+# 失敗のメッセージに載せる stderr の行数
+_STDERR_TAIL_LINES = 10
+
+
 @dataclass(frozen=True)
 class SpawnedWorker:
     """``spawn_qgis`` が起動した Worker の識別情報。
@@ -155,7 +176,11 @@ def spawn_qgis(
         ValueError: 引数の排他違反（``qgis_bin``/``args`` と ``command`` 併用、
             または両方未指定）。
         WorkerRegisterTimeout: ``register_timeout_s`` 内に Worker が register
-            しなかった。
+            しなかった。起動のコマンドの stderr があれば、その最後の数行が
+            メッセージに載る。
+        WorkerLaunchFailed: Worker が register する前に、起動のコマンドが 0 以外の
+            終了コードで終わった（``register_timeout_s`` を待たない）。
+        WorkerRegisterRejected: Worker の登録を Hub が断った。
         pytest.skip.Exception: dev mode（``QPUPPETEER_E2E_USE_RUNNING_QGIS=1``）下で
             呼ばれた場合、テストを skip する。
     """
@@ -207,6 +232,12 @@ def spawn_qgis(
             automation_client,
             launch_token=launch_token,
             timeout_s=register_timeout_s,
+            launch=_Launch(
+                proc=proc,
+                command=cmd,
+                stderr=captured_stderr,
+                drain_threads=drain_threads,
+            ),
         )
     except WorkerRegisterRejected as e:
         # 断られた QGIS は登録されていないので、閉じるよう頼めない。pid で止める
@@ -216,6 +247,7 @@ def spawn_qgis(
         raise
     except WorkerRegisterTimeout:
         # register 失敗時はサブプロセスを片付けてから raise（dangling 防止）。
+        # 起動のコマンドが失敗して終わった（WorkerLaunchFailed）ときもここを通る。
         # まず Hub に「もう待たない」と知らせ、これから登録してくる QGIS には
         # 自分で閉じてもらう。Hub に QGIS がもう見えていれば、そちらはここで
         # 止める（#16）。ランチャー経由だと proc はもう居ない
@@ -380,12 +412,61 @@ def _join_drain_threads(threads: list[threading.Thread], *, timeout_s: float) ->
         t.join(timeout=timeout_s)
 
 
+@dataclass(frozen=True)
+class _Launch:
+    """登録を待つ間に見る、起動のコマンドのプロセス。"""
+
+    proc: subprocess.Popen[bytes]
+    command: Sequence[str]
+    stderr: list[str]
+    drain_threads: list[threading.Thread]
+
+    def failed_returncode(self) -> int | None:
+        """0 以外の終了コードで終わっていれば、その終了コード。まだ動いているか 0 なら None。"""
+        returncode = self.proc.poll()
+        return None if returncode in (None, 0) else returncode
+
+    def stderr_tail(self, *, settle_s: float = 0.0) -> list[str]:
+        """stderr の最後の数行（空行を除く）。
+
+        ``settle_s`` を渡すと、drain thread が終わりまで読むのをその秒数まで待つ
+        （終わった直後は、最後の行がまだ積まれていないことがある）。ランチャーが
+        起こした QGIS が pipe を引き継いでいると drain thread は終わらないので、
+        待つのは ``settle_s`` まで。
+        """
+        if settle_s > 0:
+            _join_drain_threads(self.drain_threads, timeout_s=settle_s)
+        lines = "".join(list(self.stderr)).splitlines()
+        return [line for line in lines if line.strip()][-_STDERR_TAIL_LINES:]
+
+
+def _format_stderr_tail(tail: list[str]) -> str:
+    """失敗のメッセージに足す stderr の部分。無ければ空文字。"""
+    if not tail:
+        return ""
+    body = "\n".join(f"  {line}" for line in tail)
+    return f"\nstderr of the launch command (last {len(tail)} lines):\n{body}"
+
+
+def _launch_failed(launch_token: str, launch: _Launch, returncode: int) -> WorkerLaunchFailed:
+    tail = launch.stderr_tail(settle_s=0.5)
+    command = " ".join(str(c) for c in launch.command)
+    detail = _format_stderr_tail(tail) or "\nThe launch command wrote nothing to stderr."
+    return WorkerLaunchFailed(
+        f"The launch command exited with code {returncode} before QGIS registered to "
+        f"the Hub (launch_token={launch_token}, command: {command})" + detail,
+        returncode=returncode,
+        stderr_tail=tail,
+    )
+
+
 def _wait_for_worker_by_token(
     automation_client: E2EAutomationClient,
     *,
     launch_token: str,
     timeout_s: float,
     poll_interval_s: float = 0.25,
+    launch: _Launch | None = None,
 ) -> str:
     """自分の launch_token の Worker が **使える** ようになるまで待つ。
 
@@ -397,11 +478,28 @@ def _wait_for_worker_by_token(
     は heartbeat が途絶えた instance も ``state="unresponsive"`` で返すように
     なったので、register されたことだけを見ると「登録はできたが GUI スレッドが
     塞がっていて何も処理できない」個体を掴んでしまう。
+
+    ``launch`` を渡すと、待つ間に起動のコマンドが 0 以外の終了コードで終わったら、
+    待ちを打ち切って `WorkerLaunchFailed` を上げる。0 で終わったら待ち続ける
+    （QGIS を起こしてすぐ 0 で終わるランチャーがあるため）。Worker が使える状態に
+    なっていれば、終了コードは問わない。
     """
+
+    def stop_if_launch_failed() -> None:
+        assert launch is not None
+        returncode = launch.failed_returncode()
+        if returncode is not None:
+            raise _launch_failed(launch_token, launch, returncode)
+
     try:
         return automation_client.wait_for_ready(
-            launch_token, timeout_s=timeout_s, poll_interval_s=poll_interval_s
+            launch_token,
+            timeout_s=timeout_s,
+            poll_interval_s=poll_interval_s,
+            on_poll=stop_if_launch_failed if launch is not None else None,
         )
+    except WorkerRegisterTimeout:
+        raise  # on_poll が上げた WorkerLaunchFailed
     except RegistrationRejectedError as e:
         raise WorkerRegisterRejected(
             f"The Hub rejected the QGIS started with launch_token={launch_token} "
@@ -410,9 +508,17 @@ def _wait_for_worker_by_token(
             rejection=e.rejection,
         ) from e
     except TimeoutError as e:
+        if launch is None:
+            tail: list[str] = []
+        else:
+            # 待ちが切れる間際に終わったなら、そちらが原因
+            returncode = launch.failed_returncode()
+            if returncode is not None:
+                raise _launch_failed(launch_token, launch, returncode) from e
+            tail = launch.stderr_tail()
         raise WorkerRegisterTimeout(
             f"QGIS subprocess (launch_token={launch_token}) did not register "
-            f"to Hub and answer a command within {timeout_s}s"
+            f"to Hub and answer a command within {timeout_s}s" + _format_stderr_tail(tail)
         ) from e
 
 
@@ -1279,6 +1385,8 @@ def spawn_qgis_fixture(
 
 __all__ = [
     "SpawnedWorker",
+    "WorkerLaunchFailed",
+    "WorkerRegisterRejected",
     "WorkerRegisterTimeout",
     "spawn_qgis",
     "spawn_qgis_fixture",

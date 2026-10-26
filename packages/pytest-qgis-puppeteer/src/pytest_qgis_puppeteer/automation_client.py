@@ -25,7 +25,7 @@ import asyncio
 import logging
 import time
 import warnings
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -537,6 +537,7 @@ class E2EAutomationClient:
         poll_interval_s: float = 0.25,
         require_project: bool = False,
         probe_command: str = "qgis_get_canvas_extent",
+        on_poll: Callable[[], None] | None = None,
     ) -> str:
         """Worker が **呼び出しを処理できる** 状態になるまで待ち、instance_id を返す。
 
@@ -562,6 +563,10 @@ class E2EAutomationClient:
                 待つ。レイヤを触るテスト向け。プロジェクトを開かない QGIS では
                 永久に満たされないので付けないこと。
             probe_command: 往復に使う read-only コマンド。
+            on_poll: まだ使える状態でないと分かるたびに、次を待つ前に呼ぶ。例外を
+                上げると待つのをやめ、その例外がそのまま出る。待っている Worker が
+                来ないと分かったとき（起こしたプロセスが失敗して終わった、など）に、
+                ``timeout_s`` を待たずに打ち切るのに使う。
 
         Raises:
             TimeoutError: ``timeout_s`` 以内に使える状態にならなかった。
@@ -616,6 +621,8 @@ class E2EAutomationClient:
                     )
                     return candidate.instance_id
 
+            if on_poll is not None:
+                on_poll()
             if time.monotonic() >= deadline:
                 break
             time.sleep(poll_interval_s)

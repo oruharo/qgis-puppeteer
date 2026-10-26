@@ -513,6 +513,30 @@ class TestWaitForReady:
         assert excinfo.value.rejection.pid == 4321
         assert "too_long" in str(excinfo.value)
 
+    def test_on_poll_can_stop_the_wait(self) -> None:
+        """起こしたプロセスが失敗して終わったときなどに、timeout_s を待たずに打ち切れる。"""
+        e2e, inner = _make_client()
+        inner.list_instances = AsyncMock(return_value=[])
+        polls: list[int] = []
+
+        def on_poll() -> None:
+            polls.append(1)
+            if len(polls) == 3:
+                raise RuntimeError("launcher exited")
+
+        started = time.monotonic()
+        with pytest.raises(RuntimeError, match="launcher exited"):
+            e2e.wait_for_ready("lt-mine", timeout_s=30.0, poll_interval_s=0.01, on_poll=on_poll)
+        assert time.monotonic() - started < 2.0
+        assert len(polls) == 3
+
+    def test_on_poll_is_not_called_once_ready(self) -> None:
+        e2e, inner = _make_client()
+        inner.list_instances = AsyncMock(return_value=[self._info()])
+        polls: list[int] = []
+        assert e2e.wait_for_ready(timeout_s=5.0, on_poll=lambda: polls.append(1)) == "w-1"
+        assert polls == []
+
     def test_someone_elses_rejection_is_ignored(self) -> None:
         e2e, inner = _make_client()
         inner.list_instances = AsyncMock(

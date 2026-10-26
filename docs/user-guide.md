@@ -633,7 +633,7 @@ def test_two_workers_compare(automation_client, hub_port):
 
 `spawn_qgis()` は context exit で graceful → force kill する。
 
-**ラベルと、登録を断られたとき**:
+**ラベルと、登録されなかったとき**:
 
 - `label=`（または環境変数 `QPUPPETEER_WORKER_LABEL`）が Hub の受け付けない形なら、
   QGIS を起こす前に `ValueError` になる。受け付けるのは 1〜128 文字で、数字だけでなく、
@@ -642,8 +642,15 @@ def test_two_workers_compare(automation_client, hub_port):
   待ち時間を待たずに `WorkerRegisterRejected` で失敗する。メッセージに断った理由が入り、
   断られた QGIS は止めてある。`WorkerRegisterTimeout` の下位型なので、既存の
   `except WorkerRegisterTimeout` でも拾える
+- 起動したコマンド（`command=` のランチャー、または `qgis_bin`）が、QGIS の登録より
+  先に 0 以外の終了コードで終わったら、待ち時間を待たずに `WorkerLaunchFailed` で
+  失敗する。メッセージに終了コード、コマンド、stderr の最後の 10 行（空行を除く）が
+  入る。属性 `returncode` / `stderr_tail` でも読める。これも `WorkerRegisterTimeout`
+  の下位型。0 で終わったときは待ち続ける（`start` で QGIS を起こしてすぐ 0 で終わる
+  ランチャーがあるため）。QGIS が使える状態になっていれば、終了コードは問わない
 - `register_timeout_s` までに使える状態にならなかったら `WorkerRegisterTimeout` に
-  なる。そのとき Hub に自分の QGIS が見えていれば（登録はされたがプロジェクトの
+  なる。起動したコマンドが stderr に何か出していれば、その最後の 10 行がメッセージに
+  入る。そのとき Hub に自分の QGIS が見えていれば（登録はされたがプロジェクトの
   読み込みで塞がっている、断られた登録の記録にある）、その pid で止めてから失敗する。
   閉じるよう頼まないのは、塞がった QGIS は応答しないため
 - 待ちが切れると、その QGIS の `launch_token` を「もう待たない」と Hub に知らせる。
@@ -2658,7 +2665,7 @@ QGIS を操作するメソッドは `instance=` で宛先の QGIS を選べる�
 | 宛先と待ち合わせ（[複数の QGIS](#multi-instance)） | `list_instances()` | Hub に登録している QGIS の一覧 |
 | | `use_instance(instance_id)` / `get_default_instance()` | 以後の宛先を決める（`None` で戻す） / 今の宛先を読む |
 | | `wait_for_worker()` | QGIS が 1 つ以上登録するまで待つ |
-| | `wait_for_ready(selector=None, *, require_project=False)` | QGIS が呼び出しを処理できるようになるまで待ち、`instance_id` を返す |
+| | `wait_for_ready(selector=None, *, require_project=False, on_poll=None)` | QGIS が呼び出しを処理できるようになるまで待ち、`instance_id` を返す。`on_poll` は待つ間、次を待つ前に毎回呼ばれ、例外を上げると待ちを打ち切れる（起こしたプロセスが失敗して終わった、など） |
 | | `wait_for_project_loaded()` | プロジェクトが読み込まれてレイヤが取れるようになるまで待つ |
 | | `list_rejected()` | Hub が断った QGIS の登録 |
 | | `abandon_launch(launch_token)` | この `launch_token` で起こした QGIS をもう待たない、と Hub に知らせる |

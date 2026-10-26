@@ -703,6 +703,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`spawn_qgis` waited out the register timeout when the launch command had
+  already failed.** It watched only the Hub, so a launcher that printed an
+  error and exited with code 1 (a wrong path or a missing setting) left the
+  test waiting the full `register_timeout_s`, 60 s by default, and then
+  failing with "did not register" and no hint of why; the launcher's stderr
+  was captured but not shown. `spawn_qgis` (and so the session QGIS and its
+  restart) now checks the launch process while it waits. If it exits with a
+  non-zero code before QGIS registers, it fails at once with
+  `WorkerLaunchFailed`, a subclass of `WorkerRegisterTimeout`, whose message
+  carries the exit code, the command and the last 10 lines of stderr (also in
+  `returncode` and `stderr_tail`), after the same cleanup as a timeout. An
+  exit code of 0 still waits, since some launchers start QGIS and exit 0 at
+  once. A plain timeout now also shows the last lines of stderr. To support
+  this, `E2EAutomationClient.wait_for_ready()` takes `on_poll`, called before
+  each wait; raising from it ends the wait with that exception.
+
 - **Code run in trusted mode was not recorded anywhere.** With
   `QPUPPETEER_TRUSTED_MODE=1`, `execute_python` runs code without asking, and
   the record of what ran went to a Python logger that nothing inside QGIS

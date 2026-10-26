@@ -23,10 +23,12 @@ import pytest
 from pytest_qgis_puppeteer import spawn as spawn_module
 from pytest_qgis_puppeteer.spawn import (
     SpawnedWorker,
+    WorkerLaunchFailed,
     WorkerRegisterRejected,
     WorkerRegisterTimeout,
     _build_command,
     _build_env,
+    _Launch,
     _wait_for_worker_by_token,
     spawn_qgis,
     stop_registered_worker,
@@ -82,6 +84,7 @@ class _FakeAutomationClient:
         *,
         timeout_s: float = 60.0,
         poll_interval_s: float = 0.25,
+        on_poll: Any = None,
         **_kwargs: Any,
     ) -> str:
         deadline = time.monotonic() + timeout_s
@@ -91,6 +94,8 @@ class _FakeAutomationClient:
                     continue
                 if selector is None or getattr(info, "launch_token", None) == selector:
                     return info.instance_id
+            if on_poll is not None:
+                on_poll()
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"fake: nothing became ready within {timeout_s}s")
             time.sleep(poll_interval_s)
@@ -391,6 +396,105 @@ class TestWaitForWorkerByToken:
                 poll_interval_s=0.05,
             )
 
+    @staticmethod
+    def _launch(returncode: int | None, stderr: list[str] | None = None) -> _Launch:
+        proc = _FakePopen()
+        proc.returncode = returncode
+        return _Launch(
+            proc=proc,  # type: ignore[arg-type]
+            command=["launcher.bat", "--profile", "e2e"],
+            stderr=list(stderr or []),
+            drain_threads=[],
+        )
+
+    def test_launch_that_exits_with_an_error_fails_without_waiting(self) -> None:
+        """構成の誤りでランチャーが止まったら、QGIS は来ないので待たずに失敗する。"""
+        client = _FakeAutomationClient()
+        client.feed([])
+        launch = self._launch(
+            1, ["starting\r\n", "\r\n", "The system cannot find the path specified.\r\n"]
+        )
+        started = time.monotonic()
+        with pytest.raises(WorkerLaunchFailed) as excinfo:
+            _wait_for_worker_by_token(
+                client,  # type: ignore[arg-type]
+                launch_token="lt-x",
+                timeout_s=30.0,
+                poll_interval_s=0.01,
+                launch=launch,
+            )
+        assert time.monotonic() - started < 5.0
+        error = excinfo.value
+        assert isinstance(error, WorkerRegisterTimeout)  # 既存の except でも拾える
+        assert error.returncode == 1
+        assert error.stderr_tail == ["starting", "The system cannot find the path specified."]
+        message = str(error)
+        assert "exited with code 1" in message
+        assert "launcher.bat --profile e2e" in message
+        assert "The system cannot find the path specified." in message
+
+    def test_launch_failure_without_stderr_says_so(self) -> None:
+        client = _FakeAutomationClient()
+        client.feed([])
+        with pytest.raises(WorkerLaunchFailed, match="wrote nothing to stderr") as excinfo:
+            _wait_for_worker_by_token(
+                client,  # type: ignore[arg-type]
+                launch_token="lt-x",
+                timeout_s=30.0,
+                poll_interval_s=0.01,
+                launch=self._launch(2),
+            )
+        assert excinfo.value.stderr_tail == []
+
+    def test_launch_that_exits_with_zero_keeps_waiting(self) -> None:
+        """QGIS を ``start`` で起こしてすぐ 0 で終わるランチャーがあるので、0 なら待つ。"""
+        client = _FakeAutomationClient()
+        client.feed(
+            [],
+            [],
+            [_FakeInstance(instance_id="mine", pid=1, launch_token="lt-me")],
+        )
+        result = _wait_for_worker_by_token(
+            client,  # type: ignore[arg-type]
+            launch_token="lt-me",
+            timeout_s=5.0,
+            poll_interval_s=0.01,
+            launch=self._launch(0),
+        )
+        assert result == "mine"
+
+    def test_ready_worker_is_returned_whatever_the_exit_code(self) -> None:
+        """使える Worker が居れば、ランチャーが失敗して終わっていても成功にする。"""
+        client = _FakeAutomationClient()
+        client.feed([_FakeInstance(instance_id="mine", pid=1, launch_token="lt-me")])
+        result = _wait_for_worker_by_token(
+            client,  # type: ignore[arg-type]
+            launch_token="lt-me",
+            timeout_s=1.0,
+            poll_interval_s=0.01,
+            launch=self._launch(1),
+        )
+        assert result == "mine"
+
+    def test_timeout_message_carries_the_stderr_tail(self) -> None:
+        client = _FakeAutomationClient()
+        client.feed([])
+        stderr = [f"warning {n}\n" for n in range(15)]
+        with pytest.raises(WorkerRegisterTimeout, match="did not register") as excinfo:
+            _wait_for_worker_by_token(
+                client,  # type: ignore[arg-type]
+                launch_token="lt-x",
+                timeout_s=0.1,
+                poll_interval_s=0.01,
+                launch=self._launch(None, stderr),
+            )
+        assert not isinstance(excinfo.value, WorkerLaunchFailed)
+        message = str(excinfo.value)
+        assert "last 10 lines" in message
+        assert "warning 14" in message
+        assert "warning 5" in message
+        assert "warning 4" not in message
+
 
 # ============================================================
 # SpawnedWorker
@@ -683,6 +787,50 @@ class TestSpawnQgisContextManager:
         assert excinfo.value.rejection.pid == 23456
         assert processes.force_killed == [23456]
         assert mock_popen[0].terminated or mock_popen[0].killed
+
+    def test_launch_command_that_fails_ends_the_wait_and_cleans_up(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_popen: list[_FakePopen],
+        processes: _FakeProcesses,
+    ) -> None:
+        """ランチャーが失敗して終わったら待たずに失敗し、待ちが切れたときの後片付けも通る。"""
+        monkeypatch.delenv("QPUPPETEER_E2E_USE_RUNNING_QGIS", raising=False)
+        created: list[_FakePopen] = []
+
+        def _failing_popen(*_args: Any, **kwargs: Any) -> _FakePopen:
+            proc = _FakePopen(env=kwargs.get("env"))
+            proc.returncode = 1
+            proc.stderr = _ClosablePipe(b"QGIS_PREFIX_PATH is not set\r\n")
+            created.append(proc)
+            return proc
+
+        monkeypatch.setattr("pytest_qgis_puppeteer.spawn.subprocess.Popen", _failing_popen)
+        searched: list[int] = []
+        monkeypatch.setattr(
+            spawn_module,
+            "_kill_unregistered_qgis",
+            lambda proc, *, launch_token, launched_at, gave_up_at: searched.append(proc.pid),
+        )
+        client = _FakeAutomationClient()
+        abandoned: list[str] = []
+        client.abandon_launch = abandoned.append  # type: ignore[attr-defined]
+        started = time.monotonic()
+        with (
+            pytest.raises(WorkerLaunchFailed, match="QGIS_PREFIX_PATH is not set") as excinfo,
+            spawn_qgis(
+                hub_port=9876,
+                automation_client=client,  # type: ignore[arg-type]
+                command=["launcher.bat"],
+                register_timeout_s=30.0,
+                graceful_shutdown_timeout_s=0.1,
+            ),
+        ):
+            pass
+        assert time.monotonic() - started < 5.0
+        assert excinfo.value.returncode == 1
+        assert abandoned == [created[0].env["QPUPPETEER_LAUNCH_TOKEN"]]
+        assert searched == [created[0].pid]
 
     def _timeout_spawn(self, client: _FakeAutomationClient) -> None:
         """登録待ちが時間切れになる spawn（ランチャーはすぐ終わる）。"""

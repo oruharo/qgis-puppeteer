@@ -49,6 +49,7 @@ from pytest_qgis_puppeteer.locator import (
 from pytest_qgis_puppeteer.plugin import QgisPluginMismatchWarning
 from pytest_qgis_puppeteer.spawn import (
     SpawnedWorker,
+    WorkerLaunchFailed,
     WorkerRegisterRejected,
     WorkerRegisterTimeout,
     spawn_qgis,
@@ -67,6 +68,7 @@ __all__ = [
     "WidgetNotActionableError",
     "WidgetOperationError",
     "WorkerCodeError",
+    "WorkerLaunchFailed",
     "WorkerRegisterRejected",
     "WorkerRegisterTimeout",
     "expect",
