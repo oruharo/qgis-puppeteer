@@ -1493,6 +1493,8 @@ Windows で `QFileDialog.getOpenFileName` などを既定のまま呼ぶと、OS
 起こした QGIS（launch token が付く）で、QGIS Puppeteer プラグインが
 `Qt.AA_DontUseNativeDialogs` を立て、Qt のダイアログ（`QFileDialog`）になる。
 人が普通に起こした QGIS は変わらない（見た目と挙動が変わるので、オプトイン）。
+MCP で人が起こした QGIS を操作するときも OS のダイアログのままで、答えられない。
+パスの欄が `QgsFileWidget` なら、下のとおりダイアログを開かずに入れる。
 
 Qt のダイアログなら、ファイル名を入れて「開く」を押せる:
 

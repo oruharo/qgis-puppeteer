@@ -1585,6 +1585,12 @@ class TestMcpGatewayToolDescriptors:
 
         assert "_result" in (tools["qgis_execute_python"].description or "")
 
+        # pytest のために入れた QGIS 側の振る舞いも、MCP の説明から分かること
+        assert "point_covered" in (tools["qgis_click_widget"].description or "")
+        assert "point_covered" in (tools["qgis_canvas_mouse"].description or "")
+        assert "QgsFileWidget" in (tools["qgis_set_widget_value"].description or "")
+        assert "ファイルダイアログ" in (tools["qgis_click_widget"].description or "")
+
     def test_wait_ready_exposes_require_project(self) -> None:
         tools = {t.name: t for t in self._list_tools()}
         props = tools["qgis_wait_ready"].input_schema["properties"]

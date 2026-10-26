@@ -851,6 +851,11 @@ def build_gateway(
             "wait=false so it returns at once, and answer the confirmation with "
             "qgis_register_dialog_handler(action='button', button='Yes'), registered "
             "before or after the call.\n"
+            "- A native file dialog (the OS dialog QFileDialog.getOpenFileName and the like "
+            "show by default on Windows) is not a Qt widget: it is not in qgis_snapshot_ui "
+            "and no dialog handler can answer it, so ask the user to close it. Where the "
+            "path field is a QgsFileWidget, type the path with qgis_set_widget_value "
+            "instead of opening the dialog.\n"
             "- qgis_execute_python runs code inside QGIS and returns whatever that code "
             "assigns to `_result`.\n"
             "- To keep a record of an exploration (to turn it into a pytest later), call "
@@ -1416,7 +1421,9 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
         pixel=true なら viewport の画素）。範囲は qgis_get_canvas_extent で見てから決める。
         click はその位置へ動かしてから押して離す。double / press / release / move も
         同じ point を取る。drag は points（2 点以上）で、間を steps 回（既定 5）動かす。
-        wheel は delta ノッチ（正で拡大）。地図の外の点は point_outside_canvas。
+        wheel は delta ノッチ（正で拡大）。地図の外の点は point_outside_canvas、
+        ほかの widget（メッセージバーの帯など）が重なっている点は point_covered
+        （covered_by に重なっている widget）。
         戻り値の map_point は、マップツールが受け取る地図の点（画素に丸めるので、
         頼んだ点から map_units_per_pixel の半分までずれる）。map_tool は今のマップ
         ツール。右クリックで作図を終えると属性のフォームを exec() で出すツールが
@@ -1647,6 +1654,9 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
 
         見つからない・複数一致・無効などは tool error で返る
         （code は widget_not_found / selector_ambiguous / widget_disabled）。
+        Qt のマウスのイベントで押すとき（cell 付き、kind が左以外）、その点にほかの
+        widget（メッセージバーの帯、別の窓など）が重なっていれば、人と同じく押せない
+        ので押さずに code=point_covered を返す（covered_by に重なっている widget）。
 
         kind は left（既定）/ double / right。cell は表・ツリー・リストの行で、
         {"row": N} か {"text": セルの文字, "column": 見出しの名前か番号}（column を
@@ -1661,6 +1671,11 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
         返らず時間切れになるので、wait=false にして確認には
         qgis_register_dialog_handler（action="button"）で答える。積んだ処理の
         失敗は qgis_get_recent_exceptions に残る。
+
+        Windows の OS のファイルダイアログ（QFileDialog.getOpenFileName などの既定）は
+        Qt のウィジェットではないので、qgis_snapshot_ui にも dialog handler にも見えず、
+        答えられない。開いてしまったら人に閉じてもらう。パスの欄が QgsFileWidget なら、
+        ダイアログを開かずに qgis_set_widget_value でパスを入れる。
         """
         params: dict[str, Any] = {"selector": selector}
         if kind != "left":
@@ -1739,8 +1754,9 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
         value は対象の種類に応じて解釈する（LineEdit は文字列、ComboBox は項目
         テキストか番号、CheckBox は true / false、日付は "yyyy-MM-dd"、時刻は
         "HH:mm:ss"、日時は "yyyy-MM-ddTHH:mm:ss"、表・ツリー・リストは行で、番号か
-        {"text": セルの文字, "column": 見出し}、ツリーの子の行は {"path": [段, ...]}
-        など）。入れたあとの値を value_after
+        {"text": セルの文字, "column": 見出し}、ツリーの子の行は {"path": [段, ...]}、
+        QGIS のファイル・フォルダ選択の部品（QgsFileWidget）はパスの文字列で、
+        ダイアログを開かずに入る（まだ無いパスも入れられる）など）。入れたあとの値を value_after
         に返す。失敗は tool error で、code は widget_readonly / combo_item_not_found /
         index_out_of_range / invalid_value など。入った値が頼んだ値と違えば（Qt が
         黙って丸めた・切り詰めた・無視した）value_not_applied。verify=false で
