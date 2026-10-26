@@ -81,4 +81,4 @@ On Windows `cmd`: use `set VAR=value`; on PowerShell: `$env:VAR="value"`.
   forward them.
 
 See the user guide section **"E2E カバレッジ計測"** for the rationale and the
-runner-side / multi-env coverage notes (ADR-0003).
+runner-side / multi-env coverage notes.

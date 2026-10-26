@@ -12,8 +12,8 @@ Pytest plugin for E2E testing QGIS via [qgis-puppeteer](https://github.com/oruha
 - **Web-first assertions** — `expect(locator).to_have_text(...)` with built-in retry
 - **Strict mode selector** — multi-match without `index` raises `SelectorAmbiguousError`
 - **Modal dialog support** — works inside `exec_()` event loops
-- **Test environments** — partition tests by QGIS startup config via `environments.toml` + `@pytest.mark.qgis_env(...)` (ADR-0003)
-- **Inline spawn helper** — `spawn_qgis()` context manager for tests where startup options *are* the test subject (ADR-0004)
+- **Test environments** — partition tests by QGIS startup config via `environments.toml` + `@pytest.mark.qgis_env(...)`
+- **Inline spawn helper** — `spawn_qgis()` context manager for tests where startup options *are* the test subject
 - **Diagnostic bundles** on failure (screenshots, UI snapshots, instance list)
 - **Multi-QGIS support** for parallel testing
 
@@ -100,7 +100,7 @@ work as-is.
 
 When different test groups need different QGIS startup configurations
 (e.g., authentication on vs off, LTR vs latest, online vs offline), use
-the **environments** feature ([ADR-0003](https://github.com/oruharo/qgis-puppeteer/blob/main/docs/architecture/0003-test-environments.md)).
+the **environments** feature.
 
 Define environments in `environments.toml` at your project root (or under
 `test_e2e/`):
@@ -158,8 +158,7 @@ for the rules.
 When the test's purpose is to verify the QGIS startup option itself
 (e.g., does `--clean-canvas` actually clear state? does `--profile X`
 load the right plugins?), put the option directly in test code instead
-of hiding it behind a fixture or `environments.toml`
-([ADR-0004](https://github.com/oruharo/qgis-puppeteer/blob/main/docs/architecture/0004-inline-qgis-spawn-helper.md)):
+of hiding it behind a fixture or `environments.toml`:
 
 ```python
 from pytest_qgis_puppeteer import spawn_qgis

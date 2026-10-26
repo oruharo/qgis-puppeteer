@@ -332,7 +332,7 @@ env は引き続き Worker に継承されるので、launcher 側でそれを Q
 
 テストが失敗すると `outputs/diagnostics/<test_name>_<timestamp>/`
 （`environments.toml` 利用時は `outputs/<env_name>/diagnostics/...`）に
-以下が自動保存される（`pytest_runtest_makereport` フック）:
+以下が自動保存される:
 
 | ファイル | 内容 |
 |---|---|
@@ -358,7 +358,7 @@ CI 上で diagnostic バンドルだけ artifact として upload しておく�
 
 QGIS の起動構成（プロファイル / 認証有無 / バージョン / launcher）が
 テストごとに異なる場合、`environments.toml` で宣言し、`@pytest.mark.qgis_env`
-でテストを env に partition できる（ADR-0003）。
+でテストを env に partition できる。
 
 `environments.toml`:
 
@@ -439,7 +439,7 @@ pytest --list-envs                # 利用可能な env を `name<TAB>descriptio
 pytest --env=all --env-strict     # ある env だけ exit 5 (no tests collected) を 1 に昇格
 ```
 
-- `--list-envs` は `--env` 指定有無に関わらず使える（`pytest_configure` 早期で hook して `pytest.exit(0)`）。
+- `--list-envs` は `--env` 指定有無に関わらず使える（一覧を出してテストは走らせずに終わる）。
 - `--env-strict` は meta-parent モード専用。1 env でも「テストが拾えなかった」を fail 扱いにしたい CI 用途。**全 env が 5** のときは引き続き 5 のまま（CI が green と誤検知しないためのガード）。hard error (2/3/4) は strict 関係なく即時伝播。
 
 `--env=all` / `--env=A,B` は meta-parent モード。親 invocation が env ごとに
@@ -454,19 +454,18 @@ pytest --env=all --env-strict     # ある env だけ exit 5 (no tests collected
 | **全 env** が 5 | 5（CI green 誤検知防止） |
 
 artifacts は `outputs/<env_name>/diagnostics/` に env 別に分離される。
-詳細・優先順位（`CLI > env > toml > ini`）は ADR-0003 を参照。
+同じ設定が何か所にもあるときは `CLI > 環境変数 > environments.toml > ini` の順に効く。
 
 #### JUnit XML の env prefix
 
 `--junit-xml=...` 併用時、各子 invocation の `<testcase classname="...">` は
 `<env_name>::<元 classname>` に書き換わる。CI 側で env を縦軸にした集計表が
-そのまま作れる。stdlib の `xml.etree.ElementTree` で後処理しているので追加 dep 不要、
-かつ idempotent（既に prefix されているものは触らない）。
+そのまま作れる。既に prefix が付いているものには重ねて付けない。
 
 #### `--maxfail` の env 横断累積
 
-`--env=all --maxfail=N` のとき、parent 側で各 env の fail 数を `_env_stats.json`
-経由で読み、累積 fail が N に達した時点で残り env を skip する。次の child を
+`--env=all --maxfail=N` のとき、parent 側で各 env の fail 数を足していき、
+累積 fail が N に達した時点で残り env を skip する。次の child を
 spawn する直前に `--maxfail=<remaining>` を inject するので、child 単体での
 fail-fast 挙動も活きる。skip された env は `summary.json` 内で
 `skipped_reason="not_run_due_to_cumulative_maxfail"` として記録される。
@@ -474,7 +473,7 @@ fail-fast 挙動も活きる。skip された env は `summary.json` 内で
 ### 4. テスト中だけ QGIS を再起動する: `@pytest.mark.fresh_qgis`
 
 「このテストだけ別構成で QGIS を立ち上げ直したい」「session worker を汚さず
-canvas クリアな状態で 1 件動かしたい」ケース向け（ADR-0002 §10.4 / ADR-0003 §fresh_qgis）。
+canvas クリアな状態で 1 件動かしたい」ケース向け。
 
 ```python
 import pytest
@@ -491,7 +490,7 @@ def test_auth_with_reset_cache(qgis):
     ...
 ```
 
-合成ルール（ADR-0003）:
+合成ルール:
 
 | キー | 振る舞い |
 |---|---|
@@ -554,7 +553,7 @@ qgis_auto_fresh_after_failure = "session"   # または "true"
 ### 5. 任意のタイミングで QGIS を立てる: `spawn_qgis()`
 
 multi-instance テストや「テスト本体内で QGIS を 2 つ立てて比較したい」場合は
-`spawn_qgis()` context manager（ADR-0004）を直接使う:
+`spawn_qgis()` context manager を直接使う:
 
 ```python
 from pytest_qgis_puppeteer.spawn import spawn_qgis
@@ -642,7 +641,7 @@ pytest test_e2e/
 ### 7. 起動ごとの準備: `pytest_qgis_before_spawn`
 
 pytest が QGIS を起こす**直前**に、conftest のフック `pytest_qgis_before_spawn` が
-呼ばれる（#29）。起動のたびに準備が要るもの（新しいプロファイルを一時フォルダに
+呼ばれる。起動のたびに準備が要るもの（新しいプロファイルを一時フォルダに
 作る、など）をここで済ませ、その起動だけに足す引数と環境変数を返す。
 `pytest_qgis_ready`（起こしたあと）の対。
 
@@ -752,19 +751,19 @@ selector dict の全キー。複数キー指定は AND セマンティクス。
 | キー | 型 | 用途 |
 |---|---|---|
 | `object_name` | str | Qt `objectName()` 完全一致。**最も推奨**（一意性が高い） |
-| `object_name_re` | str | `objectName()` の正規表現（`re.search`、#39）。QGIS が決まった形で名前を付ける窓（属性フォームの `featureactiondlg:<レイヤ>:<地物の ID>` など）を名前の一部で当てる |
+| `object_name_re` | str | `objectName()` の正規表現（`re.search`）。QGIS が決まった形で名前を付ける窓（属性フォームの `featureactiondlg:<レイヤ>:<地物の ID>` など）を名前の一部で当てる |
 | `text` | str | ボタン / ラベル / QAction の `text()` 完全一致 |
 | `class` | str | Python クラス名完全一致（`"QPushButton"` 等） |
-| `title` | str | 人に見えている題名の完全一致（#37）。窓・ドック・`QMdiSubWindow` は `windowTitle()`、メニューは `title()`、`QGroupBox` は枠の `title()`。窓でない部品の `windowTitle()`（Designer の既定の `"Form"` など、人には見えない）には当たらない |
-| `title_contains` | str | 題名の部分一致（#35。当たる部品は `title` と同じ） |
+| `title` | str | 人に見えている題名の完全一致。窓・ドック・`QMdiSubWindow` は `windowTitle()`、メニューは `title()`、`QGroupBox` は枠の `title()`。窓でない部品の `windowTitle()`（Designer の既定の `"Form"` など、人には見えない）には当たらない |
+| `title_contains` | str | 題名の部分一致（当たる部品は `title` と同じ） |
 | `label` | str | `QLabel.buddy()` 経由で対応するラベル文字列。Playwright の `getByLabel` 相当 |
 | `placeholder` | str | LineEdit/TextEdit の `placeholderText()` 完全一致 |
 | `text_contains` | str | 文字の部分一致 |
 | `text_re` | str | 文字の正規表現（`re.search`） |
 | `role` | str | snapshot の `role`（Qt のアクセシビリティの役割） |
 | `attr` | dict | snapshot の node の任意のキーの完全一致（`{"enabled": False}` など） |
-| `window` | bool | `True` でトップレベルの窓（`isWindow()`）だけ、`False` で窓の中の部品だけ（#38） |
-| `class_inherits` | str | Qt の型がこのクラスか、それを継承している（`QObject.inherits()`、#38）。`class` と違い、C++ が作って sip が基底の型で包んだ widget（Python からは `QDialog` に見える `QgsAttributeDialog` など）にも、Python のサブクラスにも当たる |
+| `window` | bool | `True` でトップレベルの窓（`isWindow()`）だけ、`False` で窓の中の部品だけ |
+| `class_inherits` | str | Qt の型がこのクラスか、それを継承している（`QObject.inherits()`）。`class` と違い、C++ が作って sip が基底の型で包んだ widget（Python からは `QDialog` に見える `QgsAttributeDialog` など）にも、Python のサブクラスにも当たる |
 
 `object_name_re` / `title_contains` / `text_contains` / `text_re` / `role` / `attr` は、snapshot の node と
 同じ形の情報で判定する。`expect` や `wait_for_widget`（snapshot で探す）でも、`click()`
@@ -798,7 +797,7 @@ dialog handler の predicate でも `window` / `class_inherits` を使える。
 ### Strict mode
 
 `index` を指定**せず**に複数マッチした場合、`selector_ambiguous` エラーで
-fail する（旧挙動の silent な先頭採用は廃止）。
+fail する（黙って先頭を選ぶことはしない）。
 
 **良くないパターン** (selector_ambiguous):
 
@@ -843,13 +842,12 @@ selector ambiguous は即時 abort される。
 Worker は失敗時に `{"success": false, "error": "<code>", ...}` を返す。pytest の
 `E2EAutomationClient.click_widget()` / `set_widget_value()` と Locator の操作は、
 これを **`WidgetOperationError`** にする（`error` に code、`widget` に対象の要約、
-`result` に戻り値全体、#23）。MCP の `qgis_click_widget` / `qgis_set_widget_value`
-は tool error にする。これまでは失敗の dict がそのまま返り、戻り値を見ないと
-押せていない・入っていないのに気付かなかった。
+`result` に戻り値全体）。MCP の `qgis_click_widget` / `qgis_set_widget_value`
+は tool error にする。戻り値を見なくても、押せていない・入っていないことに気付ける。
 
 | `error` コード | 発生 RPC | 意味 | Locator での扱い |
 |---|---|---|---|
-| `widget_not_found` | 両方 | scope 内に該当 widget が無い | `_wait_actionable` が `exists=False` と見て poll を継続、timeout で `WidgetNotActionableError` |
+| `widget_not_found` | 両方 | scope 内に該当 widget が無い | 現れるのを待って poll を継続、timeout で `WidgetNotActionableError` |
 | `selector_ambiguous` | 両方 | 複数マッチ + `index` 未指定（strict mode） | poll を続けず即 `SelectorAmbiguousError` |
 | `widget_disabled` | 両方 | `widget.isEnabled() == False` | poll で待機。timeout 内に enabled になれば成功 |
 | `widget_readonly` | set のみ | `isReadOnly() == True` の input への書き込み | `fill()` は `editable=True` を auto-wait |
@@ -913,7 +911,7 @@ Worker は失敗時に `{"success": false, "error": "<code>", ...}` を返す。
   行。`QTableView` に代理のモデルがあれば代理のモデルの行）
 - `setRowHidden` で隠した行は、文字の候補から外す。番号で指せば `row_hidden`
 - `row` / `text` はツリーの一番上の段だけ。**子の行は `path`** で、上の段から順に
-  指す（#30）:
+  指す:
 
   ```python
   layers.select({"path": ["道路", "国道"]})                  # グループの中のレイヤ
@@ -999,7 +997,7 @@ qgis.locator({"scope": "popup", "class": "QAction", "text": "削除"}).click()
 
 `wait_for_popup(title_contains=None)` はポップアップが出るまで待ち、`active_popup`
 （メニューなら `menu_items` 付き）を返す。`wait_for_popup_closed()` は閉じるまで待つ。
-どちらも `wait_for_modal` / `wait_for_modal_closed` と同じ形（#27）。メニューの
+どちらも `wait_for_modal` / `wait_for_modal_closed` と同じ形。メニューの
 `title` は `QMenu.title()`（dialog handler の predicate の `title` と同じ）。
 `scope="popup"` の Locator の操作は auto-wait があるので、項目を押すだけなら
 `wait_for_popup` は無くても通る。出たことを確かめたいとき、項目の一覧を見て分岐する
@@ -1037,8 +1035,8 @@ qgis.locator({"scope": "popup", "class": "QAction", "text": "削除"}).click()
 | `select(value)` | ComboBox / Tab / List の選択 | actionable |
 | `check()` | CheckBox / RadioButton を True に | actionable |
 | `uncheck()` | 同 False に | actionable |
-| `close()` | その widget の窓を、× を押したときと同じく閉じる（#34） | actionable |
-| `read_rows()` | 表・ツリー・リストの行を上限なしに読む（#36。下の「表の行を全部読む」） | visible |
+| `close()` | その widget の窓を、× を押したときと同じく閉じる | actionable |
+| `read_rows()` | 表・ツリー・リストの行を上限なしに読む（下の「表の行を全部読む」） | visible |
 
 どれも `wait=False` を受ける。押すと確認を `exec()` で出す操作を、待たずに
 QGIS 側へ積んですぐ返す（[Dialog handler](#dialog-handler) の「確認を出す操作は
@@ -1081,7 +1079,7 @@ qgis.locator({"scope": "any", "title": "編集"}).close(wait=False)  # 閉じる
 - その位置が別の widget（表の上に重なった窓など）に覆われていれば、人には押せないので
   `point_covered`（`covered_by` に覆っている widget）。マウスを通す widget
   （`WA_TransparentForMouseEvents`）や、表の中の部品（セルの編集欄など）は覆っていると
-  みなさない（#33）
+  みなさない
 - `kind="right"` は右ボタンの押し・離しのあと `QContextMenuEvent` も送るので、
   `customContextMenuRequested` が出る。開いたメニューは `exec()` で止まるので、
   `wait=False` で積み、`scope="popup"` で項目を選ぶ
@@ -1116,7 +1114,7 @@ timeout を超えると `WidgetNotActionableError`。strict mode で複数マッ
 | `exists()` | bool |
 | `is_visible()` | bool |
 | `is_enabled()` | bool |
-| `count()` | int — selector に当たる見えている widget の数（#41） |
+| `count()` | int — selector に当たる見えている widget の数 |
 
 `count()` は待たずに 1 回だけ数え、当たらなければ 0 を返す。2 件以上に当たっても
 `SelectorAmbiguousError` にしない。数え方は `expect(...).to_have_count(n)` と同じ
@@ -1161,7 +1159,7 @@ expect(forms).to_have_count(0)
   （表は `column_count` も）。属性テーブルのような大きな表で応答が膨らまないように。
   全部読むなら `read_rows()`（下）
 - ツリーの `rows` は一番上の段だけ。開いている段の子の行は `child_rows` に、上の段から
-  順に `{"path": [上の段からの行の番号], "rows": [...], "row_count": n}` で出す（#30）。
+  順に `{"path": [上の段からの行の番号], "rows": [...], "row_count": n}` で出す。
   子があって畳まれている行は `collapsed_rows`（`path` の list）。人に見えている行だけを
   出す。畳まれた段の子は、`{"path": [..., 0]}` で選ぶと開くので、そのあと読める
 - 行の数は `rows` と `child_rows` を合わせて 100 行まで
@@ -1174,7 +1172,7 @@ expect(forms).to_have_count(0)
 #### 表の行を全部読む（`read_rows()`）
 
 snapshot の上限（100 行）を超える表は、`Locator.read_rows()`（MCP は `qgis_read_rows`）で
-読む（#36）:
+読む:
 
 ```python
 table = qgis.locator({"object_name": "attributeTable"})
@@ -1257,8 +1255,8 @@ step1 = wizard.locator({"object_name": "step1"})
 step1.locator({"object_name": "name"}).fill("alice")
 ```
 
-内部では Locator が `_scope_chain` キー付き selector を組み立てて Worker に
-送り、Worker 側で「親を解決 → 子を subtree 内で検索」する。Locator 自体は
+Locator は親から子までの selector の並びを Worker に送り、Worker 側で
+「親を解決 → 子を subtree 内で検索」する。Locator 自体は
 state を持たないので、同じ親から複数の子を作っても親は無傷:
 
 ```python
@@ -1301,8 +1299,8 @@ expect(loc).to_have_text("Done", timeout_s=10.0)
 | `to_contain_text(s)` | `get_text()` 部分一致 |
 | `to_have_value(v)` | `get_value()` 一致 |
 | `to_be_checked()` | `get_value()` が True |
-| `to_have_count(n)` | selector に当たる見えている widget の数（#35） |
-| `to_have_row_count(n)` | 表・ツリー・リストの行の数（#36。snapshot の `row_count` で、100 行の上限は効かない） |
+| `to_have_count(n)` | selector に当たる見えている widget の数 |
+| `to_have_row_count(n)` | 表・ツリー・リストの行の数（snapshot の `row_count` で、100 行の上限は効かない） |
 
 `not_` プロパティで否定形（「~でなくなるまで待つ」）。selector 多重マッチ時は
 `SelectorAmbiguousError` で即 abort（`Locator` の auto-wait と同じ挙動）。
@@ -1410,7 +1408,7 @@ with qgis.dialog_handler({"title": "削除の確認"}, button="Yes"):
 - `qgis_execute_python` のコードから確認を出す処理を呼ぶときも同じで、
   コードの中で `QTimer.singleShot(0, 処理)` と積めば、確認を待たずに返る
 
-### pytest からの利用例（#40）
+### pytest からの利用例
 
 pytest のクライアント（`qgis` / `automation_client`）は、RPC を包んだ口を持つ:
 
@@ -1504,7 +1502,7 @@ qgis.register_dialog_handler({"class": "QFileDialog"}, button="Open")  # 保存�
 ファイル名の欄は、そのダイアログのフォルダからの相対か、絶対パス。
 
 QGIS のファイル・フォルダ選択の部品（`QgsFileWidget`）なら、ダイアログを開かずに
-`fill(パス)` で直接入れられる（#25）。snapshot には `file_path` と `storage_mode`
+`fill(パス)` で直接入れられる。snapshot には `file_path` と `storage_mode`
 （`GetFile` / `GetDirectory` / `SaveFile` / `GetMultipleFiles`）が出る。
 
 ### 注意点
@@ -1589,15 +1587,14 @@ E2E テストは **2 プロセス**で動く:
 
 ### (A) ランナー側
 
-`pytest --cov=<runner側pkg>` で普通に取れる。env を分けて回す場合の combine 方針は
-[ADR-0003](architecture/0003-test-environments.md) を参照（env ごとに
-`.coverage.<env>` → 最終段で `coverage combine`、`COVERAGE_FILE` を切り替え）。
+`pytest --cov=<runner側pkg>` で普通に取れる。env を分けて回す場合は、env ごとに
+`COVERAGE_FILE` を切り替えて `.coverage.<env>` に書き、最後に `coverage combine` でまとめる。
 
 ### (B) QGIS 側（本命）
 
 `coverage.py` の **subprocess 計測**を使う。qgis-puppeteer は QGIS を spawn する際に
-**親プロセスの `os.environ` をそのまま継承**する（`spawn.py` の
-`_build_env(base=os.environ, …)`。fixture 経路も `spawn_qgis` 経由で同じ）。よって
+**親プロセスの `os.environ` をそのまま継承**する（fixture が起こす QGIS も
+`spawn_qgis()` で起こす QGIS も同じ）。よって
 **環境変数を立てるだけで QGIS 内 coverage を有効化**でき、本体コードの変更は不要。
 
 手順（コピペ用テンプレ: [`examples/coverage/`](../examples/coverage/)）:
@@ -1645,7 +1642,7 @@ E2E テストは **2 プロセス**で動く:
 ## 地図のキャンバスの操作（マウスとキー）
 
 QGIS のマップツール（作図・移動・選択など）は、キャンバスが受けたマウスとキーの
-イベントで動く。`qgis.canvas()` で、それを人の操作と同じ形で送る（#26）。
+イベントで動く。`qgis.canvas()` で、それを人の操作と同じ形で送る。
 
 ```python
 canvas = qgis.canvas()                       # メインのキャンバス
@@ -1680,7 +1677,7 @@ canvas.wheel((-40500.0, 11500.0), 1)         # その位置で拡大
   頼んだ点から最大で半画素（`map_units_per_pixel` の半分）ずれる。作った地物の座標を
   比べるときはその幅で比べるか、スナップに頼る。`map_tool` は今のマップツールの
   クラス名（思ったツールになっていないときの切り分け用）。`extent` は送ったあとの範囲
-- どの操作も `modifiers=["shift", "ctrl", "alt"]` と `wait=False`（#21）を受ける
+- どの操作も `modifiers=["shift", "ctrl", "alt"]` と `wait=False` を受ける
 - 地図の外（viewport の外）の点は、送る前に `point_outside_canvas` で断る（人には
   押せないので）。判定は、実際に届く丸めた画素で行う。`wait=False` で積んだあとに
   地図が動いて外になったら、送らずに `qgis_get_recent_exceptions` に残す。失敗は
@@ -1688,7 +1685,7 @@ canvas.wheel((-40500.0, 11500.0), 1)         # その位置で拡大
 - 別の widget に覆われた点（キャンバスの上端に重なるメッセージバーの帯、キャンバスの
   上に浮かぶ入力欄、重なった窓など）は、人には押せないので `point_covered`
   （`covered_by` に覆っている widget）。`wait=False` で積んだ操作は送る時点で確かめ
-  直す（#33）
+  直す
 - `crs` と `pixel=True` は一緒に使えない。CRS の変換は送る時点の地図の CRS で行う
 - 文字を打つ `type_text` は、改行を Return、タブを Tab のキーで送り、大文字には
   Shift を付ける
@@ -1801,16 +1798,15 @@ MCP の `qgis_render_map` は、描画した PNG を結果に**画像として�
 Qt の slot で発生した Python 例外は、デフォルトで C++→Python 境界に飲まれて
 stderr 出力されるだけになる。これだと「QGIS 内部が壊れているのにテストは pass」
 する事故が起きる。pytest-qgis-puppeteer は ring buffer + pytest hook で
-これを **テスト fail に昇格** させる（ADR-0002 §17）。
+これを **テスト fail に昇格** させる。
 
 ### 仕組み
 
-- Worker 側 `qgis_tools.exception_recorder` が `sys.excepthook` を chain して、
-  発生した例外を 200 件の deque に `{type, message, traceback, ts, thread}` で記録。
-- pytest plugin が `pytest_runtest_call` の前で deque をクリア、
-  `pytest_runtest_makereport` の後でクエリして例外があれば:
-  - **pass → fail** に promote（`longrepr` に整形済 traceback を書く）
-  - 既に fail なら `report.sections` に追記
+- Worker 側が `sys.excepthook` を chain して、発生した例外を直近 200 件まで
+  `{type, message, traceback, ts, thread}` で記録する。
+- pytest plugin がテスト本体の前に記録を消し、テストのあとに読んで例外があれば:
+  - **pass → fail** に promote（失敗の報告に整形済 traceback を書く）
+  - 既に fail なら、その報告に例外の節を足す
   - diagnostic bundle に `uncaught_exceptions.json` を追加
 
 ### opt-out
@@ -2004,7 +2000,7 @@ MCP からは `qgis_get_recent_messages` / `qgis_clear_recent_messages`。未捕
 
 同じ QGIS を次のテストも使うので、前のテストが残した状態（閉じ忘れのダイアログ、
 編集中のレイヤ、変わったままのマップツール、選択など）で次のテストの結果が変わる。
-見る項目を ini で選ぶと、テストのあとに**始めに無かったのに残ったもの**を知らせる（#28）。
+見る項目を ini で選ぶと、テストのあとに**始めに無かったのに残ったもの**を知らせる。
 既定はどれも見ない。
 
 ```ini
@@ -2025,7 +2021,7 @@ qgis_leftover_warn = editing map_tool layer_tree    # 残っていたら警告�
 | `layers` | 足して残したレイヤとグループ、消えたもの |
 | `active_layer` | アクティブレイヤ |
 | `project_dirty` | プロジェクトが未保存になった |
-| `message_bar` | メッセージバーに残った帯（閉じるまで残るものだけ。時間で消える帯は数えない）。キャンバスの上端に重なるので、後のテストのクリックや画面の比較に効く（#32） |
+| `message_bar` | メッセージバーに残った帯（閉じるまで残るものだけ。時間で消える帯は数えない）。キャンバスの上端に重なるので、後のテストのクリックや画面の比較に効く |
 
 - **比べ方は「始めとの差」**：`qgis` fixture の準備が終わった直後（テスト自身の
   fixture の準備より前）に 1 回読み、fixture の後片付けが全部終わったあとにもう 1 回
@@ -2035,8 +2031,8 @@ qgis_leftover_warn = editing map_tool layer_tree    # 残っていたら警告�
   使わず `automation_client` だけを使うテストは、call の直前に読む
 - 項目ごとに失敗か警告かを選べる。直す前の製品の不具合で残ることが分かっている項目は
   `qgis_leftover_warn` に入れておき、直したら `qgis_leftover_fail` に上げる、など
-- 決まったテストがいつも残すと分かっている項目は、そのテストに印を付けて判定から外す
-  （#31）。ほかのテストでは今まで通り見るので、新しい片付け漏れは埋もれない:
+- 決まったテストがいつも残すと分かっている項目は、そのテストに印を付けて判定から外す。
+  ほかのテストでは今まで通り見るので、新しい片付け漏れは埋もれない:
 
   ```python
   @pytest.mark.qgis_leftover_expected("map_tool", reason="S-78: 製品が Pan に戻さない")
@@ -2092,7 +2088,7 @@ E2E テストに書き起こす、という使い方のために、gateway は�
 JSONL に記録できる。形式は pytest の診断バンドルの `actions.jsonl` と同じ
 （`command` / `params` / `result` / `error` / `instance` / `duration_ms` /
 `step_path`、加えて `source: "mcp"`）なので、同じ道具で読める。テストコードの
-自動生成はしない（ADR-0002 §16）。記録は人やエージェントが書き起こすときの
+自動生成はしない。記録は人やエージェントが書き起こすときの
 材料。
 
 ```text
@@ -2159,7 +2155,7 @@ instances = await client.list_instances()
 #  InstanceInfo(instance_id="w-2f5e1c8b0d6a", label="B", pid=5678, project="...",
 #               launch_token="lt-...", registered_seq=2, state="unresponsive",
 #               last_seen_ago=47.2)]
-# instance_id は pid 非依存の不透明 nonce（ADR-0005）。再起動で変わるので
+# instance_id は pid 非依存の不透明 nonce。再起動で変わるので
 # ハードコードせず label / @label / launch_token で参照する。
 # state="unresponsive" は「QGIS は生きているが GUI スレッドが塞がっていて
 # ハートビートに 20 秒以上応答していない」。呼び出しは受け付けられ、GUI が
@@ -2192,11 +2188,11 @@ def test_cross_instance(automation_client):
 「A 用」「B 用」の fixture をそれぞれ `use_instance` で作っても、後から呼んだ方の
 宛先に揃ってしまう。2 台を交互に操作するときは `instance=` を使う。
 
-`spawn_qgis()` で test 内から QGIS を立てる場合（ADR-0004、Phase 1 実装済）は
+`spawn_qgis()` で test 内から QGIS を立てる場合は
 [pytest の応用 5.](#5-任意のタイミングで-qgis-を立てる-spawn_qgis) を参照。`per-call` の `instance=` 指定 >
 sticky `use_instance()` > Hub 既定、の優先順位で routing される。
 
-### 同一 label での連続再起動（ADR-0005）
+### 同一 label での連続再起動
 
 開発ループで「同じ label のまま QGIS を kill → 再起動」を繰り返すのは
 **一級サポートされたフロー**。旧プロセスが Hub の grace 期間中でも、新プロセス
@@ -2207,7 +2203,7 @@ sticky `use_instance()` > Hub 既定、の優先順位で routing される。
   「現在 live な A」へ再解決する（再起動の谷間だけ `instance_not_found`）。
 - `instance_id` は再起動で必ず変わる（不透明 nonce）。固定参照しないこと。
 - selector 解決順: `launch_token` > `@label` > `label` > `instance_id` >
-  project basename（`pid` 指定は廃止）。
+  project basename（`pid` では選べない）。
 
 ### 公式 launch helper と `launch_token`（決定的な相関）
 
@@ -2229,8 +2225,7 @@ info = await client.wait_for_instance(token, timeout_s=30)  # register 待ち
 await client.call("qgis_list_layers", {"instance": token})
 ```
 
-pytest の `spawn_qgis()` は内部でこの仕組みを使い、pid diff ではなく
-`launch_token` で spawn 分を相関する（ADR-0005 D6）。
+pytest の `spawn_qgis()` も `launch_token` で、自分が起こした QGIS を見分ける。
 
 規約も token も無い手動起動では `client.current_max_seq()` → 起動依頼 →
 `client.wait_for_new_instance(since_seq)` で best-effort に拾えるが、同時
@@ -2370,8 +2365,8 @@ pytest の fixture のように、Hub を別に起こす使い方のための動
 | 変数 | 既定 | 用途 |
 |---|---|---|
 | `QPUPPETEER_WORKER_LABEL` | — | self-reported label（安定ロール名）。空なら Hub が自動採番 |
-| `QPUPPETEER_LAUNCH_TOKEN` | — | 公式 launch helper が注入する相関トークン（ADR-0005 D6）。通常は手で設定せず `qgis-puppeteer-launch` 経由 |
-| `QPUPPETEER_WORKER_TAKEOVER` | unset | `1` で同時同 label 衝突時に既存 active を奪取（ADR-0005 D4。連続再起動の開発ループ向け） |
+| `QPUPPETEER_LAUNCH_TOKEN` | — | 公式 launch helper が注入する相関トークン。通常は手で設定せず `qgis-puppeteer-launch` 経由 |
+| `QPUPPETEER_WORKER_TAKEOVER` | unset | `1` で同時同 label 衝突時に既存 active を奪取（連続再起動の開発ループ向け） |
 | `QPUPPETEER_WORKER_LABEL_SUFFIX` | unset | `1` で同時同 label 衝突時に `A (2)` 等へ自動 rename |
 | `QPUPPETEER_HUB_PYTHON` | — | Hub spawn 用 Python launcher を明示指定（自動検出失敗時） |
 | `QPUPPETEER_HUB_LOG_FILE` | `<TEMP>/qgis_puppeteer.spawn.log` | Hub subprocess の stdout/stderr 出力先 |
@@ -2500,7 +2495,7 @@ coverage が有効化される。
 (label_conflict)`）、`list_instances` に出てこない。
 
 **原因**: 既に **active** な同 label の Worker が居る状態で、別プロセスが
-同じ `QPUPPETEER_WORKER_LABEL` で登録しようとした（ADR-0005 D4、既定
+同じ `QPUPPETEER_WORKER_LABEL` で登録しようとした（既定は
 `reject`）。連続再起動で起きる場合は、旧プロセスが kill -9 等で TCP
 half-open のまま active と誤認されている可能性。
 
