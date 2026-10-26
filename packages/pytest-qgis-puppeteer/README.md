@@ -143,10 +143,15 @@ def test_basic_open_project(qgis):
 pytest --env=smoke              # only tests assigned to "smoke"
 pytest --env=with_authentication  # only auth tests, run with auth env
 pytest                            # default_name env (here: "smoke")
+pytest --env=smoke,with_authentication  # these envs, one after another
+pytest --env=all                  # every env, one after another
+pytest --list-envs                # print the envs and exit
 ```
 
-Phase 1 supports `--env=<single_name>`. `--env=all` and comma-separated
-lists are Phase 2. See the ADR for the full design.
+With several envs, pytest runs each env in its own child run and combines
+their exit codes. See the
+[user guide](https://github.com/oruharo/qgis-puppeteer/blob/main/docs/user-guide.md#3-test-environments複数-qgis-構成の宣言的切替)
+for the rules.
 
 ### Inline spawn — when startup options are the test subject
 
@@ -244,9 +249,16 @@ On test failure, the plugin writes a diagnostic bundle to
 `outputs/diagnostics/{test_name}_{timestamp}/`:
 
 ```
-screenshot.png         - image of the map canvas (not the main window or dialogs)
-snapshot_ui.json       - qgis_snapshot_ui output (UI tree)
-list_instances.json    - registered Worker instances at failure time
+screenshot.png            - image of the map canvas (not the main window or dialogs)
+snapshot_ui.json          - qgis_snapshot_ui output (UI tree)
+list_instances.json       - registered Worker instances at failure time
+meta.json                 - test id, resolved QGIS settings, exception, env name
+traceback.txt             - pytest's failure text
+uncaught_exceptions.json  - Python exceptions QGIS did not catch during the test
+qgis_messages.jsonl       - the QGIS message log
+hub_stdout.log / hub_stderr.log  - the Hub's last 500 lines
+actions.jsonl             - every call the test sent to QGIS, one per line
+screenshots/              - a canvas image after each call (actions.jsonl points to it)
 ```
 
 When using `--env=<name>` (see "Test environments" above), bundles are
@@ -254,9 +266,8 @@ nested under the env name: `outputs/<env_name>/diagnostics/...`.
 
 Configurable via `[tool.pytest.ini_options]`:
 - `qgis_diag_dir`: output directory (default `outputs/diagnostics`)
-
-> Action-level capture (`actions.jsonl`, per-action screenshots, hub log
-> tail, etc.) is on the roadmap — see ADR-0002 §13.
+- `qgis_diag_capture_screenshots`: set `false` to skip the image after each
+  call (default `true`)
 
 ## Architecture
 

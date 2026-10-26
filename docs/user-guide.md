@@ -343,6 +343,10 @@ env は引き続き Worker に継承されるので、launcher 側でそれを Q
 | `traceback.txt` | pytest の `longrepr` テキスト |
 | `uncaught_exceptions.json` | テスト実行中に Qt/Python から uncaught でキャッチされた例外（[Uncaught 例外](#uncaught-exceptions) 参照） |
 | `hub_stdout.log` / `hub_stderr.log` | Hub プロセスの直近最大 500 行 |
+| `qgis_messages.jsonl` | QGIS のメッセージログ（[QgsMessageLog の記録と判定](#message-log) 参照） |
+| `actions.jsonl` | テスト中に QGIS へ送った呼び出しを 1 行に 1 つ（`command` / `params` / `result` / `error` / `duration_ms` / `step_path` / `instance` / `screenshot_path`） |
+| `screenshots/` | 呼び出しのたびに撮ったキャンバスの画像。`actions.jsonl` の `screenshot_path` がここを指す。ini `qgis_diag_capture_screenshots = false` で撮らない |
+| `fresh_qgis.json` / `spawn_stdout.log` / `spawn_stderr.log` | `fresh_qgis` のテストだけ。そのテストの QGIS（`instance_id` / `label` / `pid`）と、その標準出力・標準エラー |
 
 `--env=all` / `--env=A,B` で meta-parent モードで動かした場合、parent 側で
 `outputs/summary.json` も追加で書かれる（per-env stats + totals + 集約 exit code）。
@@ -2189,7 +2193,7 @@ def test_cross_instance(automation_client):
 宛先に揃ってしまう。2 台を交互に操作するときは `instance=` を使う。
 
 `spawn_qgis()` で test 内から QGIS を立てる場合（ADR-0004、Phase 1 実装済）は
-[Quickstart §7](#quickstart-pytest-e2e) を参照。`per-call` の `instance=` 指定 >
+[pytest の応用 5.](#5-任意のタイミングで-qgis-を立てる-spawn_qgis) を参照。`per-call` の `instance=` 指定 >
 sticky `use_instance()` > Hub 既定、の優先順位で routing される。
 
 ### 同一 label での連続再起動（ADR-0005）
