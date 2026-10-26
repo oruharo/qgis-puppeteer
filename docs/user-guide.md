@@ -2422,6 +2422,74 @@ coverage が有効化される。
 
 ## Troubleshooting
 
+### Claude Desktop で MCP server が起動しない
+
+**症状**: Claude Desktop の設定の Developer で `qgis-puppeteer` が failed になる、
+または QGIS のツールが 1 つも出てこない。
+
+**原因の切り分け**: まず Claude Desktop が残すログを見る（`qgis-puppeteer` は
+`claude_desktop_config.json` の `mcpServers` に書いた名前）:
+
+```
+%APPDATA%\Claude\logs\mcp-server-qgis-puppeteer.log
+```
+
+1. `spawn python ENOENT` や `No module named 'qgis_puppeteer'` — `command` の
+   `python` が、`pip install` した Python と違う。Claude Desktop は PATH で最初に
+   見つかった `python` を使う。入れた Python で次を実行し、出たパスを `command` に書く:
+   ```bat
+   python -c "import sys; print(sys.executable)"
+   ```
+   ```json
+   "command": "C:/Users/<you>/AppData/Local/Programs/Python/Python312/python.exe",
+   ```
+2. `McpGateway requires the 'mcp' optional dependency` — `[mcp]` を付けずに
+   入れた。`pip install "qgis-puppeteer[mcp]"` で入れ直す
+3. 起動したあとすぐ落ちる — gateway 自身のログ `<TEMP>/qgis_puppeteer/gateway.log`
+   （`QPUPPETEER_GATEWAY_LOG`）を見る
+
+設定を直したら、Claude Desktop を終了して（タスクトレイに残っていればそこからも
+終了して）起動し直す。
+
+### `hub_unreachable`
+
+**症状**: ツールの呼び出しが `{"error": {"code": "hub_unreachable", ...}}` で返る。
+
+**原因**: MCP gateway が Hub（既定 `ws://127.0.0.1:9876`）に繋がらない。gateway は
+起動時には繋がず、ツールを呼ぶたびに繋ぐので、gateway が動いていても出る。
+上から順に確かめる:
+
+1. QGIS が起動しているか
+2. QGIS Puppeteer プラグインが、その QGIS のプロファイルで有効か。`--profile` を
+   付けて起こした QGIS は、`default` に入れたプラグインを読まない。プラグインの
+   管理で確かめ、無ければ [テスト用プロファイルにプラグインを入れる](#2-テスト用プロファイルにプラグインを入れる)
+   と同じ手順で入れる
+3. Hub が起動できたか。QGIS に「QGIS Puppeteer: Hub startup failed」が出ていれば
+   [Hub spawn 失敗](#hub-spawn-失敗) へ
+4. 繋ぎ先と待ち受け先が合っているか。プラグインが自分で起こす Hub はいつも
+   `127.0.0.1:9876` で待ち受ける。gateway に `QPUPPETEER_HUB_URL`
+   （`claude_desktop_config.json` の `env` など）で別のポートを指していないか。
+   QGIS 側に `QPUPPETEER_HUB_HOST` / `QPUPPETEER_HUB_PORT` / `QPUPPETEER_HUB_URL`
+   が立っていると、プラグインは Hub を起こさない（[Hub 接続関連](#hub-接続関連)）
+5. QGIS を起こした直後なら、Hub がまだ待ち受けていないだけのことがある。
+   `qgis_wait_ready` を先に呼ぶ。これは Hub が現れるまで `timeout_s` の内で待つ
+
+### `did not register to Hub and answer a command within Ns`（pytest）
+
+**症状**: QGIS は起動するが、テストに入る前に
+`QGIS subprocess (launch_token=...) did not register to Hub and answer a command within 60.0s`
+で止まる。
+
+**原因**: 起こした QGIS が、`qgis_startup_timeout` 秒の内に Hub に登録して
+呼び出しに答えなかった。
+
+1. テストが使うプロファイルにプラグインが無い、または有効でない（いちばん多い）。
+   `qgis_args` のプロファイルで QGIS を手で起こし、プラグインの管理で QGIS Puppeteer
+   が有効か見る。無ければ [テスト用プロファイルにプラグインを入れる](#2-テスト用プロファイルにプラグインを入れる)
+2. プラグインが読み込みで失敗している。QGIS に Python のエラーが出ていないか見る
+3. 起動に時間がかかる（重いプロジェクト、初めての起動、遅い CI のマシン）。
+   `qgis_startup_timeout`（既定 60 秒）を伸ばす
+
 ### `label_conflict`（同時同 label）
 
 **症状**: 起動した QGIS が登録されず（メッセージバー `register failed
