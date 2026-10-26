@@ -21,6 +21,9 @@ from .permission_manager import PermissionManager
 
 logger = logging.getLogger("qgis_puppeteer.python_executor")
 
+# 信頼モードの実行記録を書く QgsMessageLog のタグ（ログパネルのタブ名）
+AUDIT_LOG_TAG = "QGIS Puppeteer"
+
 # Global permission manager instance
 _permission_manager: PermissionManager | None = None
 
@@ -152,10 +155,8 @@ def _execute_code_internal(
     # Prepare execution context
     context = _prepare_context(iface)
 
-    # 信頼モードで走る際は監査ログに残す（ADR-0002 §9.3）。
-    # マスキング規則は将来の検討項目。現状は先頭 200 文字を素のまま出す。
     if get_permission_manager().trusted_mode:
-        logger.info("[trusted mode] exec: %s", code[:200])
+        _log_trusted_exec(code)
 
     # Capture stdout/stderr
     stdout_buffer = io.StringIO()
@@ -187,6 +188,24 @@ def _execute_code_internal(
             "permission_level": permission_level,
             "risk_level": analysis["risk_level"],
         }
+
+
+def _log_trusted_exec(code: str) -> None:
+    """信頼モードで確認なしに走るコードを QgsMessageLog に残す（先頭 200 文字）。
+
+    人が見るのは QGIS のログパネル、pytest では失敗時の qgis_messages.jsonl。
+    重さは NoLevel：pytest の QGIS は常に信頼モードなので、Info にすると
+    ``qgis_fail_on_message_level = info`` のテストが execute_python のたびに
+    落ちる。NoLevel は ``min_level`` の判定に掛からない。通知も出さない。
+    """
+    from qgis.core import Qgis, QgsMessageLog
+
+    try:
+        QgsMessageLog.logMessage(
+            f"[trusted mode] exec: {code[:200]}", AUDIT_LOG_TAG, Qgis.NoLevel, False
+        )
+    except Exception:  # noqa: BLE001 - 記録に失敗してもコードの実行は止めない
+        logger.exception("Could not write the trusted mode record to QgsMessageLog")
 
 
 def _prepare_context(iface: QgisInterface | None) -> dict[str, Any]:

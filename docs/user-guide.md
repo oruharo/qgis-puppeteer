@@ -2347,8 +2347,14 @@ pytest-qgis-puppeteer の fixture は subprocess 起動時に自動でこの env
 
 ### 監査ログ
 
-信頼モードでも実行内容は QGIS 側で `QgsMessageLog` に記録される
-（`[trusted mode] exec: ...`）。失敗解析・セキュリティレビュー用。
+信頼モードで確認なしに走ったコードは、先頭 200 文字が QGIS の `QgsMessageLog` に
+残る。ログパネルの「QGIS Puppeteer」タブに `[trusted mode] exec: ...` として出る。
+pytest では、失敗したテストの診断バンドルの `qgis_messages.jsonl` に、他の
+メッセージと並んで残る。失敗解析・セキュリティレビュー用。
+
+重さは `none`（QGIS の NoLevel）で、`min_level` の判定には掛からない。
+`qgis_fail_on_message_level = info` でも、execute_python でテストは落ちない。
+`get_recent_messages()` を `min_level` を付けずに呼ぶと、この記録も返る。
 
 ### 既存の whitelist を確認・session を破棄
 

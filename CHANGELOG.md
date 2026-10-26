@@ -703,6 +703,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Code run in trusted mode was not recorded anywhere.** With
+  `QPUPPETEER_TRUSTED_MODE=1`, `execute_python` runs code without asking, and
+  the record of what ran went to a Python logger that nothing inside QGIS
+  listens to. It is now written to `QgsMessageLog` under the tag
+  `QGIS Puppeteer` as `[trusted mode] exec: <first 200 characters>`, so it
+  shows in QGIS's log panel and, in pytest, in the diagnostic bundle's
+  `qgis_messages.jsonl`. The level is NoLevel (`"none"`), below `min_level`
+  checks: pytest's QGIS always runs in trusted mode, and an Info record would
+  fail every test that calls `execute_python` under
+  `qgis_fail_on_message_level = info`.
+
 - **A hung QGIS started through a launcher was left running** (#43). When
   QGIS stops answering heartbeats for long enough, the Hub drops it from
   the instance list. `spawn_qgis` (and so the session QGIS, its restart and
