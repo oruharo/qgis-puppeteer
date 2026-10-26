@@ -624,6 +624,7 @@ class TestMcpGatewayToolInventory:
             "qgis_set_widget_value",
             "qgis_close_widget",
             "qgis_read_rows",
+            "qgis_check_actionability",
             # dialog handler（worker 側 handler の公開。user-guide が MCP ツールと明記）
             "qgis_register_dialog_handler",
             "qgis_unregister_dialog_handler",
@@ -811,6 +812,48 @@ class TestMcpGatewayWidgetFailures:
         )
         assert not result.is_error
         assert json.loads(_extract_text(result)) == {"success": True}
+
+
+class TestMcpGatewayCheckActionability:
+    """Locator が使う QGIS 側の判定を、MCP からも 1 回だけ読める。"""
+
+    def test_forwards_the_selector_and_returns_the_check(self) -> None:
+        check = {
+            "exists": True,
+            "visible": True,
+            "enabled": False,
+            "not_covered": True,
+            "editable": True,
+            "actionable": False,
+            "geometry": {"x": 0, "y": 0, "width": 80, "height": 24},
+            "widget": {"class": "QPushButton", "object_name": "ok"},
+            "diagnostics": {"match_count": 1},
+        }
+        seen: list[dict[str, Any]] = []
+
+        async def run() -> CallToolResult:
+            async with fake_hub_server() as (_hub, hub_url):
+                worker = _FakeWorker(hub_url, label="a", pid=1)
+
+                def responder(req: dict[str, Any]) -> dict[str, Any]:
+                    seen.append({"command": req["command"], "params": req["params"]})
+                    return {"type": "response", "id": req["id"], "ok": True, "result": check}
+
+                worker.responder = responder
+                await worker.start()
+                await worker.ready.wait()
+                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                async with Client(gateway, raise_exceptions=True) as client:
+                    return await client.call_tool(
+                        "qgis_check_actionability", {"selector": {"object_name": "ok"}}
+                    )
+
+        result = _run(run())
+        assert not result.is_error
+        assert json.loads(_extract_text(result)) == check
+        assert seen == [
+            {"command": "qgis_check_actionability", "params": {"selector": {"object_name": "ok"}}}
+        ]
 
 
 class TestMcpGatewayWorkerRecords:
@@ -1207,6 +1250,7 @@ class TestMcpGatewayToolDescriptors:
             "qgis_get_leftover_state",
             "qgis_snapshot_ui",
             "qgis_read_rows",
+            "qgis_check_actionability",
             "qgis_list_dialog_handlers",
             "qgis_get_recent_exceptions",
             "qgis_get_recent_messages",

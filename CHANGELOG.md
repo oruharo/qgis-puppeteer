@@ -8,6 +8,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`qgis_check_actionability` is an MCP tool.** The pytest `Locator` reads
+  whether a widget exists, is visible, enabled, not covered by a modal and
+  editable through this QGIS command, but an MCP client could not, so an
+  agent whose click failed had to guess why from a full UI snapshot. The
+  tool reads it once, without waiting, and returns the same result as the
+  command, including the number of matches and the candidates when the
+  selector matches several widgets.
+
 - **`Locator.count()`** (#41). `expect(locator).to_have_count(n)` waits
   until the count is `n`, so there was no way to read how many widgets match
   right now; tests read `diagnostics.match_count` from `check_actionability`,

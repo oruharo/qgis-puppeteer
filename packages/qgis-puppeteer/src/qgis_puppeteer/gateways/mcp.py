@@ -1388,6 +1388,25 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
             instance=instance,
         )
 
+    @mcp.tool(title="操作できるかを読む", annotations=_QUERY, structured_output=False)
+    async def qgis_check_actionability(
+        ctx: Context,
+        selector: SelectorArg,
+        instance: InstanceArg = None,
+    ) -> str | CallToolResult:
+        """selector の widget が今、操作できる状態かを 1 回だけ読む（待たない）。
+
+        exists（在るか）/ visible / enabled / not_covered（モーダルに隠れていないか）/
+        editable（値を入れられるか。読み取り専用でないか）/ actionable（visible と
+        enabled と not_covered がすべて true）を返す。widget は当たった widget の
+        要約、diagnostics は探し方の結果で、当たった数（match_count）や、複数に
+        当たったときの候補（candidates）が入る。押せない・入れられない理由を
+        調べるのに使う。
+        """
+        return await _call(
+            ctx, "qgis_check_actionability", {"selector": selector}, instance=instance
+        )
+
     @mcp.tool(
         title="ウィジェットをクリック", annotations=_MUTATE_ARBITRARY, structured_output=False
     )

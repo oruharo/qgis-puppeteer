@@ -838,7 +838,7 @@ result = qgis.call("qgis_check_actionability", {
 ```
 
 `expect()` の `to_be_visible()` / `to_be_enabled()` も同 RPC を再利用しており、
-selector ambiguous は即時 abort される。
+selector ambiguous は即時 abort される。MCP では同じ名前のツール `qgis_check_actionability` で読める。
 
 ### `qgis_click_widget` / `qgis_set_widget_value` のエラーコード
 
@@ -2432,6 +2432,7 @@ QGIS が複数あると `instance_ambiguous`）。
 | | `qgis_set_widget_value` | ウィジェットに値を入れる |
 | | `qgis_read_rows` | 表・ツリー・リストの行を読む（snapshot の 100 行の上限なし） |
 | | `qgis_close_widget` | ウィジェットの窓を、人が × を押したときと同じく閉じる |
+| | `qgis_check_actionability` | 操作できる状態か（在るか、見えるか、有効か、モーダルに隠れていないか、値を入れられるか）を待たずに読む |
 | ダイアログ（[Dialog handler](#dialog-handler)） | `qgis_register_dialog_handler` | モーダルの窓が出たときの自動の答えを登録する |
 | | `qgis_unregister_dialog_handler` / `qgis_list_dialog_handlers` / `qgis_clear_dialog_handlers` | 名前で外す / 一覧 / 全部外す |
 | Python（[Permissions](#permissions)） | `qgis_execute_python` | ホワイトリストで許された Python コードを QGIS 内で実行する |
@@ -2444,8 +2445,7 @@ QGIS が複数あると `instance_ambiguous`）。
 
 QGIS の選択と操作の記録の 6 つ以外は、QGIS 側のコマンドとしても同じ名前で呼べる
 （Python スクリプトの `await client.call("qgis_list_layers")`）。QGIS 側のコマンドには
-ほかに、MCP には出していない [`qgis_check_actionability`](#qgis_check_actionabilitylow-level-rpc) と
-[`test.signal_spy_*` / `test.wait_for_signal`](#signal-spy--wait_for_signal) がある。
+ほかに、MCP には出していない [`test.signal_spy_*` / `test.wait_for_signal`](#signal-spy--wait_for_signal) がある。
 
 ---
 

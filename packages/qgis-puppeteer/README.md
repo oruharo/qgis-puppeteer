@@ -72,7 +72,7 @@ async with AutomationClient() as client:
 | Layers | `qgis_list_layers`, `qgis_get_layer_info` |
 | Canvas | `qgis_get_canvas_extent`, `qgis_set_canvas_extent`, `qgis_canvas_mouse`, `qgis_canvas_key` (mouse and key input the map tool receives) |
 | Selection | `qgis_select_features`, `qgis_get_selected_features` |
-| UI | `qgis_snapshot_ui`, `qgis_click_widget`, `qgis_set_widget_value`, `qgis_read_rows`, `qgis_close_widget`, `qgis_check_actionability` (not an MCP tool) |
+| UI | `qgis_snapshot_ui`, `qgis_click_widget`, `qgis_set_widget_value`, `qgis_read_rows`, `qgis_close_widget`, `qgis_check_actionability` (whether a widget can be acted on now) |
 | Dialogs | `qgis_register_dialog_handler`, `qgis_unregister_dialog_handler`, `qgis_list_dialog_handlers`, `qgis_clear_dialog_handlers` — answer modal dialogs automatically |
 | Capture | `qgis_screenshot` (what the canvas shows), `qgis_render_map` (fixed extent / size / DPI, for image snapshots) |
 | Code | `qgis_execute_python`, `qgis_execute_with_permission`, `qgis_get_whitelist`, `qgis_clear_session_permissions` |
