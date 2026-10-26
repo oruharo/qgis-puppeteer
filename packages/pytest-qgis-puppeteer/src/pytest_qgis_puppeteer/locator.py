@@ -37,6 +37,9 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
+from qgis_puppeteer.selector_match import find_in_snapshot
+from qgis_puppeteer.waiting import count_from_check, count_selector, node_value
+
 if TYPE_CHECKING:
     from pytest_qgis_puppeteer.automation_client import E2EAutomationClient
 
@@ -367,17 +370,9 @@ class Locator:
         見えていない widget は数えない（数えるなら ``attr={"visible": False}`` などで
         明示する）。``to_have_count`` はこれを数が合うまで繰り返し呼ぶ。
         """
-        selector = self._effective_selector()
-        selector.pop("index", None)
-        attr = dict(selector.get("attr") or {})
-        attr.setdefault("visible", True)
-        selector["attr"] = attr
+        selector = count_selector(self._effective_selector())
         check = self._client.check_actionability(selector, instance=self._instance)
-        diagnostics = check.get("diagnostics") or {}
-        match_count = diagnostics.get("match_count")
-        if isinstance(match_count, int):
-            return match_count
-        return 1 if check.get("exists") else 0
+        return count_from_check(check)
 
     # ------------------------------------------------------------
     # snapshot / 値取得
@@ -387,10 +382,8 @@ class Locator:
         """`snapshot_ui(include_main_window=True)` から selector に最初に
         マッチする node 辞書を返す。見つからなければ None。
         """
-        from pytest_qgis_puppeteer.automation_client import _find_in_snapshot
-
         snap = self._client.snapshot_ui(include_main_window=True, instance=self._instance)
-        return _find_in_snapshot(snap, self._effective_selector())
+        return find_in_snapshot(snap, self._effective_selector())
 
     def get_text(self) -> str | None:
         """snapshot から `text` フィールドを取得（QPushButton / QLabel / QLineEdit
@@ -413,13 +406,7 @@ class Locator:
 
         該当フィールドが無ければ None。
         """
-        node = self.snapshot()
-        if node is None:
-            return None
-        for key in ("value", "current_text", "checked", "current_index", "text"):
-            if key in node:
-                return node[key]
-        return None
+        return node_value(self.snapshot())
 
     # ------------------------------------------------------------
     # internal: auto-wait

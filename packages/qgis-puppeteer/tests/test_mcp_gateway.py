@@ -625,6 +625,7 @@ class TestMcpGatewayToolInventory:
             "qgis_close_widget",
             "qgis_read_rows",
             "qgis_check_actionability",
+            "qgis_wait_for",
             # dialog handler（worker 側 handler の公開。user-guide が MCP ツールと明記）
             "qgis_register_dialog_handler",
             "qgis_unregister_dialog_handler",
@@ -854,6 +855,292 @@ class TestMcpGatewayCheckActionability:
         assert seen == [
             {"command": "qgis_check_actionability", "params": {"selector": {"object_name": "ok"}}}
         ]
+
+
+class TestMcpGatewayWaitFor:
+    """`qgis_wait_for`：条件を満たすまで gateway の中で QGIS に問い合わせ続ける。
+
+    判定そのものは ``test_waiting.py``。ここは問い合わせの組み立て・くり返し・結果の形。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fast_polling(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from qgis_puppeteer.gateways import mcp as gateway_mod
+
+        monkeypatch.setattr(gateway_mod, "WAIT_FOR_POLL_INTERVAL_S", 0.01)
+
+    @staticmethod
+    def _call(
+        script: dict[str, list[dict[str, Any]]], **args: Any
+    ) -> tuple[CallToolResult, list[dict[str, Any]]]:
+        """コマンドごとに、呼ばれるたびに返す結果を順に返す（最後のものはくり返す）。
+
+        結果に ``_error`` があれば、Worker の business error（``ok: false``）にする。
+        """
+        seen: list[dict[str, Any]] = []
+        calls: dict[str, int] = {}
+
+        async def run() -> CallToolResult:
+            async with fake_hub_server() as (_hub, hub_url):
+                worker = _FakeWorker(hub_url, label="a", pid=1)
+
+                def responder(req: dict[str, Any]) -> dict[str, Any]:
+                    command = req["command"]
+                    seen.append({"command": command, "params": req["params"]})
+                    n = calls.get(command, 0)
+                    calls[command] = n + 1
+                    results = script[command]
+                    result = results[min(n, len(results) - 1)]
+                    if "_error" in result:
+                        return {
+                            "type": "response",
+                            "id": req["id"],
+                            "ok": False,
+                            "error": result["_error"],
+                        }
+                    return {"type": "response", "id": req["id"], "ok": True, "result": result}
+
+                worker.responder = responder
+                await worker.start()
+                await worker.ready.wait()
+                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                async with Client(gateway, raise_exceptions=True) as client:
+                    return await client.call_tool("qgis_wait_for", args)
+
+        return _run(run()), seen
+
+    @staticmethod
+    def _check(**overrides: Any) -> dict[str, Any]:
+        check: dict[str, Any] = {
+            "exists": True,
+            "visible": True,
+            "enabled": True,
+            "not_covered": True,
+            "editable": True,
+            "actionable": True,
+            "geometry": {"x": 0, "y": 0, "width": 80, "height": 24},
+            "widget": {"class": "QPushButton", "object_name": "ok"},
+            "diagnostics": {"match_count": 1},
+        }
+        check.update(overrides)
+        return check
+
+    def test_polls_until_the_condition_is_met(self) -> None:
+        result, seen = self._call(
+            {
+                "qgis_check_actionability": [
+                    self._check(enabled=False, actionable=False),
+                    self._check(enabled=False, actionable=False),
+                    self._check(),
+                ]
+            },
+            until="enabled",
+            selector={"object_name": "ok"},
+        )
+        assert not result.is_error
+        payload = json.loads(_extract_text(result))
+        assert payload["ok"] is True
+        assert payload["until"] == "enabled"
+        assert payload["waited_s"] >= 0
+        assert payload["observed"]["enabled"] is True
+        assert "geometry" not in payload["observed"]
+        assert (
+            seen
+            == [
+                {
+                    "command": "qgis_check_actionability",
+                    "params": {"selector": {"object_name": "ok"}},
+                }
+            ]
+            * 3
+        )
+
+    def test_timeout_reports_what_was_seen_last(self) -> None:
+        result, seen = self._call(
+            {"qgis_check_actionability": [self._check(visible=False, actionable=False)]},
+            until="visible",
+            selector={"object_name": "ok"},
+            timeout_s=0.1,
+        )
+        assert result.is_error
+        error = json.loads(_extract_text(result))["error"]
+        assert error["code"] == "wait_timeout"
+        assert error["details"]["until"] == "visible"
+        assert error["details"]["timeout_s"] == 0.1
+        assert error["details"]["observed"]["visible"] is False
+        assert len(seen) >= 2
+
+    def test_an_ambiguous_selector_fails_without_waiting(self) -> None:
+        ambiguous = self._check(
+            exists=False,
+            visible=False,
+            diagnostics={
+                "reason": "selector_ambiguous",
+                "match_count": 2,
+                "candidates": [{"class": "QPushButton"}, {"class": "QPushButton"}],
+            },
+        )
+        result, seen = self._call(
+            {"qgis_check_actionability": [ambiguous]},
+            until="hidden",
+            selector={"class": "QPushButton"},
+        )
+        assert result.is_error
+        error = json.loads(_extract_text(result))["error"]
+        assert error["code"] == "selector_ambiguous"
+        assert error["details"]["match_count"] == 2
+        assert len(error["details"]["candidates"]) == 2
+        assert len(seen) == 1
+
+    def test_count_accepts_several_matches(self) -> None:
+        result, seen = self._call(
+            {
+                "qgis_check_actionability": [
+                    self._check(diagnostics={"reason": "selector_ambiguous", "match_count": 2}),
+                    self._check(exists=False, diagnostics={"reason": "no_match"}),
+                ]
+            },
+            until="count",
+            selector={"class": "QDialog", "index": 1},
+            expected=0,
+        )
+        assert not result.is_error
+        assert json.loads(_extract_text(result))["observed"] == {"count": 0}
+        # index を外し、見えている widget だけを数える（Locator.count() と同じ）
+        assert seen[0]["params"] == {"selector": {"class": "QDialog", "attr": {"visible": True}}}
+        assert len(seen) == 2
+
+    def test_text_is_read_from_a_snapshot(self) -> None:
+        def snap(text: str) -> dict[str, Any]:
+            return {
+                "active_modal": None,
+                "main_window": {
+                    "class": "QMainWindow",
+                    "children": [{"class": "QLabel", "object_name": "status", "text": text}],
+                },
+            }
+
+        result, seen = self._call(
+            {
+                "qgis_check_actionability": [self._check()],
+                "qgis_snapshot_ui": [snap("Loading"), snap("Loaded 3 layers")],
+            },
+            until="text_contains",
+            selector={"object_name": "status"},
+            expected="3 layers",
+        )
+        assert not result.is_error
+        assert json.loads(_extract_text(result))["observed"] == {"value": "Loaded 3 layers"}
+        snapshots = [c["params"] for c in seen if c["command"] == "qgis_snapshot_ui"]
+        assert len(snapshots) == 2
+        assert snapshots[0]["include_main_window"] is True
+
+    def test_snapshot_conditions_reject_live_only_keys(self) -> None:
+        result, seen = self._call(
+            {},
+            until="text",
+            selector={"object_name": "status", "window": "Layer Properties"},
+            expected="x",
+        )
+        assert result.is_error
+        error = json.loads(_extract_text(result))["error"]
+        assert error["code"] == "invalid_params"
+        assert "window" in error["message"]
+        assert seen == []
+
+    def test_bad_arguments_are_rejected_before_asking_qgis(self) -> None:
+        result, seen = self._call({}, until="visible")
+        assert result.is_error
+        error = json.loads(_extract_text(result))["error"]
+        assert error == {"code": "invalid_params", "message": "until='visible' needs a selector"}
+        assert seen == []
+
+    def test_modal_with_title(self) -> None:
+        modal = {
+            "class": "QMessageBox",
+            "title": "Save changes?",
+            "children": [{"class": "QPushButton", "text": "&Save"}],
+        }
+        result, seen = self._call(
+            {
+                "qgis_snapshot_ui": [
+                    {"active_modal": None},
+                    {"active_modal": {"class": "QDialog", "title": "Progress"}},
+                    {"active_modal": modal},
+                ]
+            },
+            until="modal",
+            title_contains="Save",
+        )
+        assert not result.is_error
+        observed = json.loads(_extract_text(result))["observed"]
+        assert observed == {"modal": {"class": "QMessageBox", "title": "Save changes?"}}
+        assert len(seen) == 3
+        assert seen[0]["params"]["include_main_window"] is False
+
+    def test_popup_closed(self) -> None:
+        result, _ = self._call(
+            {
+                "qgis_snapshot_ui": [
+                    {"active_popup": {"class": "QMenu", "title": "&File", "menu_items": []}},
+                    {"active_popup": None},
+                ]
+            },
+            until="popup_closed",
+        )
+        assert not result.is_error
+        assert json.loads(_extract_text(result))["observed"] == {"popup": None}
+
+    def test_a_worker_error_is_a_tool_error(self) -> None:
+        result, seen = self._call(
+            {
+                "qgis_check_actionability": [
+                    {"_error": {"code": "worker_execution_error", "message": "boom"}}
+                ]
+            },
+            until="visible",
+            selector={"object_name": "ok"},
+        )
+        assert result.is_error
+        error = json.loads(_extract_text(result))["error"]
+        assert error["code"] == "worker_execution_error"
+        assert "boom" in error["message"]
+        assert len(seen) == 1
+
+    def test_the_wait_is_one_line_in_the_recording(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """何度問い合わせても、記録には qgis_wait_for の 1 行だけが残る。"""
+        monkeypatch.setenv("QPUPPETEER_MCP_RECORD_DIR", str(tmp_path))
+        checks = [self._check(visible=False), self._check(visible=False), self._check()]
+
+        async def run() -> dict[str, Any]:
+            async with fake_hub_server() as (_hub, hub_url):
+                worker = _FakeWorker(hub_url, label="a", pid=1)
+                served = iter(checks)
+
+                def responder(req: dict[str, Any]) -> dict[str, Any]:
+                    return {"type": "response", "id": req["id"], "ok": True, "result": next(served)}
+
+                worker.responder = responder
+                await worker.start()
+                await worker.ready.wait()
+                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                async with Client(gateway, raise_exceptions=True) as client:
+                    await client.call_tool("qgis_record_start", {"name": "wait"})
+                    await client.call_tool(
+                        "qgis_wait_for", {"until": "visible", "selector": {"object_name": "ok"}}
+                    )
+                    return json.loads(_extract_text(await client.call_tool("qgis_record_stop", {})))
+
+        stopped = _run(run())
+        assert stopped["actions"] == 1
+        with open(stopped["path"], encoding="utf-8") as fh:
+            (line,) = [json.loads(raw) for raw in fh.read().splitlines()]
+        assert line["command"] == "qgis_wait_for"
+        assert line["params"]["until"] == "visible"
+        assert line["params"]["selector"] == {"object_name": "ok"}
+        assert line["result"]["ok"] is True
 
 
 class TestMcpGatewayWorkerRecords:
@@ -1251,6 +1538,7 @@ class TestMcpGatewayToolDescriptors:
             "qgis_snapshot_ui",
             "qgis_read_rows",
             "qgis_check_actionability",
+            "qgis_wait_for",
             "qgis_list_dialog_handlers",
             "qgis_get_recent_exceptions",
             "qgis_get_recent_messages",

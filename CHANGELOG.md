@@ -8,6 +8,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`qgis_wait_for` MCP tool.** An MCP client had no way to wait: after a
+  `wait=false` click it called `qgis_snapshot_ui` again and again to see
+  whether a dialog had opened or a button had become enabled, each time
+  reading the whole UI tree. The tool waits inside the gateway, checking every
+  0.25 s, until a widget is visible / hidden / enabled / disabled / actionable
+  / editable, a count of widgets, a text, a value, a check state or a row count
+  is reached, or a modal dialog or popup menu opens or closes. It returns what
+  it saw last, and on timeout fails with `code=wait_timeout` and that
+  observation. The conditions mean the same as pytest's `expect(locator)` and
+  `wait_for_modal()` / `wait_for_popup()`, which now share the judgment with
+  it, so a recorded wait turns into the matching pytest line.
+
 - **`qgis_check_actionability` is an MCP tool.** The pytest `Locator` reads
   whether a widget exists, is visible, enabled, not covered by a modal and
   editable through this QGIS command, but an MCP client could not, so an

@@ -1004,19 +1004,20 @@ qgis.locator({"scope": "popup", "class": "QAction", "text": "削除"}).click()
 `title` は `QMenu.title()`（dialog handler の predicate の `title` と同じ）。
 `scope="popup"` の Locator の操作は auto-wait があるので、項目を押すだけなら
 `wait_for_popup` は無くても通る。出たことを確かめたいとき、項目の一覧を見て分岐する
-ときに使う。
+ときに使う。MCP では `qgis_wait_for(until="popup", title_contains=...)` /
+`qgis_wait_for(until="popup_closed")` で、結果の `observed.popup` に `menu_items` が入る。
 
 ### 窓（ダイアログ）を待つ
 
-窓を待つ専用の道具は持たず、今ある道具で書く:
+窓を待つ専用の道具は持たず、今ある道具で書く。MCP では `qgis_wait_for` で書く:
 
-| したいこと | 書き方 |
-|---|---|
-| 開いている窓の一覧 | `qgis.snapshot_ui()` の `visible_dialogs`（モードレス）と `active_modal` |
-| 題名で、モーダルが開くのを待つ | `qgis.wait_for_modal("保存")`（部分一致） |
-| 題名で、モードレスの窓が開くのを待つ | `qgis.wait_for_widget({"title": "道路 - 地物属性", "scope": "any"})`（題名は完全一致） |
-| モーダルが閉じるのを待つ | `qgis.wait_for_modal_closed()` |
-| ある窓が閉じるのを待つ | `qgis.wait_for_widget({"title": ...}, visible=False)` |
+| したいこと | pytest | MCP |
+|---|---|---|
+| 開いている窓の一覧 | `qgis.snapshot_ui()` の `visible_dialogs`（モードレス）と `active_modal` | `qgis_snapshot_ui` の同じ項目 |
+| 題名で、モーダルが開くのを待つ | `qgis.wait_for_modal("保存")`（部分一致） | `qgis_wait_for(until="modal", title_contains="保存")` |
+| 題名で、モードレスの窓が開くのを待つ | `qgis.wait_for_widget({"title": "道路 - 地物属性", "scope": "any"})`（題名は完全一致） | `qgis_wait_for(until="visible", selector={"title": "道路 - 地物属性", "scope": "any"})` |
+| モーダルが閉じるのを待つ | `qgis.wait_for_modal_closed()` | `qgis_wait_for(until="modal_closed")` |
+| ある窓が閉じるのを待つ | `qgis.wait_for_widget({"title": ...}, visible=False)` | `qgis_wait_for(until="hidden", selector={"title": ..., "scope": "any"})` |
 
 決まった項目を毎回選ぶなら、dialog handler でも答えられる（「Dialog handler」の
 「ポップアップに答える」）。
@@ -2121,6 +2122,23 @@ qgis_record_stop()                          → {"recording": false, "path": "..
 に `QPUPPETEER_MCP_RECORD=1` を立てる（`.mcp.json` の `env`）。起動時に
 `session` という名前で記録を始め、終了時に閉じる。
 
+`qgis_wait_for` は、中で何度 QGIS に問い合わせても記録には 1 行で残る。条件の意味は
+pytest の次の書き方と同じなので、書き起こすときはこう置き換える（`loc` は
+`qgis.locator(selector)`、`expected` は記録の `params.expected`）:
+
+| `until` | pytest |
+|---|---|
+| `visible` / `hidden` | `expect(loc).to_be_visible()` / `to_be_hidden()` |
+| `enabled` / `disabled` | `expect(loc).to_be_enabled()` / `to_be_disabled()` |
+| `actionable` / `editable` | 書かなくてよい（`loc.click()` / `loc.fill()` が自動で待つ） |
+| `count` | `expect(loc).to_have_count(expected)` |
+| `text` / `text_contains` | `expect(loc).to_have_text(expected)` / `to_contain_text(expected)` |
+| `value` | `expect(loc).to_have_value(expected)` |
+| `checked` / `unchecked` | `expect(loc).to_be_checked()` / `expect(loc).not_.to_be_checked()` |
+| `row_count` | `expect(loc).to_have_row_count(expected)` |
+| `modal` / `modal_closed` | `qgis.wait_for_modal(title_contains)` / `qgis.wait_for_modal_closed()` |
+| `popup` / `popup_closed` | `qgis.wait_for_popup(title_contains)` / `qgis.wait_for_popup_closed()` |
+
 ---
 
 ## Multi-instance
@@ -2433,6 +2451,7 @@ QGIS が複数あると `instance_ambiguous`）。
 | | `qgis_read_rows` | 表・ツリー・リストの行を読む（snapshot の 100 行の上限なし） |
 | | `qgis_close_widget` | ウィジェットの窓を、人が × を押したときと同じく閉じる |
 | | `qgis_check_actionability` | 操作できる状態か（在るか、見えるか、有効か、モーダルに隠れていないか、値を入れられるか）を待たずに読む |
+| | `qgis_wait_for` | ウィジェットが見える・押せるようになる、文字や値が変わる、モーダルの窓やポップアップのメニューが出る・閉じる、を待つ（[MCP の操作記録](#mcp-recording) に pytest での書き方） |
 | ダイアログ（[Dialog handler](#dialog-handler)） | `qgis_register_dialog_handler` | モーダルの窓が出たときの自動の答えを登録する |
 | | `qgis_unregister_dialog_handler` / `qgis_list_dialog_handlers` / `qgis_clear_dialog_handlers` | 名前で外す / 一覧 / 全部外す |
 | Python（[Permissions](#permissions)） | `qgis_execute_python` | ホワイトリストで許された Python コードを QGIS 内で実行する |
@@ -2443,7 +2462,7 @@ QGIS が複数あると `instance_ambiguous`）。
 | | `qgis_get_leftover_state` | 作業のあとに確かめたい状態を 1 回で読む（[残った状態の検査](#leftover-state)） |
 | 操作の記録（[MCP の操作記録](#mcp-recording)） | `qgis_record_start` / `qgis_record_step` / `qgis_record_stop` | ツール呼び出しを JSONL に記録する / 区切りを付ける / 止める |
 
-QGIS の選択と操作の記録の 6 つ以外は、QGIS 側のコマンドとしても同じ名前で呼べる
+QGIS の選択と操作の記録の 6 つと `qgis_wait_for` 以外は、QGIS 側のコマンドとしても同じ名前で呼べる
 （Python スクリプトの `await client.call("qgis_list_layers")`）。QGIS 側のコマンドには
 ほかに、MCP には出していない [`test.signal_spy_*` / `test.wait_for_signal`](#signal-spy--wait_for_signal) がある。
 

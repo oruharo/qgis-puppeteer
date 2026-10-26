@@ -78,6 +78,7 @@ async with AutomationClient() as client:
 | Code | `qgis_execute_python`, `qgis_execute_with_permission`, `qgis_get_whitelist`, `qgis_clear_session_permissions` |
 | Discovery (MCP only) | `qgis_list_instances`, `qgis_use_instance`, `qgis_wait_ready` — from Python, use `list_instances()` / `wait_for_ready()` |
 | Behind the screen | `qgis_get_recent_exceptions`, `qgis_get_recent_messages` (QgsMessageLog, incl. message bar), and their `qgis_clear_*`; `qgis_get_leftover_state` (open dialogs, layers in editing, … after a task) |
+| Waiting (MCP only) | `qgis_wait_for` — until a widget is visible / enabled / has a text or value, or a modal dialog or popup menu opens or closes; from pytest, use `expect(locator)` and `wait_for_modal()` / `wait_for_popup()` |
 | Recording (MCP only) | `qgis_record_start`, `qgis_record_step`, `qgis_record_stop` — the calls go to a JSONL file in the `actions.jsonl` shape |
 
 For a description of each tool, see the [MCP tool list](https://github.com/oruharo/qgis-puppeteer/blob/main/docs/user-guide.md#mcp-tools) in the user guide. For full schemas and examples, see [Architecture document](https://github.com/oruharo/qgis-puppeteer/blob/main/docs/architecture/0001-qgis-puppeteer-architecture.md).

@@ -42,12 +42,8 @@ from qgis_puppeteer.client import (
 )
 from qgis_puppeteer.hub_state import select_by_selector
 from qgis_puppeteer.protocol import ErrorCode, RejectedRegistration, Role
-from qgis_puppeteer.selector_match import (
-    check_snapshot_selector,
-    label_forms,
-    record_matches_selector,
-    resolve_with_index,
-)
+from qgis_puppeteer.selector_match import find_in_snapshot as _find_in_snapshot
+from qgis_puppeteer.waiting import evaluate_window, read_window
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -1428,8 +1424,9 @@ class E2EAutomationClient:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             snap = self.snapshot_ui(include_main_window=True, instance=instance)
-            modal = snap.get("active_modal")
-            if modal is not None and title_contains in (modal.get("title") or ""):
+            modal = read_window("modal", snap)
+            if evaluate_window("modal", modal, title_contains):
+                assert modal is not None
                 return modal
             time.sleep(poll_interval_s)
         raise TimeoutError(
@@ -1451,7 +1448,7 @@ class E2EAutomationClient:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             snap = self.snapshot_ui(include_main_window=True, instance=instance)
-            if snap.get("active_modal") is None:
+            if evaluate_window("modal_closed", read_window("modal_closed", snap), None):
                 return
             time.sleep(poll_interval_s)
         raise TimeoutError(f"Active modal did not close within {timeout_s}s")
@@ -1478,12 +1475,10 @@ class E2EAutomationClient:
         """
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            popup = self.snapshot_ui(instance=instance).get("active_popup")
-            if popup is not None and (
-                title_contains is None
-                # 題名の & を除いても比べる（"&Layer" を "Layer" で待てる）
-                or any(title_contains in form for form in label_forms(popup.get("title") or ""))
-            ):
+            popup = read_window("popup", self.snapshot_ui(instance=instance))
+            # 題名の & を除いても比べる（"&Layer" を "Layer" で待てる）
+            if evaluate_window("popup", popup, title_contains):
+                assert popup is not None
                 return popup
             time.sleep(poll_interval_s)
         what = "" if title_contains is None else f" with title containing {title_contains!r}"
@@ -1503,7 +1498,8 @@ class E2EAutomationClient:
         """
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            if self.snapshot_ui(instance=instance).get("active_popup") is None:
+            snap = self.snapshot_ui(instance=instance)
+            if evaluate_window("popup_closed", read_window("popup_closed", snap), None):
                 return
             time.sleep(poll_interval_s)
         raise TimeoutError(f"Active popup did not close within {timeout_s}s")
@@ -1620,106 +1616,3 @@ class E2EAutomationClient:
         if self._client is None or self._loop is None:
             raise RuntimeError("E2EAutomationClient.connect() has not been called yet")
         return self._client, self._loop
-
-
-# ============================================================
-# snapshot tree 探索（wait_for_widget の補助）
-# ============================================================
-
-
-def _snapshot_roots(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
-    """snapshot 辞書から探索対象の root node 群を抽出する。
-
-    `active_popup`（開いているメニューなど。モーダルより上にある、#22）を最優先、
-    次に `active_modal`（モーダルがあればフォーカスはそこに集中している）、
-    続いて `visible_dialogs`（モードレスダイアログ）、最後に `main_window`
-    （`include_main_window=True` のときのみ存在）。
-    """
-    roots: list[dict[str, Any]] = []
-    popup = snapshot.get("active_popup")
-    if isinstance(popup, dict):
-        roots.append(popup)
-    modal = snapshot.get("active_modal")
-    if isinstance(modal, dict):
-        roots.append(modal)
-    for d in snapshot.get("visible_dialogs") or ():
-        if isinstance(d, dict):
-            roots.append(d)
-    main = snapshot.get("main_window")
-    if isinstance(main, dict):
-        roots.append(main)
-    return roots
-
-
-def _node_matches(node: dict[str, Any], selector: dict[str, Any]) -> bool:
-    """selector の各キーが node のフィールドと完全一致するかを判定。
-
-    OSS 共通の `qgis_puppeteer.selector_match.record_matches_selector` に委譲。
-    snapshot node はそのまま record として扱える（`class` / `object_name` /
-    `text` / `title` / `label` / `placeholder` 等のキーが入っている）。
-    """
-    return record_matches_selector(node, selector)
-
-
-def _find_in_snapshot(snapshot: dict[str, Any], selector: dict[str, Any]) -> dict[str, Any] | None:
-    """snapshot tree を DFS で歩き、selector の解決結果を返す。
-
-    selector 仕様（match キー / `index` / strict mode）は live tree 側
-    `_find_widget` と完全に揃える（ADR-0002 §8.1 / Roadmap "Selector resolver の
-    統合"）。共通 helper `resolve_with_index` に委譲。
-
-    Strict mode: 複数マッチ + `index` 未指定 → None を返す（snapshot 経路は
-    `wait_for_widget` / `Locator.snapshot()` から呼ばれ、両者とも単純 None
-    判定をするため、ambiguous は「見つからなかった」として扱う。`Locator` の
-    操作系（click / fill）は `check_actionability` 経由で別途 early-fail する）。
-
-    Locator chain（``_scope_chain`` キー）: ネスト selector を順に解決し、
-    最深 node の subtree 内で leaf selector を適用する（live tree 側
-    `_find_widget` と semantics 一致）。
-
-    Raises:
-        LiveOnlySelectorError: snapshot に無い ``window`` / ``class_inherits`` を
-            使っている（#38）。
-    """
-    check_snapshot_selector(selector)
-    chain = selector.get("_scope_chain") or []
-    if chain:
-        leaf = {k: v for k, v in selector.items() if k != "_scope_chain"}
-        # 各 step を順に解決し、結果 node を次の探索 root にする
-        roots: list[dict[str, Any]] = list(_snapshot_roots(snapshot))
-        parent_node: dict[str, Any] | None = None
-        for step in chain:
-            search_roots = roots if parent_node is None else [parent_node]
-            parent_node = _find_first_in_subtree(search_roots, step)
-            if parent_node is None:
-                return None
-        assert parent_node is not None
-        return _find_first_in_subtree([parent_node], leaf)
-
-    return _find_first_in_subtree(list(_snapshot_roots(snapshot)), selector)
-
-
-def _find_first_in_subtree(
-    roots: list[dict[str, Any]], selector: dict[str, Any]
-) -> dict[str, Any] | None:
-    """roots の subtree を DFS して selector を解決する内部 helper。
-
-    `_find_in_snapshot` の chain step / leaf 共通実装。selector に
-    ``_scope_chain`` が含まれている場合は何もしない（呼び出し側で除去想定）。
-    """
-    matches: list[dict[str, Any]] = []
-    # 探索は DFS stack。stack の `pop()` で natural な兄弟順序を保つため、
-    # 子要素は逆順で push する（push: [c, b, a] → pop: a → b → c）。
-    # `index=N` 指定時のユーザー期待（snapshot に出ている順）に合わせる。
-    stack: list[dict[str, Any]] = list(reversed(roots))
-    while stack:
-        node = stack.pop()
-        if _node_matches(node, selector):
-            matches.append(node)
-        # メニューの項目（`menu_items`、#22）も子としてたどる
-        children = [*(node.get("children") or ()), *(node.get("menu_items") or ())]
-        for child in reversed(children):
-            if isinstance(child, dict) and not child.get("_truncated"):
-                stack.append(child)
-    chosen, _diag = resolve_with_index(matches, selector)
-    return chosen

@@ -2,8 +2,8 @@
 
 ADR-0002 §8.1 / Roadmap "Selector resolver の統合" を実装する。
 qgis_tools.ui_tools._find_widget（live Qt tree 走査）と
-pytest_qgis_puppeteer.automation_client._find_in_snapshot（snapshot DFS）が
-同じ selector 仕様を採用できるよう、純粋関数として切り出す。
+:func:`find_in_snapshot`（snapshot DFS）が同じ selector 仕様を採用できるよう、
+純粋関数として切り出す。
 
 ## 公開 API
 
@@ -13,6 +13,8 @@ pytest_qgis_puppeteer.automation_client._find_in_snapshot（snapshot DFS）が
 - ``label_forms(text)`` — ボタン・メニュー項目の文言を、指定と比べる形にする
 - ``live_only_keys(selector)`` — snapshot では判定できないキー（``window`` /
   ``class_inherits``）のうち、selector が使っているもの
+- ``find_in_snapshot(snapshot, selector)`` — ``qgis_snapshot_ui`` の結果から
+  selector に当たる node を 1 つ返す（``snapshot_roots`` が探す起点）
 
 ## record の形
 
@@ -228,3 +230,92 @@ def resolve_with_index(
         return None, {"reason": "index_out_of_range", "match_count": len(records)}
 
     return records[index], {"match_count": len(records)}
+
+
+# ============================================================
+# snapshot tree の探索
+# ============================================================
+
+
+def snapshot_roots(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    """snapshot 辞書から探索対象の root node 群を抽出する。
+
+    `active_popup`（開いているメニューなど。モーダルより上にある、#22）を最優先、
+    次に `active_modal`（モーダルがあればフォーカスはそこに集中している）、
+    続いて `visible_dialogs`（モードレスダイアログ）、最後に `main_window`
+    （`include_main_window=True` のときのみ存在）。
+    """
+    roots: list[dict[str, Any]] = []
+    popup = snapshot.get("active_popup")
+    if isinstance(popup, dict):
+        roots.append(popup)
+    modal = snapshot.get("active_modal")
+    if isinstance(modal, dict):
+        roots.append(modal)
+    for d in snapshot.get("visible_dialogs") or ():
+        if isinstance(d, dict):
+            roots.append(d)
+    main = snapshot.get("main_window")
+    if isinstance(main, dict):
+        roots.append(main)
+    return roots
+
+
+def find_in_snapshot(snapshot: dict[str, Any], selector: dict[str, Any]) -> dict[str, Any] | None:
+    """snapshot tree を DFS で歩き、selector の解決結果を返す。
+
+    selector 仕様（match キー / `index` / strict mode）は live tree 側
+    `_find_widget` と揃える。snapshot node はそのまま record として
+    :func:`record_matches_selector` に渡せる。pytest の ``wait_for_widget`` /
+    ``Locator.snapshot()`` と MCP の ``qgis_wait_for`` が使う。
+
+    Strict mode: 複数マッチ + `index` 未指定 → None を返す（ambiguous は
+    「見つからなかった」として扱う。曖昧さは呼び出し側が ``check_actionability``
+    で別に見る）。
+
+    Locator chain（``_scope_chain`` キー）: ネスト selector を順に解決し、
+    最深 node の subtree 内で leaf selector を適用する（live tree 側
+    `_find_widget` と semantics 一致）。
+
+    Raises:
+        LiveOnlySelectorError: snapshot に無い ``window`` / ``class_inherits`` を
+            使っている（#38）。
+    """
+    check_snapshot_selector(selector)
+    chain = selector.get("_scope_chain") or []
+    if chain:
+        leaf = {k: v for k, v in selector.items() if k != "_scope_chain"}
+        # 各 step を順に解決し、結果 node を次の探索 root にする
+        roots: list[dict[str, Any]] = snapshot_roots(snapshot)
+        parent_node: dict[str, Any] | None = None
+        for step in chain:
+            search_roots = roots if parent_node is None else [parent_node]
+            parent_node = _find_first_in_subtree(search_roots, step)
+            if parent_node is None:
+                return None
+        assert parent_node is not None
+        return _find_first_in_subtree([parent_node], leaf)
+
+    return _find_first_in_subtree(snapshot_roots(snapshot), selector)
+
+
+def _find_first_in_subtree(
+    roots: list[dict[str, Any]], selector: dict[str, Any]
+) -> dict[str, Any] | None:
+    """roots の subtree を DFS して selector を解決する（chain の各段と leaf で共通）。"""
+    matches: list[dict[str, Any]] = []
+    # 探索は DFS stack。stack の `pop()` で natural な兄弟順序を保つため、
+    # 子要素は逆順で push する（push: [c, b, a] → pop: a → b → c）。
+    # `index=N` 指定時のユーザー期待（snapshot に出ている順）に合わせる。
+    stack: list[dict[str, Any]] = list(reversed(roots))
+    while stack:
+        node = stack.pop()
+        if record_matches_selector(node, selector):
+            matches.append(node)
+        # メニューの項目（`menu_items`、#22）も子としてたどる
+        children = [*(node.get("children") or ()), *(node.get("menu_items") or ())]
+        for child in reversed(children):
+            if isinstance(child, dict) and not child.get("_truncated"):
+                stack.append(child)
+    chosen, _diag = resolve_with_index(matches, selector)
+    return chosen

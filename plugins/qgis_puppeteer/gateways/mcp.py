@@ -45,6 +45,7 @@ from typing import Annotated, Any, Literal, TypeVar
 
 import websockets.exceptions
 
+from qgis_puppeteer import waiting
 from qgis_puppeteer.client import (
     AutomationClient,
     AutomationClientError,
@@ -55,6 +56,8 @@ from qgis_puppeteer.client import (
 from qgis_puppeteer.gateways.recording import ENV_RECORD, McpRecorder
 from qgis_puppeteer.hub_state import select_by_selector
 from qgis_puppeteer.protocol import Role
+from qgis_puppeteer.selector_match import live_only_keys
+from qgis_puppeteer.waiting import WaitUntil
 
 try:
     from mcp.server.mcpserver import Context, MCPServer
@@ -606,6 +609,135 @@ async def _call(
     return await _with_client(gateway, op)
 
 
+# qgis_wait_for の既定と上限（秒）、確かめる間隔。既定と間隔は pytest の expect と同じ。
+WAIT_FOR_DEFAULT_TIMEOUT_S: float = 5.0
+WAIT_FOR_MAX_TIMEOUT_S: float = 120.0
+WAIT_FOR_POLL_INTERVAL_S: float = 0.25
+
+
+async def _wait_for(
+    client: AutomationClient,
+    target: str | None,
+    until: str,
+    selector: dict[str, Any] | None,
+    expected: Any,
+    title_contains: str | None,
+    timeout_s: float,
+) -> str | CallToolResult:
+    """``qgis_wait_for`` の本体。条件を満たすか時間切れまで QGIS に問い合わせ続ける。
+
+    判定は :mod:`qgis_puppeteer.waiting`。QGIS 側の business error（RequestError）は
+    呼び出し側で tool error にする。時間切れは TimeoutError にしない（`_with_client` が
+    接続切れと取り違えるので、ここで結果にする）。
+    """
+    if until in waiting.NODE_CONDITIONS:
+        assert selector is not None
+        keys = live_only_keys(selector)
+        if keys:
+            return _error_result(
+                {
+                    "error": {
+                        "code": "invalid_params",
+                        "message": (
+                            f"selector keys {keys} are not in snapshots, and until={until!r} "
+                            "reads the widget from a snapshot; pick it by object_name, class, "
+                            "title or text instead"
+                        ),
+                    }
+                }
+            )
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    deadline = started + timeout_s
+    snapshot_params = {"max_depth": 8, "include_invisible": False}
+    while True:
+        observed: dict[str, Any]
+        if until in waiting.CHECK_CONDITIONS or until in waiting.NODE_CONDITIONS:
+            assert selector is not None
+            check = await client.call(
+                "qgis_check_actionability", {"selector": selector}, instance=target
+            )
+            if waiting.is_ambiguous(check):
+                diagnostics = check.get("diagnostics") or {}
+                return _error_result(
+                    {
+                        "error": {
+                            "code": "selector_ambiguous",
+                            "message": (
+                                f"selector matched {diagnostics.get('match_count')} widgets; "
+                                "add index or narrow the selector"
+                            ),
+                            "details": {
+                                "match_count": diagnostics.get("match_count"),
+                                "candidates": diagnostics.get("candidates"),
+                            },
+                        }
+                    }
+                )
+            if until in waiting.CHECK_CONDITIONS:
+                observed = {k: v for k, v in check.items() if k != "geometry"}
+                matched = waiting.evaluate_check(until, check)
+            else:
+                snapshot = await client.call(
+                    "qgis_snapshot_ui",
+                    {**snapshot_params, "include_main_window": True},
+                    instance=target,
+                )
+                value = waiting.read_node(until, snapshot, selector)
+                observed = {"value": value}
+                matched = waiting.evaluate_node(until, value, expected)
+        elif until in waiting.COUNT_CONDITIONS:
+            assert selector is not None
+            check = await client.call(
+                "qgis_check_actionability",
+                {"selector": waiting.count_selector(selector)},
+                instance=target,
+            )
+            count = waiting.count_from_check(check)
+            observed = {"count": count}
+            matched = count == expected
+        else:
+            snapshot = await client.call(
+                "qgis_snapshot_ui",
+                {**snapshot_params, "include_main_window": False},
+                instance=target,
+            )
+            window = waiting.read_window(until, snapshot)
+            observed = {
+                "modal" if until.startswith("modal") else "popup": waiting.window_summary(window)
+            }
+            matched = waiting.evaluate_window(until, window, title_contains)
+
+        if matched:
+            return _format_result(
+                {
+                    "ok": True,
+                    "until": until,
+                    "waited_s": round(loop.time() - started, 2),
+                    "observed": observed,
+                }
+            )
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            details: dict[str, Any] = {"until": until, "timeout_s": timeout_s}
+            if expected is not None:
+                details["expected"] = expected
+            if title_contains is not None:
+                details["title_contains"] = title_contains
+            details["observed"] = observed
+            return _error_result(
+                {
+                    "error": {
+                        "code": "wait_timeout",
+                        "message": f"until={until!r} was not met within {timeout_s}s",
+                        "details": details,
+                    }
+                }
+            )
+        await asyncio.sleep(min(WAIT_FOR_POLL_INTERVAL_S, remaining))
+
+
 # 画像を本文に添える上限。これを超える PNG はパスだけ返す（会話の文脈を食い潰さない）。
 MAX_INLINE_IMAGE_BYTES = 4 * 1024 * 1024
 
@@ -708,6 +840,9 @@ def build_gateway(
             "connection dropped; grace_expires_in says how long the Hub still waits for it "
             "to reconnect (QGIS auto-reconnects when it can).\n"
             "- UI tools take a selector dict; build it from qgis_snapshot_ui output.\n"
+            "- To wait for the UI to change (a dialog to open or close, a button to become "
+            "enabled, a text to appear), call qgis_wait_for instead of calling "
+            "qgis_snapshot_ui again and again.\n"
             "- Map tools (digitizing, moving, selecting) are driven with qgis_canvas_mouse and "
             "qgis_canvas_key, in map coordinates of the canvas CRS; read the range with "
             "qgis_get_canvas_extent first.\n"
@@ -1401,11 +1536,101 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
         enabled と not_covered がすべて true）を返す。widget は当たった widget の
         要約、diagnostics は探し方の結果で、当たった数（match_count）や、複数に
         当たったときの候補（candidates）が入る。押せない・入れられない理由を
-        調べるのに使う。
+        調べるのに使う。状態が変わるのを待つなら qgis_wait_for。
         """
         return await _call(
             ctx, "qgis_check_actionability", {"selector": selector}, instance=instance
         )
+
+    @mcp.tool(title="状態が変わるまで待つ", annotations=_QUERY, structured_output=False)
+    async def qgis_wait_for(
+        ctx: Context,
+        until: Annotated[
+            WaitUntil,
+            Field(
+                description=(
+                    "待つ条件。selector の widget が visible / hidden（見えない・無い）/ "
+                    "enabled / disabled / actionable（押せる）/ editable（値を入れられる）"
+                    "になる。count は見えている widget の数が expected になる（0 で全部"
+                    "閉じた。複数に当たる selector でよい）。text / text_contains は"
+                    "文字が expected と一致する / を含む。value は値が expected になる。"
+                    "checked / unchecked。row_count は表・ツリー・リストの行数が expected。"
+                    "modal / modal_closed、popup / popup_closed はモーダルの窓・"
+                    "ポップアップのメニューが出る / 閉じる（selector は付けない）。"
+                )
+            ),
+        ],
+        selector: Annotated[
+            dict[str, Any] | None,
+            Field(
+                description=(
+                    "対象ウィジェットの指定（qgis_click_widget と同じ形）。modal / "
+                    "modal_closed / popup / popup_closed 以外では必須。text / "
+                    "text_contains / value / checked / unchecked / row_count は "
+                    "snapshot で探すので window / class_inherits は使えない。"
+                )
+            ),
+        ] = None,
+        expected: Annotated[
+            Any,
+            Field(
+                description=(
+                    "比べる値。count と row_count は数、text と text_contains は文字、"
+                    "value は qgis_set_widget_value に入れるのと同じ形の値。"
+                    "ほかの条件では付けない。"
+                )
+            ),
+        ] = None,
+        title_contains: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "modal / popup で、題名にこれを含む窓・メニューだけを待つ。省くとどれでもよい。"
+                )
+            ),
+        ] = None,
+        timeout_s: Annotated[
+            float,
+            Field(description="待つ上限秒。", gt=0, le=WAIT_FOR_MAX_TIMEOUT_S),
+        ] = WAIT_FOR_DEFAULT_TIMEOUT_S,
+        instance: InstanceArg = None,
+    ) -> str | CallToolResult:
+        """QGIS の UI が条件を満たすまで待つ。
+
+        qgis_snapshot_ui を呼び直して確かめる代わりに使う。条件は 0.25 秒ごとに
+        確かめ、満たせば ok と待った秒数、最後に見たもの（observed）を返す。
+        timeout_s までに満たさなければ isError と code=wait_timeout で、最後に
+        見たものを details.observed に返す。selector が複数の widget に当たって
+        1 つに決まらないと、待たずに code=selector_ambiguous（count を除く）。
+
+        wait=false で押したボタンが窓を開く・閉じるのを待つ、処理が終わって
+        ボタンが押せるようになるのを待つ、といった使い方をする。条件の意味は
+        pytest の expect(locator).to_*() と同じなので、記録（qgis_record_*）
+        から pytest に書き起こすときはそちらに置き換えられる。
+        """
+        problem = waiting.validate(until, selector, expected, title_contains)
+        if problem is not None:
+            return _error_result({"error": {"code": "invalid_params", "message": problem}})
+        gateway: GatewayContext = ctx.request_context.lifespan_context
+        target = _resolve_target(gateway, instance)
+
+        async def op(client: AutomationClient) -> str | CallToolResult:
+            try:
+                return await _wait_for(
+                    client, target, until, selector, expected, title_contains, timeout_s
+                )
+            except RequestError as e:
+                return _error_result(
+                    {
+                        "error": {
+                            "code": e.code.value if e.code is not None else None,
+                            "message": str(e),
+                            "details": e.details,
+                        }
+                    }
+                )
+
+        return await _with_client(gateway, op)
 
     @mcp.tool(
         title="ウィジェットをクリック", annotations=_MUTATE_ARBITRARY, structured_output=False
