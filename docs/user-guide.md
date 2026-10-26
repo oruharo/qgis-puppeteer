@@ -399,7 +399,7 @@ env = { MYAPP_LOG_LEVEL = "DEBUG" }
 [[environments]]
 name = "with_auth"
 extends = "base"                       # base の qgis_bin/qgis_python/qgis_command を継承
-qgis_args = ["--feature=auth"]         # base の args の **後ろ** に append される
+qgis_args = ["--nologo"]               # base の args の **後ろ** に append される
 env = { MYAPP_AUTH_ENABLED = "1" }     # base の env と shallow merge（同キーは子優先）
 ```
 
@@ -481,14 +481,14 @@ canvas クリアな状態で 1 件動かしたい」ケース向け。
 ```python
 import pytest
 
-@pytest.mark.fresh_qgis(args=["--clean-canvas"], env={"MYAPP_LOG_LEVEL": "DEBUG"})
-def test_pristine_state(qgis):
-    """この test だけ canvas クリアで再起動。fixture teardown で kill される。"""
+@pytest.mark.fresh_qgis(args=["--nocustomization"], env={"MYAPP_LOG_LEVEL": "DEBUG"})
+def test_without_customization(qgis):
+    """この test だけ GUI のカスタマイズを当てずに起こす。fixture teardown で止める。"""
     ...
 
 @pytest.mark.qgis_env("with_auth")
-@pytest.mark.fresh_qgis(args=["--reset-cache"])
-def test_auth_with_reset_cache(qgis):
+@pytest.mark.fresh_qgis(args=["--skipbadlayers"])
+def test_auth_skip_bad_layers(qgis):
     """env=with_auth の構成 + 追加 args で fresh worker。"""
     ...
 ```
@@ -580,7 +580,10 @@ def test_two_workers_compare(automation_client, hub_port):
         # per-call の instance routing
         snap_a = automation_client.snapshot_ui(instance=worker_a.instance_id)
         snap_b = automation_client.snapshot_ui(instance=worker_b.instance_id)
-        assert _equivalent(snap_a, snap_b)  # 比べ方はテストが決める
+        # 比べ方はテストが決める。ここでは見えている窓の題名を比べる
+        titles_a = sorted(d.get("title", "") for d in snap_a["visible_dialogs"])
+        titles_b = sorted(d.get("title", "") for d in snap_b["visible_dialogs"])
+        assert titles_a == titles_b
 ```
 
 `qgis_bin` には実行ファイルのパスを渡す（ini の `qgis_bin` は自動では入らない）。
@@ -701,12 +704,17 @@ def pytest_qgis_before_spawn(config, kind):
 - 起こし直し（`qgis_restart_before` や `qgis_auto_fresh_after_failure = session`）の
   たびに別の新しいプロファイルになる。同じプロファイルを使い回したいなら、作るのを
   1 回にして（`kind == "session"` のときだけ作り、あとは同じ引数を返す）
-- 設定フォルダごと切り替えるなら `{"env": {"QGIS_CUSTOM_CONFIG_PATH": ...}}` でもよい
+- `--profiles-path` の代わりに `{"env": {"QGIS_CUSTOM_CONFIG_PATH": str(root)}}` でもよい。
+  指す先は `--profiles-path` と同じ `profiles` の親。`--profile` を渡さないと、QGIS は
+  `profiles/profiles.ini` の `[core]` の `defaultProfile` のプロファイル（無ければ
+  `default`）を使う。上の例のまま `profiles/e2e` を使うなら、
+  `(root / "profiles" / "profiles.ini").write_text("[core]\ndefaultProfile=e2e\n", encoding="utf-8")`
+  のように書いておく（または `profiles/default` に作る）
 - **`qgis_command` で間に launcher（バッチや Python のスクリプト）をはさむ場合は、
   `args` ではなく `env` で渡す**。足した `args` は launcher の引数として読まれ、QGIS
   まで届かない（launcher が知らない引数として断ることもある）。環境変数は launcher を
-  通って QGIS まで引き継がれるので、`QGIS_CUSTOM_CONFIG_PATH` で新しいプロファイルを
-  指す
+  通って QGIS まで引き継がれるので、`QGIS_CUSTOM_CONFIG_PATH` で一時フォルダを指す
+  （どのプロファイルが使われるかは上のとおり）
 
 QGIS 3.34 で、session・起こし直し・`fresh_qgis` のそれぞれが別の新しい
 プロファイルで起き、有効なプラグインがコアと `qgis_puppeteer` だけになることを
@@ -718,27 +726,25 @@ QGIS 3.34 で、session・起こし直し・`fresh_qgis` のそれぞれが別�
 たい等）場合は、ユーザー側 `conftest.py` で `qgis_process` fixture を override:
 
 ```python
-import os, subprocess
 import pytest
+from pytest_qgis_puppeteer.spawn import spawn_qgis
 
 @pytest.fixture(scope="session")
 def qgis_process(automation_client, hub_port):
-    env = os.environ.copy()
-    env["QPUPPETEER_HUB_PORT"] = str(hub_port)
-    env["QPUPPETEER_HUB_HOST"] = "127.0.0.1"
-    env["QPUPPETEER_TRUSTED_MODE"] = "1"
-    env["QPUPPETEER_ALLOW_TEST_HANDLERS"] = "1"
-    # ホスト固有 env を立てる
-    env["MYAPP_CONFIG"] = "e2e"
-
-    proc = subprocess.Popen(["scripts/launcher.bat", "--name", "e2e"], env=env)
-    try:
-        yield None
-    finally:
-        if proc.poll() is None:
-            proc.terminate()
-            proc.wait(timeout=5)
+    # QPUPPETEER_HUB_PORT などは spawn_qgis が足す。渡すのはホスト固有の env だけ
+    with spawn_qgis(
+        hub_port=hub_port,
+        automation_client=automation_client,
+        command=["scripts/launcher.bat", "--name", "e2e"],
+        env={"MYAPP_CONFIG": "e2e"},
+    ) as worker:
+        yield worker
 ```
+
+`spawn_qgis()` は、終わるときに Hub に登録された QGIS 本体を閉じる。launcher を
+`subprocess.Popen` で起こして `terminate()` しても、止まるのは launcher（`.bat` なら
+`cmd.exe`）だけで、QGIS は残る。QGIS に付いてくる `qgis-ltr.bat` のように `start` で
+QGIS を起こす launcher はすぐ終わるので、`taskkill /T` でも QGIS まで届かない。
 
 `hub_process` / `automation_client` / `qgis` fixture はそのまま使える。
 
@@ -917,6 +923,8 @@ Worker は失敗時に `{"success": false, "error": "<code>", ...}` を返す。
   指す:
 
   ```python
+  layers = qgis.locator({"object_name": "theLayerTree"})     # QGIS のレイヤパネル
+  tree = qgis.locator({"object_name": "buildingTree"})       # ホストの窓のツリー
   layers.select({"path": ["道路", "国道"]})                  # グループの中のレイヤ
   tree.dblclick(cell={"path": ["建物", 1, "滅失済"]})         # 文字と番号を混ぜてよい
   tree.select({"path": ["道路", "国道"], "column": "名前"})   # どの段もその列で探す
@@ -1184,6 +1192,7 @@ data = table.read_rows()                         # 全部（1000 行ずつ分け
 data["columns"], data["rows"], data["row_count"]
 table.read_rows(start=2000, max_rows=100)        # 一部
 table.read_rows(role="user")["rows"]             # 行に持たせた ID（Qt.UserRole）
+layers = qgis.locator({"object_name": "theLayerTree"})  # QGIS のレイヤパネル
 layers.read_rows(path=["道路"], role="check")    # ツリーの段の子の行のチェック
 expect(table).to_have_row_count(2500)            # 行の数を待つ
 ```
@@ -1290,7 +1299,7 @@ expect(qgis.locator({"object_name": "amount"})).to_have_value(123)
 expect(qgis.locator({"object_name": "remember_me"})).to_be_checked()
 
 # 個別 timeout
-expect(loc).to_have_text("Done", timeout_s=10.0)
+expect(qgis.locator({"object_name": "status"})).to_have_text("Done", timeout_s=10.0)
 ```
 
 提供するマッチャ:
@@ -1313,10 +1322,10 @@ expect(loc).to_have_text("Done", timeout_s=10.0)
 窓が出る・消える・1 つも無くなるのを待つ:
 
 ```python
-props = qgis.locator({"scope": "any", "class": "QDialog", "title_contains": "プロパティ"})
+props = qgis.locator({"scope": "any", "window": True, "class_inherits": "QDialog", "title_contains": "プロパティ"})
 expect(props).to_be_visible()      # 出るまで
 expect(props).to_be_hidden()       # 消えるまで（消えてもよい）
-expect(qgis.locator({"scope": "any", "class": "QDialog"})).to_have_count(0)  # 全部閉じるまで
+expect(qgis.locator({"scope": "any", "window": True, "class_inherits": "QDialog"})).to_have_count(0)  # 全部閉じるまで
 ```
 
 - `scope="any"` は見えている一番上の窓をすべて探すので、モーダルでない窓も対象
@@ -1741,7 +1750,11 @@ qgis.locator({"title": form["title"], "scope": "any"}).locator(
 | 用途 | 失敗時の様子見、診断バンドル | 画像スナップショットの比較 |
 
 ```python
+from pathlib import Path
+
+
 def test_parcels_style(automation_client, tmp_path):
+    parcels_layer_id = automation_client.get_layer_info("parcels")["id"]
     out = tmp_path / "parcels.png"
     res = automation_client.render_map(
         output_path=str(out),
@@ -2011,8 +2024,10 @@ MCP からは `qgis_get_recent_messages` / `qgis_clear_recent_messages`。未捕
 
 ```ini
 [pytest]
-qgis_leftover_fail = dialogs editing_modified       # 残っていたら teardown のエラー
-qgis_leftover_warn = editing map_tool layer_tree    # 残っていたら警告だけ
+# 残っていたら teardown のエラー
+qgis_leftover_fail = dialogs editing_modified
+# 残っていたら警告だけ
+qgis_leftover_warn = editing map_tool layer_tree
 ```
 
 | 項目 | 見るもの |
@@ -2245,7 +2260,7 @@ qgis-puppeteer-launch --label A -- qgis-bin.exe --profile qgis-a
 ```python
 token = "lt-7k3p9q2m4x8a0b1c"  # helper の stdout から取得
 info = await client.wait_for_instance(token, timeout_s=30)  # register 待ち
-await client.call("qgis_list_layers", {"instance": token})
+await client.call("qgis_list_layers", instance=token)
 ```
 
 pytest の `spawn_qgis()` も `launch_token` で、自分が起こした QGIS を見分ける。
@@ -2803,7 +2818,7 @@ client は起動時点で identity を取得できず当て推量に頼ってい
 **原因の切り分け**:
 
 1. `<TEMP>/qgis_puppeteer.spawn.log` を確認（Python 起動前の fatal がここに出る）
-2. `<TEMP>/qgis_puppeteer/hub.log` を確認（Python 側の logger 出力）
+2. `%APPDATA%\qgis_puppeteer\hub.log` を確認（Python 側の logger 出力）
 3. ポート衝突: 既に何かが `127.0.0.1:9876` を使ってないか
 4. QGIS 付属の Python launcher（`python-qgis-ltr.bat` / `python-qgis.bat`）が
    見つからない。プラグインは `OSGEO4W_ROOT/bin` と QGIS の実行ファイルの隣を探す
