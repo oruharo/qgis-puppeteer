@@ -186,10 +186,10 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=None,
         help="Select environment(s) from environments.toml. "
         "Tests with @pytest.mark.qgis_env('<name>') matching the selection run; "
-        "others are deselected. Forms: '--env=NAME' (single env, Phase 1), "
-        "'--env=A,B' (multiple envs run sequentially, Phase 2), "
-        "'--env=all' (all envs, Phase 2). For multi/all forms each env runs in "
-        "its own pytest session and exit codes are aggregated per ADR-0003.",
+        "others are deselected. Forms: '--env=NAME' (single env), "
+        "'--env=A,B' (multiple envs run sequentially), "
+        "'--env=all' (all envs). For multi/all forms each env runs in "
+        "its own pytest session and the exit codes are aggregated.",
     )
     # ADR-0003 Phase 4: --list-envs / --env-strict
     group.addoption(
@@ -243,8 +243,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     # 重い test suite で off にしたい場合は false を指定する。
     parser.addini(
         "qgis_diag_capture_screenshots",
-        "Capture per-action screenshots into the diagnostic bundle on test failure "
-        "(ADR-0002 §13.1, B5b). Set 'false' to disable (default: 'true').",
+        "Capture per-action screenshots into the diagnostic bundle on test failure. "
+        "Set 'false' to disable (default: 'true').",
         default="true",
     )
     # ADR-0002 §10.7 / §17.5: 失敗連鎖防止の自動 fresh_qgis。前テストの call フェーズが
@@ -256,7 +256,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "qgis_auto_fresh_after_failure",
         "After a test failure, 'true' runs the next test on a fresh QGIS "
         "(@pytest.mark.fresh_qgis); 'session' restarts the session QGIS before the "
-        "next test that uses `qgis` (ADR-0002 §17.5). Default: 'false'.",
+        "next test that uses `qgis`. Default: 'false'.",
         default="false",
     )
     # ADR-0002 §17 / Roadmap "Qt 未捕捉例外 → fail 連動": Worker 内の sys.excepthook
@@ -267,7 +267,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addini(
         "qgis_fail_on_uncaught_exception",
         "Fail the test if the Worker recorded any uncaught exceptions during the "
-        "call phase (ADR-0002 §17). Catches Qt slot exceptions that would "
+        "call phase. Catches Qt slot exceptions that would "
         "otherwise be swallowed. Default: 'true'.",
         default="true",
     )
@@ -286,7 +286,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addini(
         "qgis_leftover_fail",
         "State a test must not leave behind; found after teardown, it errors the "
-        "test (#28). Items: dialogs popup editing editing_modified map_tool selection "
+        "test. Items: dialogs popup editing editing_modified map_tool selection "
         "layer_tree layers active_layer project_dirty message_bar. Default: none.",
         type="args",
         default=[],
@@ -374,15 +374,14 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
         "qgis_env(*names): assign this test to one or more QGIS environments "
-        "(see ADR-0003). Tests are filtered by --env=<name>.",
+        "declared in environments.toml. Tests are filtered by --env=<name>.",
     )
     config.addinivalue_line(
         "markers",
         "fresh_qgis(args=[...], env={...}): spawn a brand-new QGIS for this test "
         "only, on top of the active env's args/env. The qgis fixture is routed "
         "to the new worker via automation_client.use_instance(...). After the "
-        "test, the fresh worker is killed and routing is restored. See ADR-0002 "
-        "§10.4 and ADR-0003 §fresh_qgis composition rules.",
+        "test, the fresh worker is killed and routing is restored.",
     )
     config.addinivalue_line(
         "markers",
@@ -394,12 +393,12 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
         "qgis_leftover_expected(*items, reason=None): this test is known to leave "
-        "these qgis_leftover_fail / qgis_leftover_warn items behind (#31); they are "
+        "these qgis_leftover_fail / qgis_leftover_warn items behind; they are "
         "not reported. If none of them is left, QgisLeftoverWarning says so.",
     )
     config.addinivalue_line(
         "markers",
-        "qgis_restart_before: restart the session QGIS before this test (#19). "
+        "qgis_restart_before: restart the session QGIS before this test. "
         "pytest_qgis_ready is then called with kind='restart'. No effect on "
         "fresh_qgis tests, in dev mode, or with an overridden qgis_process.",
     )
@@ -1425,7 +1424,7 @@ def automation_client(
 
 @pytest.fixture(scope="session")
 def action_recorder() -> ActionRecorder:
-    """E2E test の Worker call timeline を蓄積する recorder（ADR-0002 §13 / B5a）。
+    """E2E test の Worker call timeline を蓄積する recorder。
 
     session 1 つに 1 instance。autouse の function-scope fixture
     （``_per_test_action_recorder``）が test ごとに ``clear()`` を呼ぶため、
@@ -2045,7 +2044,7 @@ def _capture_startup_messages(
 def qgis_startup_messages(
     request: pytest.FixtureRequest, qgis: E2EAutomationClient
 ) -> list[dict[str, Any]]:
-    """そのテストが動く QGIS の、起動の間に出た QgsMessageLog のメッセージ（#15）。
+    """そのテストが動く QGIS の、起動の間に出た QgsMessageLog のメッセージ。
 
     起動から、その QGIS を初めて使うテストの準備までに出たもの（古い順、
     ``get_recent_messages()`` と同じ形）。起動の間の処理が出したログを確かめる

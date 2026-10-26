@@ -72,8 +72,7 @@ def _parse_args(argv: Sequence[str]) -> tuple[argparse.Namespace, list[str]]:
         description=(
             "Generate a launch_token, inject it into the environment, and "
             "launch QGIS. Prints 'launch_token=<token>' on stdout so the "
-            "caller can correlate the spawned instance deterministically "
-            "(ADR-0005 D6)."
+            "caller can correlate the spawned instance deterministically."
         ),
     )
     parser.add_argument(
