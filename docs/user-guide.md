@@ -71,6 +71,14 @@ qgis-puppeteer は QGIS を **WebSocket 経由で外部から操作する** 基�
 
 ## インストール
 
+必要なもの:
+
+- QGIS 3.34 以上
+- QGIS の外で動かす側（MCP gateway・pytest・スクリプト）の Python 3.10 以上
+
+`qgis-puppeteer` と `pytest-qgis-puppeteer` はまだ PyPI に公開していない。下の
+GitHub から入れるコマンドを使う。
+
 ### 共通: QGIS plugin の配置
 
 QGIS Puppeteer プラグインを QGIS に組み込む（必須）:
@@ -101,27 +109,22 @@ site-packages、user site、ホストアプリの vendor 等にあるもの）�
 Claude Desktop 起動側の Python に MCP gateway を入れる:
 
 ```bash
-pip install "qgis-puppeteer[mcp]"
+pip install "qgis-puppeteer[mcp] @ git+https://github.com/oruharo/qgis-puppeteer.git@dev#subdirectory=packages/qgis-puppeteer"
 ```
 
 `[mcp]` extra が MCP SDK を連れてくる。付けずに入れると
 `python -m qgis_puppeteer.gateways.mcp` が ImportError で起動しない。
+PyPI に公開したあとは `pip install "qgis-puppeteer[mcp]"` で入る。
 
 ### pytest E2E 作者向け
 
 ```bash
-pip install pytest-qgis-puppeteer
-# qgis-puppeteer は依存として自動的に入る
+pip install "qgis-puppeteer @ git+https://github.com/oruharo/qgis-puppeteer.git@dev#subdirectory=packages/qgis-puppeteer" "pytest-qgis-puppeteer @ git+https://github.com/oruharo/qgis-puppeteer.git@dev#subdirectory=packages/pytest-qgis-puppeteer"
 ```
 
-### Pre-release（dev ブランチ）から入れる場合
-
-PyPI への公開前は GitHub から直接（Claude Desktop 用には `[mcp]` を付ける）:
-
-```bash
-pip install "qgis-puppeteer[mcp] @ git+https://github.com/oruharo/qgis-puppeteer.git@dev#subdirectory=packages/qgis-puppeteer"
-pip install "pytest-qgis-puppeteer @ git+https://github.com/oruharo/qgis-puppeteer.git@dev#subdirectory=packages/pytest-qgis-puppeteer"
-```
+2 つを 1 つのコマンドで入れる。pip は `pytest-qgis-puppeteer` が依存する
+`qgis-puppeteer` を PyPI に探すので、`pytest-qgis-puppeteer` だけでは入らない。
+PyPI に公開したあとは `pip install pytest-qgis-puppeteer` で入る。
 
 ## Quickstart: Claude Desktop
 
@@ -137,6 +140,23 @@ Windows: `%APPDATA%\Claude\claude_desktop_config.json`
     "qgis-puppeteer": {
       "command": "python",
       "args": ["-m", "qgis_puppeteer.gateways.mcp"]
+    }
+  }
+}
+```
+
+gateway を `pip install` せず、`uvx` に GitHub から取らせてもよい（uv が要る）:
+
+```json
+{
+  "mcpServers": {
+    "qgis-puppeteer": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "qgis-puppeteer[mcp] @ git+https://github.com/oruharo/qgis-puppeteer.git@dev#subdirectory=packages/qgis-puppeteer",
+        "python", "-m", "qgis_puppeteer.gateways.mcp"
+      ]
     }
   }
 }
@@ -168,7 +188,7 @@ Claude 側で以下のような MCP ツール呼び出しが行われる:
 | 症状 | 原因 | 対処 |
 |---|---|---|
 | Claude から QGIS が見えない（`hub_unreachable`） | QGIS が起動していない、プラグインが有効でない | QGIS を起動して、もう一度頼む。Claude Desktop の再起動は要らない（gateway は呼ぶたびに Hub へ繋ぐ）。続くときは [`hub_unreachable`](#hub_unreachable) |
-| `instance_not_found` | Worker register 完了前に呼んだ | 数秒待って再試行 |
+| `instance_not_found` | Worker register 完了前に呼んだ | `qgis_wait_ready` で使えるまで待ってから呼ぶ |
 | `execute_python` が実行されずに返る | ホワイトリスト外のコードで confirm ゲートに当たった | 承認を取って `qgis_execute_with_permission` で再実行（[Permissions](#permissions)） |
 
 詳しくは [Troubleshooting](#troubleshooting) も。
@@ -252,6 +272,7 @@ QGIS の E2E テスト（モーダル操作含む）を書く。
 e2e = [
   "pytest-qgis-puppeteer>=0.1.0",
 ]
+# PyPI 公開前は、[インストール] のコマンドで先に入れておく（pip は入っているものを使う）
 
 [tool.pytest.ini_options]
 qgis_bin = "C:/Program Files/QGIS 3.34.6/bin/qgis-ltr-bin.exe"
@@ -398,6 +419,11 @@ qgis_args = ["--profile", "regression"]
 strategy = "named"      # 印の無いテストも選んだ env で動く。"fail" にすると印が必須
 default_name = "smoke"
 ```
+
+`environments.toml` は pytest の rootdir（`pytest.ini` や `[tool.pytest.ini_options]` の
+ある `pyproject.toml` のフォルダ）の直下か、その下の `test_e2e/` に置く（直下を先に見る）。
+ほかの場所のものは読まない。`[default_environment]` を省くと `strategy = "named"` に
+なるので、`default_name` を書かないと pytest が起動時に `UsageError` で止まる。
 
 #### env の継承（`extends`）
 
@@ -656,6 +682,18 @@ register タイムアウト（既定 60s）は `register_timeout_s=` で上書�
 export QPUPPETEER_E2E_USE_RUNNING_QGIS=1
 pytest test_e2e/
 ```
+
+Windows の cmd では `set QPUPPETEER_E2E_USE_RUNNING_QGIS=1`、PowerShell では
+`$env:QPUPPETEER_E2E_USE_RUNNING_QGIS = "1"`。
+
+繋ぐ先は `ws://127.0.0.1:9876`（QGIS のプラグインが自分で起こす Hub）。別の Hub に
+繋ぐなら `QPUPPETEER_E2E_HUB_URL` に `ws://host:port` を書く（ポートは省けない）。
+相乗りする QGIS は、`QPUPPETEER_HUB_HOST` / `QPUPPETEER_HUB_PORT` /
+`QPUPPETEER_HUB_URL` を立てずに起こす。どれかが立っていると、プラグインは Hub を
+起こさない（[Hub 接続関連](#hub-接続関連)）。
+
+dev モードでは、`fresh_qgis` と `spawn_qgis()` のテストは skip になる。未捕捉例外と
+メッセージログでテストを落とす判定もしない。
 
 注意: `execute_python` を多用するテストは confirm ゲートで弾かれる
 （`ConfirmationRequiredError`）ので、dev モードでは UI 操作系のみ走らせるのが
@@ -1071,7 +1109,7 @@ qgis.locator({"scope": "popup", "class": "QAction", "text": "削除"}).click()
 | したいこと | pytest | MCP |
 |---|---|---|
 | 開いている窓の一覧 | `qgis.snapshot_ui()` の `visible_dialogs`（モードレス）と `active_modal` | `qgis_snapshot_ui` の同じ項目 |
-| 題名で、モーダルが開くのを待つ | `qgis.wait_for_modal("保存")`（部分一致） | `qgis_wait_for(until="modal", title_contains="保存")` |
+| 題名で、モーダルが開くのを待つ | `qgis.wait_for_modal("保存")`（部分一致。題名を問わないなら `""`） | `qgis_wait_for(until="modal", title_contains="保存")` |
 | 題名で、モードレスの窓が開くのを待つ | `qgis.wait_for_widget({"title": "道路 - 地物属性", "scope": "any"})`（題名は完全一致） | `qgis_wait_for(until="visible", selector={"title": "道路 - 地物属性", "scope": "any"})` |
 | モーダルが閉じるのを待つ | `qgis.wait_for_modal_closed()` | `qgis_wait_for(until="modal_closed")` |
 | ある窓が閉じるのを待つ | `qgis.wait_for_widget({"title": ...}, visible=False)` | `qgis_wait_for(until="hidden", selector={"title": ..., "scope": "any"})` |
@@ -1168,6 +1206,12 @@ qgis.locator({"scope": "popup", "class": "QAction", "text": "削除"}).click()
 timeout を超えると `WidgetNotActionableError`。strict mode で複数マッチ
 した場合は poll を続けず即座に `SelectorAmbiguousError` を上げる。
 
+待つ時間は、操作ごとに `timeout_s=` で変える（`click(timeout_s=10.0)`）。その Locator の
+既定を変えるなら `qgis.locator(selector, default_timeout_s=10.0)` にする（`locator()` で作る
+子の Locator も引き継ぐ）。`expect()` は Locator の既定を引き継がない
+（`expect(loc, timeout_s=10.0)` か、各マッチャの `timeout_s=`）。`read_rows()` は見えるまで
+待つだけで、時間切れは `WidgetNotActionableError` ではなく Python の `TimeoutError` になる。
+
 `qgis.locator(selector, stable=True)` にすると、actionable に加えて、widget の位置と
 大きさ（親に対する `geometry`）が続けて 2 回同じになるまで待つ。開くときに動く・
 大きさが変わる widget を、動いている途中で押さないため。
@@ -1219,6 +1263,9 @@ expect(forms).to_have_count(0)
 4. `current_index`（QTabWidget）
 5. `text`（その他）
 
+リスト・表・ツリーはどれにも当たらないので `None` になる。選んでいる行は `snapshot()` の
+`current_row`（リスト）/ `current`（表・ツリー）で見る。
+
 ### リスト・表・ツリーの中身
 
 `qgis_snapshot_ui` / `snapshot()` は、リスト・表・ツリーの中身も返す（モデルの表示値）。
@@ -1228,7 +1275,7 @@ expect(forms).to_have_count(0)
 | `QListWidget` / `QListView` | `items`（文字列の list）、`current_row`（選択が無ければ `null`） |
 | `QTableWidget` / `QTableView` / `QTreeWidget` / `QTreeView` | `columns`（見出し）、`rows`（セルの 2 次元 list）、`current`（`{"row", "column"}` か `null`。ツリーの子の行なら `path` も） |
 | `QTreeWidget` / `QTreeView` | `child_rows`（開いている段の子の行）、`collapsed_rows`（子があって畳まれた行） |
-| どれも | `row_count`（全体の行数） |
+| どれも | `row_count`（全体の行数。ツリーは一番上の段の行数） |
 
 - 返すのは先頭 **100 行・50 列**まで。超えた分は返さず `"truncated": true` を付ける
   （表は `column_count` も）。属性テーブルのような大きな表で応答が膨らまないように。
@@ -1374,7 +1421,7 @@ expect(qgis.locator({"object_name": "status"})).to_have_text("Done", timeout_s=1
 | `to_have_value(v)` | `get_value()` 一致 |
 | `to_be_checked()` | `get_value()` が True |
 | `to_have_count(n)` | selector に当たる見えている widget の数 |
-| `to_have_row_count(n)` | 表・ツリー・リストの行の数（snapshot の `row_count` で、100 行の上限は効かない） |
+| `to_have_row_count(n)` | 表・ツリー・リストの行の数（snapshot の `row_count` で、100 行の上限は効かない。ツリーは一番上の段の数） |
 
 `not_` プロパティで否定形（「~でなくなるまで待つ」）。selector 多重マッチ時は
 `SelectorAmbiguousError` で即 abort（`Locator` の auto-wait と同じ挙動）。
@@ -1435,7 +1482,8 @@ action は Qt のイベントループに積んで行う（action の中でホ�
 - `action`: `"accept"` / `"reject"` / `"close"` / `"button"` のいずれか
 - `button` (`action="button"` のとき必須): 押すボタン。標準ボタン名（`"Ok"` /
   `"Yes"` / `"No"` / `"Cancel"` / `"Save"` / `"Discard"` など）か、ボタンの文言
-- `once` (optional): True で 1 度発火したら自動 unregister
+- `once` (optional): True で 1 度発火したら自動 unregister。既定は False（何度でも答える）。
+  pytest のクライアントの口は既定が True（下の「pytest からの利用例」）
 
 ### `accept` は QMessageBox の「OK」ではない
 
@@ -1455,7 +1503,8 @@ qgis.register_dialog_handler({"title": "削除の確認"}, button="Yes")
   除いて比べる（`"いいえ"` で「いいえ(&N)」に当たる）
 - ボタンが見つからなければ何もしない（確認は開いたまま）。その失敗は
   `qgis_get_recent_exceptions` に `QueuedOperationFailed` として残り、
-  `qgis_fail_on_uncaught_exception`（既定 ON）でテストが落ちる
+  `qgis_fail_on_uncaught_exception`（既定 ON）でテストが落ちる。`once` の handler は
+  使い切らずに残る
 
 ### 確認を出す操作は `wait=False` と組み合わせる
 
@@ -1604,6 +1653,8 @@ QGIS のファイル・フォルダ選択の部品（`QgsFileWidget`）なら、
 Qt signal の発火検証用ハンドラ。`test.*` namespace に置かれており、QGIS 側で
 `QPUPPETEER_ALLOW_TEST_HANDLERS=1` が立っているときだけ登録される（pytest fixture
 は subprocess に自動付与）。本番ユーザー環境では露出しないので、テストコードからのみ呼ぶ。
+MCP からは呼べない。pytest では下の例のように `qgis` のメソッドで呼ぶ（スクリプトからは
+`client.call("test.signal_spy_start", {...})` のようにコマンド名で送る）。
 
 ### 提供 RPC コマンド
 
@@ -1619,21 +1670,19 @@ Qt signal の発火検証用ハンドラ。`test.*` namespace に置かれてお
 
 ```python
 def test_combo_emits_currentIndexChanged(qgis):
-    spy = qgis.call("test.signal_spy_start", {
-        "selector": {"object_name": "myCombo"},
-        "signal": "currentIndexChanged",
-        "max_emissions": 100,        # 上限（任意）
-    })
+    spy = qgis.signal_spy_start(
+        {"object_name": "myCombo"}, "currentIndexChanged", max_emissions=100  # 上限（任意）
+    )
     spy_id = spy["spy_id"]
 
     qgis.locator({"object_name": "myCombo"}).select("Option B")
     qgis.locator({"object_name": "myCombo"}).select("Option C")
 
-    result = qgis.call("test.signal_spy_get_emissions", {"spy_id": spy_id})
+    result = qgis.signal_spy_get_emissions(spy_id)
     assert result["count"] == 2
     # emissions: [{"args": [...]}, ...]（キーワード引数で発火したときは "kwargs" も）
 
-    qgis.call("test.signal_spy_stop", {"spy_id": spy_id})
+    qgis.signal_spy_stop(spy_id)
 ```
 
 ### `wait_for_signal` で「特定の発火を待つ」
@@ -1643,14 +1692,13 @@ def test_combo_emits_currentIndexChanged(qgis):
 ```python
 def test_async_load(qgis):
     qgis.locator({"object_name": "load_btn"}).click()
-    result = qgis.call("test.wait_for_signal", {
-        "selector": {"object_name": "loader"},
-        "signal": "loadFinished",
-        "timeout_ms": 10000,
-    })
+    result = qgis.wait_for_signal({"object_name": "loader"}, "loadFinished", timeout_ms=10000)
     assert result["fired"] is True
     assert result["timed_out"] is False
 ```
+
+`wait_for_signal` が拾うのは、呼んだあとの発火だけ。click の中で（click が返る前に）
+発火するものは拾えないので、そういうものは操作の前に spy を始めて数える。
 
 selector が widget を引き当てられない場合、`{"fired": False, "matched": False,
 "diagnostics": {...}}` が返る（例外にはしない）。signal 名が widget に無いときは
@@ -1847,10 +1895,11 @@ def test_parcels_style(automation_client, tmp_path):
 
 | 名前 | 既定 | 説明 |
 |---|---|---|
+| `output_path` | QGIS の一時フォルダの新しいファイル | 保存する PNG のパス。QGIS が書くので、QGIS から見たパス。フォルダが無ければ作る |
 | `extent` | キャンバスの範囲 | `[xmin, ymin, xmax, ymax]`（`crs` の座標）。出力の縦横比に合わせて**広げられる**（地図は歪めない）。実際に描いた範囲は戻り値の `extent`。キャンバスが無いときは `layers` の範囲（無ければ表示中のレイヤの範囲）。範囲が空なら `success: false` |
 | `crs` | キャンバスの CRS | `"EPSG:3857"` など。`extent` を省いて `crs` だけ変えると、元の範囲をその CRS に変換して使う |
 | `width` / `height` | 800 / 600 | ピクセル。両方指定するか両方省く。1 辺 10000 まで |
-| `dpi` | 96 | シンボルやラベルの大きさに効く。PNG の DPI メタデータにも書く |
+| `dpi` | 96 | 1〜2400。シンボルやラベルの大きさに効く。PNG の DPI メタデータにも書く |
 | `layers` | キャンバスに表示中のレイヤ | レイヤ ID のリスト（先頭が最前面） |
 | `background_color` | キャンバスの背景色 | `"#RRGGBB"` / `"#AARRGGBB"` / 色名 |
 | `antialiasing` / `draw_labels` / `draw_selection` | すべて true | 描画フラグ。編集中レイヤの頂点マーカーは常に描かない |
@@ -2073,6 +2122,8 @@ bad = unexpected_messages(messages, request.config, item=request.node, min_level
 ```python
 qgis.get_recent_messages(min_level="warning", tags=["MyPlugin"])
 qgis.get_recent_messages(sources=["message_bar"])
+msgs = qgis.get_recent_messages()
+last_seen = msgs[-1]["seq"] if msgs else 0      # 取った分の最後の seq
 qgis.get_recent_messages(after_seq=last_seen)   # 前回以降の分
 qgis.clear_recent_messages()
 ```
@@ -2331,14 +2382,27 @@ env 注入し、stdout に返す:
 
 ```bat
 qgis-puppeteer-launch --label A -- qgis-bin.exe --profile qgis-a
-:: stdout: launch_token=lt-7k3p9q2m4x8a0b1c
+:: stdout の最初の 1 行: launch_token=lt-3f9a0c4e7b2d18a65c01
 ```
 
-返ってきた `lt-...` を selector に渡せば、pid 再利用や同時起動に左右されず
+helper は token を出してから QGIS を起こし、**QGIS が終わるまで戻らない**（終了コードは
+QGIS のもの）。スクリプトから使うなら `--print-token` で token だけを受け取り、QGIS は
+自分で起こす（`--print-token` は QGIS を起こさない）:
+
+```python
+import os, subprocess
+
+out = subprocess.run(["qgis-puppeteer-launch", "--print-token"],
+                     capture_output=True, text=True, check=True).stdout
+token = out.strip().removeprefix("launch_token=")
+env = {**os.environ, "QPUPPETEER_LAUNCH_TOKEN": token, "QPUPPETEER_WORKER_LABEL": "A"}
+subprocess.Popen(["qgis-bin.exe", "--profile", "qgis-a"], env=env)
+```
+
+この `lt-...` を selector に渡せば、pid 再利用や同時起動に左右されず
 **決定的**にそのインスタンスへ到達できる:
 
 ```python
-token = "lt-7k3p9q2m4x8a0b1c"  # helper の stdout から取得
 info = await client.wait_for_instance(token, timeout_s=30)  # register 待ち
 await client.call("qgis_list_layers", instance=token)
 ```
@@ -2480,7 +2544,7 @@ pytest-qgis-puppeteer の設定は `pyproject.toml` の `[tool.pytest.ini_option
 | ini | CLI 引数 | 環境変数 | 用途 |
 |---|---|---|---|
 | `qgis_bin` | `--qgis-bin` | `QPUPPETEER_QGIS_BIN` | QGIS の実行ファイル（`qgis-ltr-bin.exe` / `qgis-bin.exe`） |
-| `qgis_args` | `--qgis-args` | `QPUPPETEER_QGIS_ARGS` | QGIS に渡す追加の引数。ini はリスト、CLI 引数と環境変数は shell と同じ書き方の 1 つの文字列 |
+| `qgis_args` | `--qgis-args` | `QPUPPETEER_QGIS_ARGS` | QGIS に渡す追加の引数。`pyproject.toml` ではリスト、`pytest.ini`・CLI 引数・環境変数は shell と同じ書き方の 1 つの文字列（`--profile test`） |
 | `qgis_command` | `--qgis-command` | `QPUPPETEER_QGIS_COMMAND` | QGIS を起動するコマンド全体。あれば `qgis_bin` と `qgis_args` の代わりに使う（[独自の launcher](#1-ホストアプリ独自の-launcher-を使いたい場合)） |
 | `qgis_python` | `--qgis-python` | `QPUPPETEER_QGIS_PYTHON` | Hub を起こす QGIS 付属の Python launcher（`python-qgis-ltr.bat` / `python-qgis.bat`）。未指定なら `qgis_bin` の隣、次に `OSGEO4W_ROOT/bin` から探す（[見つからないとき](#qgis_python-が見つからないpytest)） |
 
@@ -2665,6 +2729,10 @@ pytest の fixture のように、Hub を別に起こす使い方のための動
 
 ### 信頼 / テスト関連
 
+QGIS 側（プラグインの中）で読む変数。QGIS を起こすときの環境に立てる。pytest が起こす
+QGIS（session の QGIS・`fresh_qgis`・`spawn_qgis()`）には、立っていなければどちらも
+`1` が付く。
+
 | 変数 | 既定 | 用途 |
 |---|---|---|
 | `QPUPPETEER_TRUSTED_MODE` | unset | `1` で `execute_python` の confirm を skip |
@@ -2829,7 +2897,10 @@ client は起動時点で identity を取得できず当て推量に頼ってい
 
 ### `widget_not_found`
 
-**症状**: `error: "widget_not_found"` が返る
+**症状**: `error: "widget_not_found"` が返る。pytest の `qgis.click_widget()` /
+`qgis.set_widget_value()` では `WidgetOperationError`（`e.error == "widget_not_found"`）。
+Locator の操作は見つかるまで待つので、時間切れの `WidgetNotActionableError`
+（`last_check` の `exists=False`）になる
 
 **原因**: scope 内に該当 widget が無い、または selector 仕様の typo。
 
@@ -2842,7 +2913,7 @@ client は起動時点で identity を取得できず当て推量に頼ってい
 ### `widget_disabled`
 
 **症状**: `qgis_click_widget` / `qgis_set_widget_value` で
-`error: "widget_disabled"`、または Locator が `WidgetNotActionableError`
+`error: "widget_disabled"`（pytest のクライアントでは `WidgetOperationError`）、または Locator が `WidgetNotActionableError`
 （メッセージに `enabled=False`）。
 
 **原因**: 対象 widget が `isEnabled() == False`。前段の入力が満たされていない、
@@ -2861,7 +2932,8 @@ client は起動時点で identity を取得できず当て推量に頼ってい
 
 ### `widget_readonly`
 
-**症状**: `set_widget_value` で `error: "widget_readonly"`
+**症状**: `set_widget_value` で `error: "widget_readonly"`（pytest のクライアントでは
+`WidgetOperationError`）
 
 **原因**: readOnly な input に書き込もうとした。
 
@@ -2936,9 +3008,39 @@ GUI スレッドが塞がっているだけではこの error にならない（
 **対処**:
 
 1. `qgis_list_instances` で現在の Worker 一覧を確認
-2. pytest なら `wait_for_ready()` を使って「使える」まで待つ（fixture 経由なら
-   `hub_ready` / `spawn_qgis()` が内部で呼ぶ）
+2. MCP なら `qgis_wait_ready`、スクリプト・pytest なら `wait_for_ready()` で「使える」まで
+   待つ（pytest の fixture 経由なら `hub_ready` / `spawn_qgis()` が内部で呼ぶ）
 3. multi-instance のラベル衝突 → `QPUPPETEER_WORKER_LABEL` を変える
+
+### `instance_ambiguous`
+
+**症状**: `error: "instance_ambiguous"` が返る。`details.candidates` に当たった QGIS が並ぶ。
+
+**原因**: 宛先を指定せずに呼んだが、Hub に QGIS が 2 つ以上登録されている。または、
+指定したプロジェクト名などに 2 つ以上が当たった。
+
+**対処**:
+
+1. `candidates` か `qgis_list_instances` で宛先を確かめる
+2. MCP なら `qgis_use_instance` で宛先を決めるか、ツールの `instance` 引数で渡す。
+   スクリプトなら `client.call(..., instance=...)`、pytest なら `qgis.use_instance(...)`
+3. 一意に指すなら label か `launch_token` を使う（[Multi-instance](#multi-instance)）
+
+### `not_ready`（`qgis_wait_ready`）
+
+**症状**: `qgis_wait_ready` が `code: "not_ready"` を返す。
+
+**原因**: `timeout_s` の内に、使える QGIS が現れなかった。`details.hub_unreachable` が
+付いていれば、Hub にまだ繋がらない（QGIS か QGIS Puppeteer プラグインが動いていない）。
+`instances` にはその時点の一覧が入る。
+
+**対処**:
+
+1. `details.hub_unreachable` があれば、QGIS が起動していて、プラグインが有効かを確かめる
+   （上の「`hub_unreachable`」）
+2. 目当ての QGIS が `instances` に `unresponsive` で居るなら、GUI が塞がっている
+   （下の「instance が `unresponsive`」）。重いプロジェクトなら `timeout_s` を延ばす
+3. `require_project=true` で待っているなら、プロジェクトが開いているかを確かめる
 
 ### `Error executing tool …`（本文が無い）
 
@@ -3044,7 +3146,7 @@ pong を返せないので、20 秒で `unresponsive` になる。プロセス�
    害はない（次の pong で戻る）が、返るまで他の呼び出しも待たされるので、
    長い処理は Worker 側で QThread に逃がすか分割する
 
-### `widget_not_actionable`（timeout）
+### `WidgetNotActionableError`（Locator の待ちの時間切れ）
 
 **症状**: 操作の auto-wait が 5 秒以内に actionable にならず timeout
 
@@ -3170,19 +3272,26 @@ Issue / PR: <https://github.com/oruharo/qgis-puppeteer/issues>
 
 | プロセス | コードの出どころ | 新しくなるのは |
 |---|---|---|
-| MCP gateway | `uvx --from ...@dev`（MCP クライアントが起動） | **MCP クライアントのセッションを張り直したとき**。セッション開始時に取得したものに固定される |
+| MCP gateway | MCP クライアントが起動する `qgis-puppeteer`（`pip install` したもの、または `uvx --from ...@dev`。[Quickstart](#1-claude_desktop_configjson-に-mcp-server-を登録)） | **MCP クライアントのセッションを張り直したとき**。セッション開始時に取得したものに固定される |
 | Hub | プラグインが auto-spawn。プラグインと同じ `qgis_puppeteer` のコピーで動く | Hub プロセスを kill したとき。Worker が数秒で新しい Hub を立て直して再接続する。MCP クライアントが繋がっている間は idle 終了しないので、放っておくと古いまま |
 | Worker（プラグイン） | QGIS のプラグインフォルダ（`QGIS_PLUGINPATH` 等）の `qgis_puppeteer` | QGIS を起動し直したとき |
 
 手順:
 
-1. コードを更新する（`git pull` / vendor 更新）
-2. Hub プロセスを kill する。QGIS は起動したままでよい — Worker が数秒で
+1. コードを更新する。`pip install` で入れた gateway は入れ直す（`uvx --from ...@dev` は
+   新しいセッションで最新の commit を取る）。プラグインのフォルダは、コピーで入れたなら
+   新しいものをコピーし直す（ジャンクションなら `git pull` で済む）
+2. Hub プロセスを止める。プラグインが起こした Hub の pid は
+   `%APPDATA%\qgis_puppeteer\hub-9876.pid` の 1 行目にある:
+   ```powershell
+   Stop-Process -Id (Get-Content "$env:APPDATA\qgis_puppeteer\hub-9876.pid" -TotalCount 1)
+   ```
+   QGIS は起動したままでよい — Worker が数秒で
    Hub を立て直して再接続する。**instance_id は変わる**（grace は Hub の
    メモリ上の状態なので、Hub と一緒に消える。引き継がれるのは Worker 側だけが
    切れて同じ Hub に戻る場合）。`launch_token` / label のセレクタと sticky は
-   そのまま効く。プラグイン側（`qgis_plugin/`、Worker）も変えたなら QGIS を
-   起動し直す
+   そのまま効く。プラグインのフォルダを新しくしたなら QGIS も起動し直す
+   （QGIS の中の Worker は、起動したときのコードのまま）
 3. **MCP クライアントのセッションを張り直す**（Claude Desktop なら再起動、
    Claude Code なら `/mcp` で reconnect か新セッション）
 
@@ -3223,7 +3332,7 @@ Claude Code の MCP ログ（`Connection established with capabilities: … "ver
 
 QGIS のプラグインのフォルダはライブラリの写しで、版や commit を持たない。そこで
 両方が、写しの対象になるファイルの中身から**指紋**（12 桁の 16 進）を作る。
-`sync_plugin.py --check` が通る組み合わせなら同じになり、改行の違いは数えない。
+同じ commit から入れたものなら同じになる（改行の違いは数えない）。
 
 - Worker は登録のときに指紋を送り、`list_instances` / MCP の `qgis_list_instances`
   の `source_fingerprint` に出る（旧プラグインは `null`）
@@ -3235,14 +3344,14 @@ QGIS のプラグインのフォルダはライブラリの写しで、版や co
 - MCP の gateway は、起動時に名乗る 1 行に自分の指紋を入れる（`fingerprint …`）。
   `qgis_list_instances` の `source_fingerprint` と比べる
 
-片側にしか入っていない修正は効かないので、uv.lock の固定とプラグインの入れ直しは
-同じ commit にそろえる。
+片側にしか入っていない修正は効かないので、pytest 側に入れる `qgis-puppeteer` /
+`pytest-qgis-puppeteer` と QGIS のプラグインのフォルダは、同じ commit からそろえる。
 
 ### `uvx --from <ローカルディレクトリ>` は src の変更で再ビルドしない
 
-vendor コピーなどローカルパスを `uvx --from` に渡すと、uvx はその環境を
+チェックアウトなどローカルのフォルダを `uvx --from` に渡すと、uvx はその環境を
 キャッシュして **src が変わっても作り直さない**（uv 0.8 で確認。pyproject.toml
-を書き換えても気づかない）。`make vendor` で更新したつもりが古いビルドのまま、
+を書き換えても気づかない）。`git pull` で更新したつもりが古いビルドのまま、
 が起きる。回避:
 
 - `uvx --reinstall-package qgis-puppeteer --from <dir> ...`（毎回ビルド、数秒）
