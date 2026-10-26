@@ -719,6 +719,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   this, `E2EAutomationClient.wait_for_ready()` takes `on_poll`, called before
   each wait; raising from it ends the wait with that exception.
 
+- **`expect(...).to_be_disabled()` passed when no widget matched.** A widget
+  that is not found comes back with `enabled: False`, and the assertion looked
+  only at that, so a selector with a typo passed at once; so did
+  `not_.to_be_enabled()` and the MCP tool's `qgis_wait_for(until="disabled")`.
+  All three now also need the widget to exist, as Playwright's
+  `toBeDisabled` does: they wait for it to appear disabled, and on timeout fail
+  with the last check (`exists: False`); the pytest message says that no
+  widget matched. `to_be_hidden()`, `not_.to_be_visible()` and
+  `until="hidden"` still pass when nothing matches.
+
 - **Code run in trusted mode was not recorded anywhere.** With
   `QPUPPETEER_TRUSTED_MODE=1`, `execute_python` runs code without asking, and
   the record of what ran went to a Python logger that nothing inside QGIS

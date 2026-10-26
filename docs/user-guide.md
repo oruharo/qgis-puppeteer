@@ -1429,6 +1429,11 @@ expect(qgis.locator({"object_name": "status"})).to_have_text("Done", timeout_s=1
 | `to_have_count(n)` | selector に当たる見えている widget の数 |
 | `to_have_row_count(n)` | 表・ツリー・リストの行の数（snapshot の `row_count` で、100 行の上限は効かない。ツリーは一番上の段の数） |
 
+`to_be_disabled()` と `not_.to_be_enabled()` は widget があることも要る。selector に
+当たる widget が無ければ満たさず、現れて無効になるのを待ち、時間切れなら最後の
+`check_actionability` の結果（`exists: False`）を載せて失敗する（Playwright の
+`toBeDisabled` と同じ）。`to_be_hidden()` / `not_.to_be_visible()` は widget が無くても満たす。
+
 `not_` プロパティで否定形（「~でなくなるまで待つ」）。selector 多重マッチ時は
 `SelectorAmbiguousError` で即 abort（`Locator` の auto-wait と同じ挙動）。
 `to_have_count` だけは複数に当たる selector でよい（数えるのが目的なので）。
@@ -2278,7 +2283,7 @@ pytest の次の書き方と同じなので、書き起こすときはこう置�
 | `until` | pytest |
 |---|---|
 | `visible` / `hidden` | `expect(loc).to_be_visible()` / `to_be_hidden()` |
-| `enabled` / `disabled` | `expect(loc).to_be_enabled()` / `to_be_disabled()` |
+| `enabled` / `disabled` | `expect(loc).to_be_enabled()` / `to_be_disabled()`（どちらも widget があることを要る） |
 | `actionable` / `editable` | 書かなくてよい（`loc.click()` / `loc.fill()` が自動で待つ） |
 | `count` | `expect(loc).to_have_count(expected)` |
 | `text` / `text_contains` | `expect(loc).to_have_text(expected)` / `to_contain_text(expected)` |

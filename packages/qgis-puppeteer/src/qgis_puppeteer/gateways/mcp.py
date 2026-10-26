@@ -1557,7 +1557,8 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
             Field(
                 description=(
                     "待つ条件。selector の widget が visible / hidden（見えない・無い）/ "
-                    "enabled / disabled / actionable（押せる）/ editable（値を入れられる）"
+                    "enabled / disabled（あって無効。無ければ満たさない）/ actionable"
+                    "（押せる）/ editable（値を入れられる）"
                     "になる。count は見えている widget の数が expected になる（0 で全部"
                     "閉じた。複数に当たる selector でよい）。text / text_contains は"
                     "文字が expected と一致する / を含む。value は値が expected になる。"

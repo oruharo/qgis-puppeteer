@@ -200,6 +200,56 @@ class TestEnabledDisabled:
         loc = Locator(client, {"object_name": "submit"})
         expect(loc).to_be_disabled()
 
+    @staticmethod
+    def _missing() -> dict[str, Any]:
+        return _act_result(exists=False, visible=False, enabled=False)
+
+    @pytest.mark.parametrize("negated", [False, True], ids=["to_be_disabled", "not_enabled"])
+    def test_disabled_fails_when_no_widget_matches(
+        self, monkeypatch: pytest.MonkeyPatch, negated: bool
+    ) -> None:
+        """見つからない結果も enabled=False。selector の書き間違いで通らないこと。"""
+        monkeypatch.setattr("pytest_qgis_puppeteer._expect.time.sleep", lambda _s: None)
+        ticks = iter([0.0, 0.1, 0.5, 1.5, 2.0])
+        monkeypatch.setattr("pytest_qgis_puppeteer._expect.time.monotonic", lambda: next(ticks))
+        client = _FakeClient({"qgis_check_actionability": [self._missing()] * 10})
+        loc = Locator(client, {"object_name": "sumbit"})
+        assertion = expect(loc, timeout_s=1.0)
+        with pytest.raises(AssertionError, match="no widget matched") as excinfo:
+            if negated:
+                assertion.not_.to_be_enabled()
+            else:
+                assertion.to_be_disabled()
+        assert "'exists': False" in str(excinfo.value)  # last_check が載る
+        assert len(client.calls) > 1  # すぐには諦めず、現れるのを待った
+
+    def test_to_be_disabled_waits_for_the_widget_to_appear(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("pytest_qgis_puppeteer._expect.time.sleep", lambda _s: None)
+        client = _FakeClient(
+            {"qgis_check_actionability": [self._missing(), _act_result(enabled=False)]}
+        )
+        loc = Locator(client, {"object_name": "submit"})
+        expect(loc).to_be_disabled()
+        assert len(client.calls) == 2
+
+    def test_hidden_still_passes_when_no_widget_matches(self) -> None:
+        """「見えない」は無くても満たす（to_be_hidden / not_.to_be_visible は今のまま）。"""
+        client = _FakeClient({"qgis_check_actionability": [self._missing()] * 2})
+        loc = Locator(client, {"object_name": "spinner"})
+        expect(loc).to_be_hidden()
+        expect(loc).not_.to_be_visible()
+
+    def test_not_to_be_disabled_waits_for_enabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("pytest_qgis_puppeteer._expect.time.sleep", lambda _s: None)
+        client = _FakeClient(
+            {"qgis_check_actionability": [self._missing(), _act_result(enabled=True)]}
+        )
+        loc = Locator(client, {"object_name": "submit"})
+        expect(loc).not_.to_be_disabled()
+        assert len(client.calls) == 2
+
 
 # ============================================================
 # to_have_text / to_contain_text

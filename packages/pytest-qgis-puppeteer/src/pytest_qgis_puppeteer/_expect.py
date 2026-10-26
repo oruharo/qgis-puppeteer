@@ -10,7 +10,7 @@ ADR-0002 §12 で計画されていた `expect(locator).to_*` を提供する。
 | メソッド | 用途 |
 |---|---|
 | `to_be_visible()` / `to_be_hidden()` | 表示状態 |
-| `to_be_enabled()` / `to_be_disabled()` | 操作可能状態 |
+| `to_be_enabled()` / `to_be_disabled()` | 操作可能状態（disabled も widget があることを要る） |
 | `to_have_text(expected)` | `get_text()` が完全一致 |
 | `to_contain_text(substring)` | `get_text()` に部分一致 |
 | `to_have_value(expected)` | `get_value()` が一致 |
@@ -103,11 +103,14 @@ class _LocatorAssertions:
         self._poll_actionability("visible", False, "to_be_hidden", timeout_s)
 
     def to_be_enabled(self, *, timeout_s: float | None = None) -> None:
-        """widget が enabled になるまで poll。"""
+        """widget が enabled になるまで poll。
+
+        ``not_.to_be_enabled()`` は ``to_be_disabled()`` と同じく widget があることも要る。
+        """
         self._poll_actionability("enabled", True, "to_be_enabled", timeout_s)
 
     def to_be_disabled(self, *, timeout_s: float | None = None) -> None:
-        """widget が disabled になるまで poll。"""
+        """widget があって disabled になるまで poll（見つからなければ満たさない）。"""
         self._poll_actionability("enabled", False, "to_be_disabled", timeout_s)
 
     # ------------------------------------------------------------
@@ -199,24 +202,35 @@ class _LocatorAssertions:
         name: str,
         timeout_s: float | None,
     ) -> None:
-        """`check_actionability` の特定 bool フィールド (visible / enabled) を poll。"""
+        """`check_actionability` の特定 bool フィールド (visible / enabled) を poll。
+
+        見つからない widget は ``visible`` も ``enabled`` も False で返る。「見えない」
+        （``to_be_hidden`` / ``not_.to_be_visible``）は無くても満たすが、「無効」
+        （``to_be_disabled`` / ``not_.to_be_enabled``）は widget があることも要る
+        （Playwright の ``toBeDisabled`` と同じ）。でないと selector の書き間違いでも
+        すぐ通ってしまう。
+        """
         effective_timeout = self._timeout_s if timeout_s is None else float(timeout_s)
         deadline = time.monotonic() + effective_timeout
         last_check: dict[str, Any] = {}
+        # 待つ値。negated なら反転する
+        wanted = expected != self._negated
+        needs_widget = not wanted and field != "visible"
 
         while True:
             last_check = self._locator._check_actionability()
             self._abort_if_ambiguous(last_check)
             value = bool(last_check.get(field, False))
-            matched = value == expected
-            # XOR: 通常は matched なら成功、negated なら not matched が成功
-            if matched != self._negated:
+            if value == wanted and (not needs_widget or last_check.get("exists")):
                 return
             if time.monotonic() >= deadline:
                 break
             time.sleep(self._poll_interval_s)
 
-        self._raise_assertion(name, expected, last_check, effective_timeout)
+        note = None
+        if needs_widget and not last_check.get("exists"):
+            note = "no widget matched the selector, and this assertion needs one to exist"
+        self._raise_assertion(name, expected, last_check, effective_timeout, note=note)
 
     def _poll_value(
         self,
@@ -288,11 +302,14 @@ class _LocatorAssertions:
         expected: Any,
         last: dict[str, Any],
         timeout_s: float,
+        *,
+        note: str | None = None,
     ) -> None:
         not_str = "not_." if self._negated else ""
+        reason = f" ({note})" if note else ""
         raise AssertionError(
             f"expect({self._locator._selector!r}).{not_str}{name}("
-            f"{expected!r}): timed out after {timeout_s}s. last={last!r}"
+            f"{expected!r}): timed out after {timeout_s}s{reason}. last={last!r}"
         )
 
 

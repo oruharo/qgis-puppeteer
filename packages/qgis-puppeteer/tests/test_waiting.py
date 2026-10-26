@@ -128,6 +128,8 @@ class TestCheckConditions:
             ("enabled", _check(), True),
             ("disabled", _check(enabled=False), True),
             ("disabled", _check(), False),
+            # 見つからない結果も enabled=False。selector の書き間違いで満たさない
+            ("disabled", _check(exists=False, visible=False, enabled=False), False),
             ("actionable", _check(), True),
             ("actionable", _check(not_covered=False, actionable=False), False),
             ("editable", _check(), True),

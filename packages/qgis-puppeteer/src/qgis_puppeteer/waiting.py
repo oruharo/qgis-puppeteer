@@ -11,7 +11,9 @@ pytest の ``expect(locator).to_*`` と ``wait_for_modal`` / ``wait_for_popup`` 
 結果（snapshot）。右は同じ意味の pytest の書き方。
 
 - visible / hidden（check の ``visible``）: ``to_be_visible`` / ``to_be_hidden``
-- enabled / disabled（check の ``enabled``）: ``to_be_enabled`` / ``to_be_disabled``
+- enabled / disabled（check の ``enabled``）: ``to_be_enabled`` / ``to_be_disabled``。
+  disabled は widget があることも要る（見つからない結果も ``enabled`` が False なので、
+  selector の書き間違いで満たさないように）。hidden は無くても満たす
 - actionable（check の ``actionable``）: Locator の操作の自動の待ち
 - editable（check の ``actionable`` と ``editable``）: ``fill()`` の自動の待ち
 - count（見えている widget の数）: ``to_have_count``
@@ -130,7 +132,11 @@ def is_ambiguous(check: dict[str, Any]) -> bool:
 
 
 def evaluate_check(until: str, check: dict[str, Any]) -> bool:
-    """:data:`CHECK_CONDITIONS` の条件を ``qgis_check_actionability`` の結果で決める。"""
+    """:data:`CHECK_CONDITIONS` の条件を ``qgis_check_actionability`` の結果で決める。
+
+    見つからない widget の結果は ``visible`` も ``enabled`` も False。hidden はそれで
+    満たすが、disabled は ``exists`` も要る（Playwright の ``toBeDisabled`` と同じ）。
+    """
     if until == "visible":
         return bool(check.get("visible"))
     if until == "hidden":
@@ -138,7 +144,7 @@ def evaluate_check(until: str, check: dict[str, Any]) -> bool:
     if until == "enabled":
         return bool(check.get("enabled"))
     if until == "disabled":
-        return not check.get("enabled")
+        return bool(check.get("exists")) and not check.get("enabled")
     if until == "actionable":
         return bool(check.get("actionable"))
     if until == "editable":

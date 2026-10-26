@@ -970,6 +970,44 @@ class TestMcpGatewayWaitFor:
         assert error["details"]["observed"]["visible"] is False
         assert len(seen) >= 2
 
+    def test_disabled_needs_the_widget_to_exist(self) -> None:
+        """見つからない widget を「無効」とみなさない。time out して、見たものを返す。"""
+        missing = self._check(
+            exists=False,
+            visible=False,
+            enabled=False,
+            not_covered=False,
+            editable=False,
+            actionable=False,
+            geometry=None,
+            widget=None,
+            diagnostics={"reason": "no_match"},
+        )
+        result, _seen = self._call(
+            {
+                "qgis_check_actionability": [
+                    missing,
+                    self._check(enabled=False, actionable=False),
+                ]
+            },
+            until="disabled",
+            selector={"object_name": "ok"},
+        )
+        assert not result.is_error  # 現れて無効になったら満たす
+        assert json.loads(_extract_text(result))["observed"]["exists"] is True
+
+        result, _seen = self._call(
+            {"qgis_check_actionability": [missing]},
+            until="disabled",
+            selector={"object_name": "typo"},
+            timeout_s=0.1,
+        )
+        assert result.is_error
+        error = json.loads(_extract_text(result))["error"]
+        assert error["code"] == "wait_timeout"
+        assert error["details"]["observed"]["exists"] is False
+        assert error["details"]["observed"]["diagnostics"] == {"reason": "no_match"}
+
     def test_an_ambiguous_selector_fails_without_waiting(self) -> None:
         ambiguous = self._check(
             exists=False,
