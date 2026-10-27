@@ -66,7 +66,8 @@ before QGIS launches, use `qgis_command` instead of `qgis_bin`:
 qgis_command = ["scripts/launcher.bat", "--config", "e2e", "--feature", "auth"]
 ```
 
-`qgis_command` is mutually exclusive with `qgis_bin` / `qgis_args`. The plugin
+When `qgis_command` is set, it is used instead of `qgis_bin` / `qgis_args`,
+which are then ignored. The plugin
 still injects `QPUPPETEER_HUB_PORT` / `QPUPPETEER_TRUSTED_MODE` /
 `QPUPPETEER_ALLOW_TEST_HANDLERS` into the spawn env — your wrapper just needs
 to inherit and forward them to QGIS.

@@ -183,10 +183,14 @@ SelectorArg = Annotated[
             "title / title_contains / label / placeholder / role / text_contains / text_re / "
             "attr / window（true でトップレベルの窓だけ）/ class_inherits（Qt の型の系譜。"
             "class では QDialog に見える C++ の QgsAttributeDialog などにも当たる）。"
-            "絞り込みは scope（既定 'modal'、ほかに 'active_window' / 'popup' / 'any'）/ "
+            "絞り込みは scope（既定 'modal'、ほかに 'active_window' / 'popup' / 'any' / "
+            "'modal_stack[N]'）/ "
             "root_object_name / index。qgis_snapshot_ui の出力から組み立てる。"
             "scope='popup' は開いているメニュー（QMenu.exec() など）で、項目は "
             "{'class': 'QAction', 'text': ...} で指し、click すると選ばれる。"
+            "scope='modal_stack[N]' は開いているモーダルを外側から並べた N 番目の中"
+            "（0 が一番外、-1 が最前面）で、モーダルの上に別のモーダルが開いているとき、"
+            "外側のモーダルの中を探すのに使う。"
         )
     ),
 ]

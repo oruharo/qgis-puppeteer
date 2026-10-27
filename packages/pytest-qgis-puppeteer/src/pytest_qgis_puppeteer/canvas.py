@@ -9,11 +9,12 @@
     canvas.type_text("90")                             # フォーカスのある欄に打つ
     canvas.press_key("Return", target="focus")
 
-どの操作も ``wait=False``（積んですぐ返す、#21）と ``modifiers``（``["shift"]``
-など）を受ける。マウスの操作は ``pixel=True`` で、点を viewport の画素として
-渡せる。戻り値の ``map_point`` は、マップツールが受け取る地図の点（画素に丸める
-ので、頼んだ点から ``map_units_per_pixel`` の半分までずれる）。失敗（地図の外の
-点など）は ``WidgetOperationError``。
+どの操作も ``wait=False``（積んですぐ返す、#21）を受ける。``type_text`` の
+ほかは ``modifiers``（``["shift"]`` など）も受ける。マウスの操作は
+``pixel=True`` で、点を viewport の画素として渡せる。戻り値の ``map_point`` は、
+マップツールが受け取る地図の点（画素に丸めるので、頼んだ点から
+``map_units_per_pixel`` の半分までずれる）。失敗（地図の外の点など）は
+``WidgetOperationError``。
 """
 
 from __future__ import annotations

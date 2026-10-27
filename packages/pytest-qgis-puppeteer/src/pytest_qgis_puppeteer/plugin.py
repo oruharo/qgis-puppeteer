@@ -175,8 +175,9 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--qgis-command",
         dest="qgis_command",
         default=None,
-        help="Full QGIS launch command (shell-style). Mutually exclusive with "
-        "--qgis-bin / --qgis-args. Use this when QGIS must be started via a "
+        help="Full QGIS launch command (shell-style). When set, it is used instead "
+        "of --qgis-bin / --qgis-args, which are then ignored. Use this when QGIS must "
+        "be started via a "
         "host-specific wrapper (e.g. a launcher.bat that sets up app-specific "
         "env vars or DB connection info before launching QGIS). "
         f"Falls back to ${ENV_QGIS_COMMAND} or [tool.pytest.ini_options] qgis_command.",
@@ -226,7 +227,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
     parser.addini(
         "qgis_command",
-        "Full QGIS launch command (mutually exclusive with qgis_bin/qgis_args).",
+        "Full QGIS launch command. When set, qgis_bin/qgis_args are ignored.",
         type="args",
         default=[],
     )

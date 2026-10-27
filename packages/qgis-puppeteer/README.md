@@ -109,7 +109,8 @@ See [docs/architecture/0001-qgis-puppeteer-architecture.md](https://github.com/o
 | `QPUPPETEER_HUB_ORIGIN` | `http://localhost` | Origin header for register |
 | `QPUPPETEER_WORKER_LABEL` | — | Self-reported label (auto-assigned if empty) |
 | `QPUPPETEER_TRUSTED_MODE` | unset | If `1`, bypass `execute_python` confirm step (CI / E2E) |
-| `QPUPPETEER_LOG_LEVEL` | `INFO` | Logging level |
+| `QPUPPETEER_LOG_LEVEL` | `INFO` | Log level of the MCP gateway (`DEBUG` / `INFO` / `WARNING` / ...), for both its stderr and `gateway.log`. It does not change the Hub's or QGIS's logs |
+| `QPUPPETEER_GATEWAY_LOG` | `<TEMP>/qgis_puppeteer/gateway.log` | The MCP gateway's log file |
 
 ## Extending with custom handlers
 
