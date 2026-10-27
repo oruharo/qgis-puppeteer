@@ -729,6 +729,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   widget matched. `to_be_hidden()`, `not_.to_be_visible()` and
   `until="hidden"` still pass when nothing matches.
 
+- **Negated value assertions passed when no widget matched.** A widget missing
+  from the UI snapshot reads as the value None, which differs from any expected
+  value and is not "checked", so `not_.to_have_text()`, `not_.to_contain_text()`,
+  `not_.to_have_value()`, `not_.to_be_checked()` and `not_.to_have_row_count()`
+  passed at once on a selector with a typo; so did the MCP tool's
+  `qgis_wait_for(until="unchecked")`. The value assertions, negated or not, and
+  the MCP tool's text, value, check and row-count conditions now need the
+  widget to be in the snapshot, as in Playwright: they wait for it to appear,
+  and on timeout fail with `found: False`, which `qgis_wait_for` also reports
+  in `observed`. A widget that is found but has no such value still reads as
+  None.
+
 - **Code run in trusted mode was not recorded anywhere.** With
   `QPUPPETEER_TRUSTED_MODE=1`, `execute_python` runs code without asking, and
   the record of what ran went to a Python logger that nothing inside QGIS

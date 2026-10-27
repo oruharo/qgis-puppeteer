@@ -355,6 +355,51 @@ class TestNegation:
         loc = Locator(client, {"object_name": "status"})
         expect(loc).not_.to_have_text("Loading...")
 
+    @pytest.mark.parametrize(
+        "assertion",
+        [
+            lambda e: e.not_.to_have_text("Loading..."),
+            lambda e: e.not_.to_contain_text("Loading"),
+            lambda e: e.not_.to_have_value(3),
+            lambda e: e.not_.to_be_checked(),
+            lambda e: e.not_.to_have_row_count(5),
+        ],
+        ids=["text", "contain_text", "value", "checked", "row_count"],
+    )
+    def test_value_negations_fail_when_no_widget_matches(
+        self, monkeypatch: pytest.MonkeyPatch, assertion: Any
+    ) -> None:
+        """見つからないと値は None。「値が違う」とみなすと、selector の書き間違いで通る。"""
+        monkeypatch.setattr("pytest_qgis_puppeteer._expect.time.sleep", lambda _s: None)
+        ticks = iter([0.0, 0.1, 0.5, 1.5, 2.0])
+        monkeypatch.setattr("pytest_qgis_puppeteer._expect.time.monotonic", lambda: next(ticks))
+        client = _FakeClient(
+            {
+                "qgis_check_actionability": [_act_result(exists=False)] * 10,
+                "qgis_snapshot_ui": [_snapshot_with_text(None)] * 10,
+            }
+        )
+        loc = Locator(client, {"object_name": "stauts"})
+        with pytest.raises(AssertionError, match="no widget matched") as excinfo:
+            assertion(expect(loc, timeout_s=1.0))
+        assert "'found': False" in str(excinfo.value)
+        snapshots = [c for c in client.calls if c[0] == "qgis_snapshot_ui"]
+        assert len(snapshots) > 1  # すぐには諦めず、現れるのを待った
+
+    def test_value_negation_waits_for_the_widget_to_appear(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("pytest_qgis_puppeteer._expect.time.sleep", lambda _s: None)
+        client = _FakeClient(
+            {
+                "qgis_check_actionability": [_act_result(exists=False), _act_result()],
+                "qgis_snapshot_ui": [_snapshot_with_text(None), _snapshot_with_text("Done")],
+            }
+        )
+        loc = Locator(client, {"object_name": "status"})
+        expect(loc).not_.to_have_text("Loading...")
+        assert len([c for c in client.calls if c[0] == "qgis_snapshot_ui"]) == 2
+
     def test_double_not_returns_normal(self) -> None:
         # not_.not_ は元に戻る（純粋プロパティの動作確認）
         client = _FakeClient({"qgis_check_actionability": [_act_result(visible=True)]})

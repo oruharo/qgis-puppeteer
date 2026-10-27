@@ -22,6 +22,8 @@ pytest の ``expect(locator).to_*`` と ``wait_for_modal`` / ``wait_for_popup`` 
 - checked / unchecked（同じく :func:`node_value`）: ``to_be_checked`` /
   ``not_.to_be_checked``
 - row_count（snapshot の ``row_count``）: ``to_have_row_count``
+- text / text_contains / value / checked / unchecked / row_count は、node が見つからな
+  ければ満たさない（無い widget を「値が違う」「チェックされていない」とみなさない）
 - modal / modal_closed（snapshot の ``active_modal``）: ``wait_for_modal`` /
   ``wait_for_modal_closed``
 - popup / popup_closed（snapshot の ``active_popup``）: ``wait_for_popup`` /
@@ -166,36 +168,43 @@ def node_value(node: dict[str, Any] | None) -> Any:
     return None
 
 
-def read_node(until: str, snapshot: dict[str, Any], selector: dict[str, Any]) -> Any:
+def read_node(until: str, snapshot: dict[str, Any], selector: dict[str, Any]) -> tuple[bool, Any]:
     """:data:`NODE_CONDITIONS` の条件が比べる値を snapshot から読む。
 
-    当たる node が無ければ None。
+    Returns:
+        (node が見つかったか, 値)。見つからなければ ``(False, None)``。見つかっても
+        値が無ければ値は None（「無い」と「値が無い」を分けるため、見つかったかを返す）。
 
     Raises:
         LiveOnlySelectorError: snapshot に無いキー（``window`` など）を使っている。
     """
     node = find_in_snapshot(snapshot, selector)
     if node is None:
-        return None
+        return False, None
     if until in ("text", "text_contains"):
         text = node.get("text")
-        return text if isinstance(text, str) else None
+        return True, text if isinstance(text, str) else None
     if until == "row_count":
-        return node.get("row_count")
-    return node_value(node)
+        return True, node.get("row_count")
+    return True, node_value(node)
 
 
-def evaluate_node(until: str, observed: Any, expected: Any) -> bool:
-    """:data:`NODE_CONDITIONS` の条件を、:func:`read_node` で読んだ値で決める。"""
+def evaluate_node(until: str, observed: Any, expected: Any, *, found: bool = True) -> bool:
+    """:data:`NODE_CONDITIONS` の条件を、:func:`read_node` で読んだ値で決める。
+
+    ``found`` が False（node が見つからない）なら、どの条件も満たさない。
+    """
+    if until not in NODE_CONDITIONS:
+        raise ValueError(f"not a node condition: {until!r}")
+    if not found:
+        return False
     if until in ("text", "value", "row_count"):
         return observed is not None and observed == expected
     if until == "text_contains":
         return isinstance(observed, str) and expected in observed
     if until == "checked":
         return bool(observed) is True
-    if until == "unchecked":
-        return bool(observed) is not True
-    raise ValueError(f"not a node condition: {until!r}")
+    return bool(observed) is not True  # unchecked
 
 
 def read_window(until: str, snapshot: dict[str, Any]) -> dict[str, Any] | None:

@@ -41,6 +41,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from qgis_puppeteer.selector_match import LiveOnlySelectorError
+from qgis_puppeteer.waiting import node_value
 
 from pytest_qgis_puppeteer.locator import (
     SelectorAmbiguousError,
@@ -120,7 +121,7 @@ class _LocatorAssertions:
     def to_have_text(self, expected: str, *, timeout_s: float | None = None) -> None:
         """``locator.get_text()`` が ``expected`` と完全一致するまで poll。"""
         self._poll_value(
-            self._locator.get_text,
+            _node_text,
             lambda v: v == expected,
             "to_have_text",
             expected,
@@ -130,7 +131,7 @@ class _LocatorAssertions:
     def to_contain_text(self, substring: str, *, timeout_s: float | None = None) -> None:
         """``locator.get_text()`` が ``substring`` を含むまで poll。"""
         self._poll_value(
-            self._locator.get_text,
+            _node_text,
             lambda v: isinstance(v, str) and substring in v,
             "to_contain_text",
             substring,
@@ -140,7 +141,7 @@ class _LocatorAssertions:
     def to_have_value(self, expected: Any, *, timeout_s: float | None = None) -> None:
         """``locator.get_value()`` が ``expected`` と一致するまで poll。"""
         self._poll_value(
-            self._locator.get_value,
+            node_value,
             lambda v: v == expected,
             "to_have_value",
             expected,
@@ -150,7 +151,7 @@ class _LocatorAssertions:
     def to_be_checked(self, *, timeout_s: float | None = None) -> None:
         """checkable widget が True 状態になるまで poll。"""
         self._poll_value(
-            self._locator.get_value,
+            node_value,
             lambda v: bool(v) is True,
             "to_be_checked",
             True,
@@ -163,12 +164,13 @@ class _LocatorAssertions:
         snapshot の ``row_count``（全体の行の数。100 行の上限は効かない）で見る。
         ツリーは一番上の段の行の数。
         """
-
-        def row_count() -> Any:
-            node = self._locator.snapshot()
-            return node.get("row_count") if node else None
-
-        self._poll_value(row_count, lambda v: v == count, "to_have_row_count", count, timeout_s)
+        self._poll_value(
+            lambda node: node.get("row_count"),
+            lambda v: v == count,
+            "to_have_row_count",
+            count,
+            timeout_s,
+        )
 
     def to_have_count(self, count: int, *, timeout_s: float | None = None) -> None:
         """selector に当たる**見えている** widget の数が ``count`` になるまで poll（#35）。
@@ -234,13 +236,18 @@ class _LocatorAssertions:
 
     def _poll_value(
         self,
-        getter: Callable[[], Any],
+        read: Callable[[dict[str, Any]], Any],
         condition: Callable[[Any], bool],
         name: str,
         expected: Any,
         timeout_s: float | None,
     ) -> None:
-        """任意の getter + condition を poll（snapshot 経由 get_text/get_value 用）。
+        """snapshot の node から ``read`` で読んだ値を ``condition`` で poll する。
+
+        widget が snapshot に見つからない間は、否定形（``not_.to_have_text`` など）も
+        含めて満たさない（Playwright と同じ）。見つからないと値は None になり、
+        「値が違う」と区別できないため、否定形が selector の書き間違いでもすぐ
+        通ってしまう。
 
         ambiguous の即時 abort のために `check_actionability` も毎回呼ぶ — ただし
         snapshot 経由の getter とは別経路なので、snapshot 側が ambiguous で None
@@ -251,6 +258,7 @@ class _LocatorAssertions:
         deadline = time.monotonic() + effective_timeout
         last_value: Any = None
         last_check: dict[str, Any] = {}
+        found = False
 
         while True:
             # ambiguous の早期検出
@@ -258,16 +266,17 @@ class _LocatorAssertions:
             self._abort_if_ambiguous(last_check)
 
             try:
-                last_value = getter()
+                node = self._locator.snapshot()
             except LiveOnlySelectorError:
                 # 待っても変わらない、selector の誤り（#38）
                 raise
-            except Exception as exc:  # noqa: BLE001 — getter は client.snapshot_ui を通る
-                logger.debug("getter raised in expect poll: %s", exc)
-                last_value = None
+            except Exception as exc:  # noqa: BLE001 — snapshot は client.snapshot_ui を通る
+                logger.debug("snapshot raised in expect poll: %s", exc)
+                node = None
+            found = node is not None
+            last_value = read(node) if node is not None else None
 
-            matched = condition(last_value)
-            if matched != self._negated:
+            if found and condition(last_value) != self._negated:
                 return
             if time.monotonic() >= deadline:
                 break
@@ -277,8 +286,9 @@ class _LocatorAssertions:
         self._raise_assertion(
             name,
             expected,
-            {"last_value": last_value, "actionability": last_check},
+            {"found": found, "last_value": last_value, "actionability": last_check},
             effective_timeout,
+            note=None if found else "no widget matched the selector in the UI snapshot",
         )
 
     def _abort_if_ambiguous(self, check_result: dict[str, Any]) -> None:
@@ -311,6 +321,12 @@ class _LocatorAssertions:
             f"expect({self._locator._selector!r}).{not_str}{name}("
             f"{expected!r}): timed out after {timeout_s}s{reason}. last={last!r}"
         )
+
+
+def _node_text(node: dict[str, Any]) -> str | None:
+    """``Locator.get_text()`` と同じく、node の ``text`` を読む（文字でなければ None）。"""
+    text = node.get("text")
+    return text if isinstance(text, str) else None
 
 
 def expect(

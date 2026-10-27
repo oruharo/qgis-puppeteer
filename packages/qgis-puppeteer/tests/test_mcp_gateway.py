@@ -1068,10 +1068,28 @@ class TestMcpGatewayWaitFor:
             expected="3 layers",
         )
         assert not result.is_error
-        assert json.loads(_extract_text(result))["observed"] == {"value": "Loaded 3 layers"}
+        observed = json.loads(_extract_text(result))["observed"]
+        assert observed == {"found": True, "value": "Loaded 3 layers"}
         snapshots = [c["params"] for c in seen if c["command"] == "qgis_snapshot_ui"]
         assert len(snapshots) == 2
         assert snapshots[0]["include_main_window"] is True
+
+    def test_unchecked_needs_the_widget_to_exist(self) -> None:
+        """無い widget を「チェックされていない」とみなさない。time out して found=false。"""
+        empty = {"active_modal": None, "main_window": {"class": "QMainWindow", "children": []}}
+        result, _seen = self._call(
+            {
+                "qgis_check_actionability": [self._check(exists=False)],
+                "qgis_snapshot_ui": [empty],
+            },
+            until="unchecked",
+            selector={"object_name": "snap_to_grid_typo"},
+            timeout_s=0.1,
+        )
+        assert result.is_error
+        error = json.loads(_extract_text(result))["error"]
+        assert error["code"] == "wait_timeout"
+        assert error["details"]["observed"] == {"found": False, "value": None}
 
     def test_snapshot_conditions_reject_live_only_keys(self) -> None:
         result, seen = self._call(

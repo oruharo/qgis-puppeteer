@@ -165,21 +165,21 @@ _SNAPSHOT: dict[str, Any] = {
 
 class TestNodeConditions:
     @pytest.mark.parametrize(
-        ("until", "selector", "value"),
+        ("until", "selector", "found", "value"),
         [
-            ("text", {"object_name": "status"}, "Loading 3 layers"),
-            ("text_contains", {"object_name": "status"}, "Loading 3 layers"),
-            ("value", {"object_name": "spin"}, 4),
-            ("value", {"object_name": "crs"}, "EPSG:4326"),
-            ("checked", {"object_name": "check"}, True),
-            ("row_count", {"object_name": "table"}, 2),
-            ("text", {"object_name": "table"}, None),  # 文字を持たない
-            ("value", {"object_name": "missing"}, None),
-            ("text", {"text": "OK", "class": "QPushButton"}, None),  # 2 つに当たる
+            ("text", {"object_name": "status"}, True, "Loading 3 layers"),
+            ("text_contains", {"object_name": "status"}, True, "Loading 3 layers"),
+            ("value", {"object_name": "spin"}, True, 4),
+            ("value", {"object_name": "crs"}, True, "EPSG:4326"),
+            ("checked", {"object_name": "check"}, True, True),
+            ("row_count", {"object_name": "table"}, True, 2),
+            ("text", {"object_name": "table"}, True, None),  # 文字を持たない
+            ("value", {"object_name": "missing"}, False, None),
+            ("text", {"text": "OK", "class": "QPushButton"}, False, None),  # 2 つに当たる
         ],
     )
-    def test_read_node(self, until: str, selector: dict[str, Any], value: Any) -> None:
-        assert waiting.read_node(until, _SNAPSHOT, selector) == value
+    def test_read_node(self, until: str, selector: dict[str, Any], found: bool, value: Any) -> None:
+        assert waiting.read_node(until, _SNAPSHOT, selector) == (found, value)
 
     def test_read_node_rejects_live_only_keys(self) -> None:
         with pytest.raises(LiveOnlySelectorError):
@@ -206,6 +206,25 @@ class TestNodeConditions:
     )
     def test_evaluate(self, until: str, observed: Any, expected: Any, met: bool) -> None:
         assert waiting.evaluate_node(until, observed, expected) is met
+
+    @pytest.mark.parametrize(
+        ("until", "expected"),
+        [
+            ("text", "done"),
+            ("text_contains", "done"),
+            ("value", 4),
+            ("checked", None),
+            ("unchecked", None),
+            ("row_count", 0),
+        ],
+    )
+    def test_missing_node_meets_nothing(self, until: str, expected: Any) -> None:
+        """無い widget を「チェックされていない」「値が違う」とみなさない。"""
+        assert waiting.evaluate_node(until, None, expected, found=False) is False
+
+    def test_other_conditions_are_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            waiting.evaluate_node("visible", None, None)
 
     def test_node_value_order(self) -> None:
         assert waiting.node_value(None) is None

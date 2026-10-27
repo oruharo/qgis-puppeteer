@@ -1434,6 +1434,11 @@ expect(qgis.locator({"object_name": "status"})).to_have_text("Done", timeout_s=1
 `check_actionability` の結果（`exists: False`）を載せて失敗する（Playwright の
 `toBeDisabled` と同じ）。`to_be_hidden()` / `not_.to_be_visible()` は widget が無くても満たす。
 
+値を見るマッチャ（`to_have_text` / `to_contain_text` / `to_have_value` / `to_be_checked` /
+`to_have_row_count`）も、否定形を含めて widget があることを要る。たとえば
+`not_.to_have_text("x")` や `not_.to_be_checked()` は、snapshot に widget が無ければ
+満たさず、現れるのを待つ。時間切れのメッセージには `found: False` が載る。
+
 `not_` プロパティで否定形（「~でなくなるまで待つ」）。selector 多重マッチ時は
 `SelectorAmbiguousError` で即 abort（`Locator` の auto-wait と同じ挙動）。
 `to_have_count` だけは複数に当たる selector でよい（数えるのが目的なので）。
@@ -2288,7 +2293,7 @@ pytest の次の書き方と同じなので、書き起こすときはこう置�
 | `count` | `expect(loc).to_have_count(expected)` |
 | `text` / `text_contains` | `expect(loc).to_have_text(expected)` / `to_contain_text(expected)` |
 | `value` | `expect(loc).to_have_value(expected)` |
-| `checked` / `unchecked` | `expect(loc).to_be_checked()` / `expect(loc).not_.to_be_checked()` |
+| `checked` / `unchecked` | `expect(loc).to_be_checked()` / `expect(loc).not_.to_be_checked()`（どちらも widget があることを要る。`observed.found` が見つかったか） |
 | `row_count` | `expect(loc).to_have_row_count(expected)` |
 | `modal` / `modal_closed` | `qgis.wait_for_modal(title_contains)` / `qgis.wait_for_modal_closed()` |
 | `popup` / `popup_closed` | `qgis.wait_for_popup(title_contains)` / `qgis.wait_for_popup_closed()` |

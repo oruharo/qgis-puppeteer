@@ -684,9 +684,9 @@ async def _wait_for(
                     {**snapshot_params, "include_main_window": True},
                     instance=target,
                 )
-                value = waiting.read_node(until, snapshot, selector)
-                observed = {"value": value}
-                matched = waiting.evaluate_node(until, value, expected)
+                found, value = waiting.read_node(until, snapshot, selector)
+                observed = {"found": found, "value": value}
+                matched = waiting.evaluate_node(until, value, expected, found=found)
         elif until in waiting.COUNT_CONDITIONS:
             assert selector is not None
             check = await client.call(
@@ -1563,6 +1563,8 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
                     "閉じた。複数に当たる selector でよい）。text / text_contains は"
                     "文字が expected と一致する / を含む。value は値が expected になる。"
                     "checked / unchecked。row_count は表・ツリー・リストの行数が expected。"
+                    "text から row_count までは widget が無ければ満たさない"
+                    "（observed.found=false）。"
                     "modal / modal_closed、popup / popup_closed はモーダルの窓・"
                     "ポップアップのメニューが出る / 閉じる（selector は付けない）。"
                 )
