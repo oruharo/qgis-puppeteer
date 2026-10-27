@@ -10,6 +10,7 @@
 - ``strategy="fail"`` で marker 無しテストがあると UsageError
 - ``--env`` 未指定時は ``default_name`` の env が active になる
 - ``qgis_env`` marker が登録されていて ``--strict-markers`` でも通る
+- ``--env=all --junit-xml`` で env ごとの testsuite が 1 つのファイルにまとまる
 
 QGIS spawn が要るテスト（``qgis_process`` fixture を解決するもの）は対象外。
 ここでは ``--collect-only`` モードや「fixture を要求しないテスト」だけで挙動を見る。
@@ -18,6 +19,7 @@ QGIS spawn が要るテスト（``qgis_process`` fixture を解決するもの�
 from __future__ import annotations
 
 import textwrap
+import xml.etree.ElementTree as ET
 
 import pytest
 
@@ -394,6 +396,67 @@ class TestMetaParentAll:
         # smoke=0 (1 件 pass) + auth=5 (collect 0 件) → aggregate=0
         result = pytester.runpytest_subprocess("--env=all")
         assert result.ret == 0
+
+
+_TWO_ENV_TESTS = textwrap.dedent(
+    """
+    import pytest
+
+    @pytest.mark.qgis_env("smoke")
+    def test_smoke():
+        assert False, "intentional"
+
+    @pytest.mark.qgis_env("auth")
+    def test_auth():
+        pass
+    """
+)
+
+
+class TestMetaParentJunitXml:
+    """``--env=all --junit-xml`` で、env ごとの結果が 1 つのファイルにまとまる。"""
+
+    def test_one_testsuite_per_env(self, pytester: pytest.Pytester) -> None:
+        _write_basic_envs_toml(pytester)
+        pytester.makepyfile(test_two=_TWO_ENV_TESTS)
+        result = pytester.runpytest_subprocess("--env=all", "--junit-xml=report.xml")
+        assert result.ret == 1
+
+        root = ET.parse(pytester.path / "report.xml").getroot()
+        assert root.tag == "testsuites"
+        assert [s.get("name") for s in root] == ["smoke", "auth"]
+        assert [(tc.get("classname"), tc.get("name")) for tc in root.iter("testcase")] == [
+            ("smoke::test_two", "test_smoke"),
+            ("auth::test_two", "test_auth"),
+        ]
+        assert root.get("tests") == "2"
+        assert root.get("failures") == "1"
+        # 子は env ごとのファイルに書いている
+        assert (pytester.path / "outputs" / "smoke" / "junit.xml").is_file()
+        assert (pytester.path / "outputs" / "auth" / "junit.xml").is_file()
+
+    def test_env_not_run_is_reported_as_skipped(self, pytester: pytest.Pytester) -> None:
+        _write_basic_envs_toml(pytester)
+        pytester.makepyfile(test_two=_TWO_ENV_TESTS)
+        # smoke の 1 件の失敗で --maxfail に達し、auth は回らない
+        result = pytester.runpytest_subprocess("--env=all", "--maxfail=1", "--junit-xml=report.xml")
+        assert result.ret == 1
+
+        root = ET.parse(pytester.path / "report.xml").getroot()
+        assert [s.get("name") for s in root] == ["smoke", "auth"]
+        auth = root[1]
+        assert auth.get("skipped") == "1"
+        assert len(list(auth.iter("skipped"))) == 1
+
+    def test_single_env_writes_plain_report(self, pytester: pytest.Pytester) -> None:
+        _write_basic_envs_toml(pytester)
+        pytester.makepyfile(test_two=_TWO_ENV_TESTS)
+        result = pytester.runpytest_subprocess("--env=auth", "--junit-xml=report.xml")
+        assert result.ret == 0
+
+        root = ET.parse(pytester.path / "report.xml").getroot()
+        assert [tc.get("classname") for tc in root.iter("testcase")] == ["test_two"]
+        assert not (pytester.path / "outputs" / "auth" / "junit.xml").exists()
 
 
 class TestMetaParentParentDeselectsAll:

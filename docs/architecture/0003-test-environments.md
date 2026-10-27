@@ -615,9 +615,13 @@ def pytest_sessionfinish(session, exitstatus):
    `_env_stats.json` を読んで `outputs/summary.json` に集約。`--maxfail` は
    `inject_maxfail(argv, remaining)` で各 child に「残許容数」を渡し、累計が
    `--maxfail` に達したら break して残 env を `skipped_reason` 付きで記録。
-   JUnit XML は child 終了時に `_postprocess_junit_for_env_prefix` が
-   `<testcase classname="X.Y">` を `<env_name>::X.Y` に書き換え（idempotent、
-   stdlib `xml.etree.ElementTree` で実装し追加依存なし）
+   JUnit XML は、parent が各 child に `--junit-xml=outputs/<env_name>/junit.xml`
+   を足して env ごとに書かせ、全 env の後で `_merge_env_junit_reports` が
+   `--junit-xml` の指定先 1 つにまとめる。env ごとの `<testsuite name="<env_name>">`、
+   `<testcase classname="X.Y">` は `<env_name>::X.Y`。回らなかった env は skipped、
+   レポートの無い env は error を 1 件持つ testsuite にする。parent 自身の
+   （テスト 0 件の）レポートより後に書くため、書き出しは `pytest_unconfigure`
+   （trylast）。stdlib `xml.etree.ElementTree` で実装し追加依存なし
 4. **Phase 4**（一部 ✅ 実装済）: `--env-strict` フラグ ✅、`extends` 継承 ✅、
    `--list-envs` ✅、env 並列実行（**未実装**、xdist 実機検証と併せて Phase 5 相当
    に繰り延べ）。実装メモ:

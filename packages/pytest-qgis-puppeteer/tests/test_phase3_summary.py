@@ -1,4 +1,4 @@
-"""ADR-0003 Phase 3 (summary.json + JUnit env prefix + --maxfail 累計) の単体テスト。
+"""ADR-0003 Phase 3 (summary.json + env ごとの JUnit XML のまとめ + --maxfail 累計) の単体テスト。
 
 実 pytest invocation を使わず、internal helper に対するユニットテスト中心。
 ``_run_envs_and_aggregate`` のフルフロー検証は integration スコープ（`pytest.main`
@@ -20,11 +20,15 @@ from pytest_qgis_puppeteer.plugin import (
     _CONFIG_ATTR_ACTIVE_ENV,
     _CONFIG_ATTR_ENV_STATS,
     _SUMMARY_SCHEMA_VERSION,
+    _child_junit_path,
     _empty_env_stats,
     _ensure_env_session_start,
     _env_output_dir,
+    _EnvJunitEntry,
+    _junit_target,
+    _merge_env_junit_reports,
+    _not_run_reason,
     _outputs_root,
-    _postprocess_junit_for_env_prefix,
     _read_child_stats,
     _write_env_stats,
     _write_summary_json,
@@ -222,62 +226,156 @@ class TestWriteSummaryJson:
 
 
 # ============================================================
-# _postprocess_junit_for_env_prefix
+# _merge_env_junit_reports
 # ============================================================
 
 
-class TestJunitEnvPrefix:
-    def _write_junit(self, path: Path, classnames: list[str]) -> None:
-        suite = ET.Element("testsuite")
-        for i, cls in enumerate(classnames):
-            ET.SubElement(suite, "testcase", classname=cls, name=f"test_{i}")
-        path.write_text(
-            ET.tostring(suite, encoding="utf-8", xml_declaration=True).decode("utf-8"),
-            encoding="utf-8",
-        )
+def _write_child_junit(path: Path, classnames: list[str], *, wrapped: bool = True) -> None:
+    """pytest の junitxml と同じ形（``<testsuites><testsuite>``）の子のレポートを書く。"""
+    suite = ET.Element(
+        "testsuite",
+        name="pytest",
+        errors="0",
+        failures="1",
+        skipped="0",
+        tests=str(len(classnames)),
+        time="1.500",
+    )
+    for i, cls in enumerate(classnames):
+        testcase = ET.SubElement(suite, "testcase", classname=cls, name=f"test_{i}")
+        if i == 0:
+            ET.SubElement(testcase, "failure", message="boom")
+    root = suite
+    if wrapped:
+        root = ET.Element("testsuites", name="pytest tests")
+        root.append(suite)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ET.ElementTree(root).write(path, encoding="utf-8", xml_declaration=True)
 
-    def test_no_active_env_no_op(self, tmp_path: Path) -> None:
-        junit = tmp_path / "junit.xml"
-        self._write_junit(junit, ["a.b", "c.d"])
-        config = _FakeConfig(option=_FakeOption(xmlpath=str(junit)))
-        _postprocess_junit_for_env_prefix(config)  # type: ignore[arg-type]
-        # 変化なし
-        tree = ET.parse(junit)
-        assert [tc.get("classname") for tc in tree.iter("testcase")] == ["a.b", "c.d"]
 
-    def test_no_xmlpath_no_op(self, tmp_path: Path) -> None:
-        config = _FakeConfig()
-        setattr(config, _CONFIG_ATTR_ACTIVE_ENV, _spec("smoke"))
-        # xmlpath 未設定でも例外を出さない
-        _postprocess_junit_for_env_prefix(config)  # type: ignore[arg-type]
+class TestMergeEnvJunitReports:
+    def test_one_testsuite_per_env_with_prefixed_classnames(self, tmp_path: Path) -> None:
+        _write_child_junit(tmp_path / "smoke.xml", ["tests.test_x", "tests.test_y"])
+        _write_child_junit(tmp_path / "auth.xml", ["tests.test_login"])
+        root = _merge_env_junit_reports(
+            [
+                _EnvJunitEntry("smoke", tmp_path / "smoke.xml", exitcode=1),
+                _EnvJunitEntry("auth", tmp_path / "auth.xml", exitcode=1),
+            ]
+        ).getroot()
 
-    def test_prefixes_all_classnames(self, tmp_path: Path) -> None:
-        junit = tmp_path / "junit.xml"
-        self._write_junit(junit, ["tests.test_x", "tests.test_y"])
-        config = _FakeConfig(option=_FakeOption(xmlpath=str(junit)))
-        setattr(config, _CONFIG_ATTR_ACTIVE_ENV, _spec("smoke"))
-        _postprocess_junit_for_env_prefix(config)  # type: ignore[arg-type]
-        tree = ET.parse(junit)
-        names = [tc.get("classname") for tc in tree.iter("testcase")]
-        assert names == ["smoke::tests.test_x", "smoke::tests.test_y"]
+        assert root.tag == "testsuites"
+        assert [s.get("name") for s in root] == ["smoke", "auth"]
+        assert [tc.get("classname") for tc in root.iter("testcase")] == [
+            "smoke::tests.test_x",
+            "smoke::tests.test_y",
+            "auth::tests.test_login",
+        ]
+        # 子の結果（failure）はそのまま残る
+        assert len(list(root.iter("failure"))) == 2
 
-    def test_idempotent(self, tmp_path: Path) -> None:
-        junit = tmp_path / "junit.xml"
-        self._write_junit(junit, ["already.prefixed"])
-        config = _FakeConfig(option=_FakeOption(xmlpath=str(junit)))
-        setattr(config, _CONFIG_ATTR_ACTIVE_ENV, _spec("smoke"))
-        # 1 回目で smoke::already.prefixed
-        _postprocess_junit_for_env_prefix(config)  # type: ignore[arg-type]
-        # 2 回目は冪等（再 prefix しない）
-        _postprocess_junit_for_env_prefix(config)  # type: ignore[arg-type]
-        tree = ET.parse(junit)
-        assert [tc.get("classname") for tc in tree.iter("testcase")] == ["smoke::already.prefixed"]
+    def test_totals_on_testsuites(self, tmp_path: Path) -> None:
+        _write_child_junit(tmp_path / "smoke.xml", ["a", "b"])
+        _write_child_junit(tmp_path / "auth.xml", ["c"])
+        root = _merge_env_junit_reports(
+            [
+                _EnvJunitEntry("smoke", tmp_path / "smoke.xml", exitcode=1),
+                _EnvJunitEntry("auth", tmp_path / "auth.xml", exitcode=1),
+            ]
+        ).getroot()
 
-    def test_missing_file_no_op(self, tmp_path: Path) -> None:
-        config = _FakeConfig(option=_FakeOption(xmlpath=str(tmp_path / "nope.xml")))
-        setattr(config, _CONFIG_ATTR_ACTIVE_ENV, _spec("smoke"))
-        # ファイル無くても例外なし
-        _postprocess_junit_for_env_prefix(config)  # type: ignore[arg-type]
+        assert root.get("tests") == "3"
+        assert root.get("failures") == "2"
+        assert root.get("errors") == "0"
+        assert root.get("skipped") == "0"
+        assert root.get("time") == "3.000"
+
+    def test_child_with_bare_testsuite_root(self, tmp_path: Path) -> None:
+        _write_child_junit(tmp_path / "smoke.xml", ["tests.test_x"], wrapped=False)
+        root = _merge_env_junit_reports(
+            [_EnvJunitEntry("smoke", tmp_path / "smoke.xml", exitcode=1)]
+        ).getroot()
+
+        assert [s.get("name") for s in root] == ["smoke"]
+        assert [tc.get("classname") for tc in root.iter("testcase")] == ["smoke::tests.test_x"]
+
+    def test_empty_classname_becomes_env_name(self, tmp_path: Path) -> None:
+        _write_child_junit(tmp_path / "smoke.xml", [""])
+        root = _merge_env_junit_reports(
+            [_EnvJunitEntry("smoke", tmp_path / "smoke.xml", exitcode=1)]
+        ).getroot()
+
+        assert [tc.get("classname") for tc in root.iter("testcase")] == ["smoke"]
+
+    @pytest.mark.parametrize("content", [None, "<testsuites><testsuite"])
+    def test_missing_or_broken_report_becomes_error(
+        self, tmp_path: Path, content: str | None
+    ) -> None:
+        path = tmp_path / "smoke.xml"
+        if content is not None:
+            path.write_text(content, encoding="utf-8")
+        root = _merge_env_junit_reports([_EnvJunitEntry("smoke", path, exitcode=3)]).getroot()
+
+        (suite,) = list(root)
+        assert suite.get("name") == "smoke"
+        assert suite.get("errors") == "1"
+        (error,) = list(suite.iter("error"))
+        assert "'smoke'" in error.get("message", "")
+        assert "code 3" in error.get("message", "")
+        assert root.get("errors") == "1"
+        assert root.get("tests") == "1"
+
+    def test_not_run_env_becomes_skipped(self, tmp_path: Path) -> None:
+        # 回さなかった env は、古いファイルが残っていても読まない
+        _write_child_junit(tmp_path / "auth.xml", ["stale"])
+        root = _merge_env_junit_reports(
+            [
+                _EnvJunitEntry(
+                    "auth",
+                    tmp_path / "auth.xml",
+                    exitcode=0,
+                    not_run_reason="not_run_due_to_cumulative_maxfail",
+                )
+            ]
+        ).getroot()
+
+        (suite,) = list(root)
+        assert suite.get("name") == "auth"
+        assert suite.get("skipped") == "1"
+        (skipped,) = list(suite.iter("skipped"))
+        assert "not_run_due_to_cumulative_maxfail" in skipped.get("message", "")
+        assert [tc.get("classname") for tc in root.iter("testcase")] == ["auth"]
+        assert root.get("skipped") == "1"
+
+
+class TestNotRunReason:
+    def test_not_run_reason_is_returned(self) -> None:
+        stats = _empty_env_stats("auth", exitcode=0, reason="not_run_due_to_cumulative_maxfail")
+        assert _not_run_reason(stats) == "not_run_due_to_cumulative_maxfail"
+
+    @pytest.mark.parametrize("reason", [None, "env_stats_missing"])
+    def test_other_reasons_are_none(self, reason: str | None) -> None:
+        stats: dict[str, Any] = {"env_name": "smoke", "exitcode": 0}
+        if reason is not None:
+            stats["skipped_reason"] = reason
+        assert _not_run_reason(stats) is None
+
+
+class TestJunitPaths:
+    def test_junit_target_none_without_xmlpath(self) -> None:
+        assert _junit_target(_FakeConfig()) is None  # type: ignore[arg-type]
+
+    def test_junit_target_is_absolute(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        config = _FakeConfig(option=_FakeOption(xmlpath="reports/junit.xml"))
+        assert _junit_target(config) == tmp_path / "reports" / "junit.xml"  # type: ignore[arg-type]
+
+    def test_child_junit_path_is_under_env_output_dir(self, tmp_path: Path) -> None:
+        config = _FakeConfig(diag_dir=str(tmp_path / "outputs" / "diagnostics"))
+        path = _child_junit_path(config, "smoke")  # type: ignore[arg-type]
+        assert path == tmp_path / "outputs" / "smoke" / "junit.xml"
 
 
 # Smoke test for _CONFIG_ATTR_ENV_STATS being set after _ensure_env_session_start.

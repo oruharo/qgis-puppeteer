@@ -741,6 +741,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in `observed`. A widget that is found but has no such value still reads as
   None.
 
+- **`--env=all --junit-xml` wrote a report with no tests.** Each env's child
+  pytest wrote to the same file, overwriting the one before, and then the
+  parent, which runs no tests itself, wrote its own empty report over all of
+  them, so a CI reading the file saw zero tests and no failures. The
+  `<env>::` prefix on `classname` that the guide described was never applied
+  either: it ran before pytest wrote the file. With `--env=all` or
+  `--env=A,B`, each child now writes to `outputs/<env>/junit.xml`, and the
+  parent merges them into the `--junit-xml` file: one `<testsuite>` per env,
+  named after it, each `classname` prefixed with `<env>::`, and the totals on
+  `<testsuites>`. An env that did not run (cumulative `--maxfail`, or a hard
+  error in an earlier env) appears as a testsuite with one skipped test, and
+  one that ran but left no readable report as a testsuite with one error, so
+  no env drops out silently. A single `--env` still writes pytest's own
+  report, without the prefix.
+
 - **Code run in trusted mode was not recorded anywhere.** With
   `QPUPPETEER_TRUSTED_MODE=1`, `execute_python` runs code without asking, and
   the record of what ran went to a Python logger that nothing inside QGIS

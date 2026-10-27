@@ -55,7 +55,9 @@ import sys
 import threading
 import time
 import warnings
+import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -347,6 +349,9 @@ _CONFIG_ATTR_LEFTOVER_UNREADABLE_WARNED = "_qgis_puppeteer_leftover_unreadable_w
 # (counts dict + failed_tests list + start time)。``pytest_sessionfinish`` で
 # ``_env_stats.json`` に書き出される。
 _CONFIG_ATTR_ENV_STATS = "_qgis_puppeteer_env_stats"
+# 複数の env を回した親が、子の JUnit XML をまとめたもの（書き出し先, tree）。
+# pytest 自身の junitxml が空のレポートを書いた後に、pytest_unconfigure で上書きする
+_CONFIG_ATTR_MERGED_JUNIT = "_qgis_puppeteer_merged_junit"
 
 # 集約レポートの schema_version（``summary.json`` / ``_env_stats.json``）
 _SUMMARY_SCHEMA_VERSION = 1
@@ -576,6 +581,9 @@ def _run_envs_and_aggregate(config: pytest.Config, env_names: Sequence[str]) -> 
     parent_maxfail = int(getattr(config.option, "maxfail", 0) or 0)
     cumulative_fails = 0
 
+    # --junit-xml があれば、子には env ごとのファイルへ書かせ、最後に親が 1 つにまとめる
+    junit_target = _junit_target(config)
+
     # 子側で「自分は meta-parent から呼ばれた」と分かるよう env 変数で marker
     saved_meta_child = os.environ.get(_ENV_META_CHILD)
     os.environ[_ENV_META_CHILD] = "1"
@@ -607,6 +615,12 @@ def _run_envs_and_aggregate(config: pytest.Config, env_names: Sequence[str]) -> 
                 remaining = parent_maxfail - cumulative_fails
                 # remaining > 0 はループ先頭の guard で保証
                 child_argv = inject_maxfail(child_argv, remaining)
+            if junit_target is not None:
+                child_junit = _child_junit_path(config, name)
+                with contextlib.suppress(FileNotFoundError):
+                    child_junit.unlink()  # 前の回のものを、この回の結果と取り違えない
+                # 最後に足した値が、親の引数や ini の addopts の --junit-xml より勝つ
+                child_argv = [*child_argv, f"--junit-xml={child_junit}"]
 
             logger.info(
                 "Meta-parent: dispatching env=%s (cumulative_fails=%d) argv=%s",
@@ -678,6 +692,23 @@ def _run_envs_and_aggregate(config: pytest.Config, env_names: Sequence[str]) -> 
         )
     except Exception:  # noqa: BLE001 - summary 書き出し失敗で test 結果を変えない
         logger.warning("Failed to write summary.json", exc_info=True)
+
+    if junit_target is not None:
+        entries = [
+            _EnvJunitEntry(
+                env_name=str(r["env_name"]),
+                path=_child_junit_path(config, str(r["env_name"])),
+                exitcode=int(r.get("exitcode", 0)),
+                not_run_reason=_not_run_reason(r),
+            )
+            for r in env_results
+        ]
+        try:
+            merged = _merge_env_junit_reports(entries)
+        except Exception:  # noqa: BLE001 - JUnit のまとめに失敗しても test 結果は変えない
+            logger.warning("Failed to merge the JUnit XML of the envs", exc_info=True)
+        else:
+            setattr(config, _CONFIG_ATTR_MERGED_JUNIT, (junit_target, merged))
     return aggregated
 
 
@@ -731,14 +762,30 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
             _write_env_stats(config, exitstatus=session.exitstatus)
         except Exception:  # noqa: BLE001 - stats dump は best-effort
             logger.warning("Failed to write _env_stats.json", exc_info=True)
-        try:
-            _postprocess_junit_for_env_prefix(config)
-        except Exception:  # noqa: BLE001
-            logger.warning("Failed to post-process JUnit XML for env prefix", exc_info=True)
         return
 
     aggregated = _run_envs_and_aggregate(config, meta_envs)
     session.exitstatus = aggregated
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """複数の env を回した親で、まとめた JUnit XML を書き出す。
+
+    pytest 自身の junitxml は ``pytest_sessionfinish`` で、親の（テストが 0 件の）
+    レポートを同じパスに書く。それより後の ``pytest_unconfigure`` で上書きする。
+    """
+    merged = getattr(config, _CONFIG_ATTR_MERGED_JUNIT, None)
+    if merged is None:
+        return
+    path, tree = merged
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tree.write(path, encoding="utf-8", xml_declaration=True)
+    except OSError:
+        logger.warning("Failed to write the merged JUnit XML to %s", path, exc_info=True)
+        return
+    logger.info("Wrote the JUnit XML of %d env(s) to %s", len(tree.getroot()), path)
 
 
 def _get_active_env(config: pytest.Config) -> EnvironmentSpec | None:
@@ -747,7 +794,7 @@ def _get_active_env(config: pytest.Config) -> EnvironmentSpec | None:
 
 
 # ==============================================================
-# ADR-0003 Phase 3: per-env stats / summary.json / JUnit env prefix
+# ADR-0003 Phase 3: per-env stats / summary.json / env ごとの JUnit XML をまとめる
 # ==============================================================
 
 
@@ -871,45 +918,110 @@ def _write_env_stats(config: pytest.Config, *, exitstatus: int) -> None:
     )
 
 
-def _postprocess_junit_for_env_prefix(config: pytest.Config) -> None:
-    """child 側で JUnit XML の ``testcase.classname`` に env 名を prefix する。
+@dataclass(frozen=True)
+class _EnvJunitEntry:
+    """まとめる JUnit XML の 1 env 分。"""
 
-    ADR-0003 §"artifacts / JUnit の衝突回避": CI の集約ツールで全 env を 1 ファイルに
-    merge する場合に同名 test を区別するため、``<env_name>::<classname>`` 形式に
-    書き換える。``--junit-xml`` 未指定 / active_env 無しなら no-op。
+    env_name: str
+    # 子が書いたはずのファイル（無いこともある）
+    path: Path
+    exitcode: int
+    # 回さなかった env の理由（``--maxfail`` の累計、前の env の hard error）。回した env は None
+    not_run_reason: str | None = None
 
-    既に ``<env_name>::`` で始まっている場合は冪等に skip（再実行 / 二重 invocation 対策）。
-    """
-    active_env = _get_active_env(config)
-    if active_env is None:
-        return
+
+def _junit_target(config: pytest.Config) -> Path | None:
+    """``--junit-xml`` の書き出し先（pytest の junitxml と同じ解決）。無ければ None。"""
     xmlpath = getattr(config.option, "xmlpath", None)
     if not xmlpath:
-        return
-    junit_path = Path(str(xmlpath))
-    if not junit_path.is_file():
-        return
-    prefix = f"{active_env.name}::"
-    try:
-        # stdlib の ElementTree で XML を読み書き（依存追加なし）
-        import xml.etree.ElementTree as ET
+        return None
+    expanded = os.path.expanduser(os.path.expandvars(str(xmlpath)))
+    return Path(os.path.normpath(os.path.abspath(expanded)))
 
-        tree = ET.parse(junit_path)
-        modified = False
-        for testcase in tree.iter("testcase"):
-            cls = testcase.get("classname", "")
-            if cls and not cls.startswith(prefix):
-                testcase.set("classname", f"{prefix}{cls}")
-                modified = True
-        if modified:
-            tree.write(junit_path, encoding="utf-8", xml_declaration=True)
-            logger.info(
-                "Phase 3: prefixed JUnit testcase classnames with %s in %s",
-                prefix,
-                junit_path,
+
+def _child_junit_path(config: pytest.Config, env_name: str) -> Path:
+    """複数の env を回すとき、子に書かせる JUnit XML（``outputs/<env>/junit.xml``）。"""
+    return Path(os.path.abspath(_env_output_dir(config, env_name) / "junit.xml"))
+
+
+def _not_run_reason(env_stats: dict[str, Any]) -> str | None:
+    reason = env_stats.get("skipped_reason")
+    if isinstance(reason, str) and reason.startswith("not_run_"):
+        return reason
+    return None
+
+
+def _merge_env_junit_reports(entries: Sequence[_EnvJunitEntry]) -> ET.ElementTree:
+    """env ごとの JUnit XML を、env ごとの ``<testsuite>`` を並べた 1 つにまとめる。
+
+    - ``<testsuite name>`` は env 名、``<testcase classname>`` は ``<env>::<元の classname>``
+      （テスト名だけを並べる集計でも、どの env の結果か分かるように）
+    - 回さなかった env は、skipped のテストを 1 件持つ testsuite
+    - 回したのにファイルが無い・読めない env は、error のテストを 1 件持つ testsuite
+      （黙って抜けないように）
+    - ``<testsuites>`` には全体の件数と時間を書く
+    """
+    root = ET.Element("testsuites", name="pytest tests")
+    for entry in entries:
+        for suite in _env_testsuites(entry):
+            root.append(suite)
+    totals = dict.fromkeys(("tests", "failures", "errors", "skipped"), 0)
+    total_time = 0.0
+    for suite in root:
+        for key in totals:
+            totals[key] += int(suite.get(key) or 0)
+        total_time += float(suite.get("time") or 0)
+    for key, value in totals.items():
+        root.set(key, str(value))
+    root.set("time", f"{total_time:.3f}")
+    return ET.ElementTree(root)
+
+
+def _env_testsuites(entry: _EnvJunitEntry) -> list[ET.Element]:
+    name = entry.env_name
+    if entry.not_run_reason is not None:
+        return [
+            _placeholder_suite(
+                name,
+                "skipped",
+                f"env {name!r} was not run ({entry.not_run_reason})",
             )
-    except ET.ParseError:
-        logger.warning("JUnit XML parse failed; skipping env prefix", exc_info=True)
+        ]
+    try:
+        child_root = ET.parse(entry.path).getroot()
+    except (OSError, ET.ParseError) as e:
+        return [
+            _placeholder_suite(
+                name,
+                "error",
+                f"env {name!r} exited with code {entry.exitcode} without a readable "
+                f"JUnit XML at {entry.path} ({type(e).__name__})",
+            )
+        ]
+    suites = [child_root] if child_root.tag == "testsuite" else child_root.findall("testsuite")
+    prefix = f"{name}::"
+    for suite in suites:
+        suite.set("name", name)
+        for testcase in suite.iter("testcase"):
+            cls = testcase.get("classname") or ""
+            testcase.set("classname", f"{prefix}{cls}" if cls else name)
+    return suites
+
+
+def _placeholder_suite(env_name: str, kind: str, message: str) -> ET.Element:
+    """テストの結果が無い env の testsuite（``kind`` は ``skipped`` か ``error``）。"""
+    suite = ET.Element(
+        "testsuite",
+        name=env_name,
+        errors="1" if kind == "error" else "0",
+        failures="0",
+        skipped="1" if kind == "skipped" else "0",
+        tests="1",
+        time="0.000",
+    )
+    testcase = ET.SubElement(suite, "testcase", classname=env_name, name="env")
+    ET.SubElement(testcase, kind, message=message)
+    return suite
 
 
 def _read_child_stats(config: pytest.Config, env_name: str) -> dict[str, Any] | None:

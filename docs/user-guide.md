@@ -501,11 +501,23 @@ pytest --env=all --env-strict     # ある env だけ exit 5 (no tests collected
 artifacts は `outputs/<env_name>/diagnostics/` に env 別に分離される。
 同じ設定が何か所にもあるときは `CLI > 環境変数 > environments.toml > ini` の順に効く。
 
-#### JUnit XML の env prefix
+#### JUnit XML を env ごとにまとめる
 
-`--junit-xml=...` 併用時、各子 invocation の `<testcase classname="...">` は
-`<env_name>::<元 classname>` に書き換わる。CI 側で env を縦軸にした集計表が
-そのまま作れる。既に prefix が付いているものには重ねて付けない。
+meta-parent モードで `--junit-xml=report.xml` を付けると、全 env の結果が
+`report.xml` 1 つにまとまる:
+
+- env ごとに `<testsuite name="<env_name>">` が 1 つずつ並ぶ。
+- 各テストの `<testcase classname="...">` は `<env_name>::<元 classname>` になる。
+  テスト名だけを並べる CI の画面でも、どの env の結果か分かる。
+- `<testsuites>` には全 env の件数（tests / failures / errors / skipped）と合計時間が入る。
+- `--maxfail` の累積や前の env の hard error で回らなかった env は、skipped のテストを
+  1 件持つ testsuite として入る。
+- 回したのに結果のファイルが残らなかった env は、error のテストを 1 件持つ testsuite
+  として入る。どちらも黙って抜け落ちない。
+
+子の pytest は `outputs/<env_name>/junit.xml` に書き、全 env が終わった後で親がまとめる。
+`--env=smoke` のように env を 1 つだけ選んだときは、pytest の普通の JUnit XML のまま
+（prefix は付かない）。
 
 #### `--maxfail` の env 横断累積
 
