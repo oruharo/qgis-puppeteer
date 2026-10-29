@@ -14,7 +14,7 @@ ADR-0002 §12 で計画されていた `expect(locator).to_*` を提供する。
 | `to_have_text(expected)` | `get_text()` が完全一致 |
 | `to_contain_text(substring)` | `get_text()` に部分一致 |
 | `to_have_value(expected)` | `get_value()` が一致 |
-| `to_be_checked()` / `not_.to_be_checked()` | check 状態 |
+| `to_be_checked()` / `not_.to_be_checked()` | check 状態（`cell=` で表・ツリーの行） |
 
 ## not_ プロパティ
 
@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any
 from qgis_puppeteer.selector_match import LiveOnlySelectorError
 from qgis_puppeteer.waiting import node_value
 
+from pytest_qgis_puppeteer.automation_client import WidgetOperationError
 from pytest_qgis_puppeteer.locator import (
     SelectorAmbiguousError,
     _diagnostics_reason,
@@ -148,8 +149,19 @@ class _LocatorAssertions:
             timeout_s,
         )
 
-    def to_be_checked(self, *, timeout_s: float | None = None) -> None:
-        """checkable widget が True 状態になるまで poll。"""
+    def to_be_checked(
+        self, *, timeout_s: float | None = None, cell: dict[str, Any] | int | None = None
+    ) -> None:
+        """checkable widget が True 状態になるまで poll。
+
+        ``cell`` を渡すと、表・ツリー・リストのその行のチェックを見る（``cell`` の形は
+        ``Locator.click`` と同じ）。``"checked"`` で満たし、``not_`` は ``"unchecked"`` /
+        ``"partial"`` で満たす。行が見つからない間と、チェックの無いセルは、どちらの形も
+        満たさない（selector や ``cell`` の書き間違いですぐ通らないように）。
+        """
+        if cell is not None:
+            self._poll_cell_check(cell, timeout_s)
+            return
         self._poll_value(
             node_value,
             lambda v: bool(v) is True,
@@ -289,6 +301,42 @@ class _LocatorAssertions:
             {"found": found, "last_value": last_value, "actionability": last_check},
             effective_timeout,
             note=None if found else "no widget matched the selector in the UI snapshot",
+        )
+
+    def _poll_cell_check(self, cell: dict[str, Any] | int, timeout_s: float | None) -> None:
+        """``cell`` の行のチェックの状態（``qgis_read_rows`` の ``cell``）を poll する。"""
+        effective_timeout = self._timeout_s if timeout_s is None else float(timeout_s)
+        deadline = time.monotonic() + effective_timeout
+        locator = self._locator
+        last: dict[str, Any] = {}
+        while True:
+            check = locator._check_actionability()
+            self._abort_if_ambiguous(check)
+            if check.get("exists"):
+                try:
+                    last = locator._client.read_cell(
+                        locator._effective_selector(),
+                        cell,
+                        role="check",
+                        instance=locator._instance,
+                    )
+                except WidgetOperationError as exc:
+                    last = exc.result  # 行がまだ無い・読めない間は待つ
+            else:
+                last = {"success": False, "error": "widget_not_found"}
+            state = last.get("value") if last.get("success") else None
+            if state is not None and (state == "checked") != self._negated:
+                return
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(self._poll_interval_s)
+        note = None
+        if not last.get("success"):
+            note = f"the cell was not read: {last.get('error')}"
+        elif last.get("value") is None:
+            note = "the cell has no check box"
+        self._raise_assertion(
+            "to_be_checked", {"cell": cell}, {"last": last}, effective_timeout, note=note
         )
 
     def _abort_if_ambiguous(self, check_result: dict[str, Any]) -> None:

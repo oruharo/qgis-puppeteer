@@ -960,9 +960,11 @@ Locator の操作は、これを **`WidgetOperationError`** にする（`error` 
 | `column_not_found` | set / click | `column` の見出しの名前か番号が無い（`available` に見出し） | `WidgetOperationError` |
 | `column_ambiguous` | set / click | `column` の見出しの名前に当たる列が複数ある。列の番号で指す | `WidgetOperationError` |
 | `no_model` | set / click | View に model が未設定 | `WidgetOperationError` |
-| `cell_needs_a_view` | click のみ | 表・ツリー・リストでない widget に `cell` を付けた | `WidgetOperationError` |
+| `cell_needs_a_view` | set / click | 表・ツリー・リストでない widget に `cell` を付けた | `WidgetOperationError` |
 | `no_visible_column` | click のみ | `cell` の行に、見えている列が 1 つも無い | `WidgetOperationError` |
-| `cell_disabled` | click のみ | `cell` で指した項目が無効（押しても Qt が黙って無視する） | `WidgetOperationError` |
+| `cell_disabled` | set / click | `cell` で指した項目が無効（押しても Qt が黙って無視する） | `WidgetOperationError` |
+| `cell_not_checkable` | set のみ | `cell` のセルに、人が押せるチェックの欄が無い（`ItemIsUserCheckable` が無いか、チェックの値が無い。`check_state` に今の値）。チェックのある列を `column` で指す | `WidgetOperationError` |
+| `column_hidden` | set のみ | `cell` でチェックを付け外す列が隠れている | `WidgetOperationError` |
 | `click_missed` | click のみ | 送る位置が指したセルに当たらない（セルが画面に出ない、別の行に当たる） | `WidgetOperationError` |
 | `point_covered` | click のみ | マウスのイベントで押す（`kind` が `"left"` 以外か `cell` 付き）位置が、別の widget に覆われている（`covered_by` に覆っている widget） | `WidgetOperationError` |
 
@@ -1038,6 +1040,39 @@ Locator の操作は、これを **`WidgetOperationError`** にする（`error` 
 - パスワード欄は `prior_value` / `value_after` / `expected` を伏せる（`masked`）
 - `wait=False` のときは、入れる前に分かる失敗（読み取り専用・範囲外・候補に無い・
   形の違う値）だけを返す。入れたあとの失敗は `qgis_get_recent_exceptions` に残る
+
+#### 行のチェックを付け外す（`check(cell=...)`）
+
+表・ツリー・リストの行のチェック（`QTreeWidgetItem.setCheckState` のチェック、QGIS の
+レイヤツリーのレイヤや凡例の分類の表示）は、`check()` / `uncheck()` に `cell` を渡して
+付け外す（MCP は `qgis_set_widget_value` に `value: true / false` と `cell`）。`cell` の
+形は `click(cell=...)` と同じ:
+
+```python
+conditions = qgis.locator({"object_name": "conditionTree"})
+conditions.check(cell={"path": ["道路", "国道", "一般国道"]})   # 畳まれた段は開く
+expect(conditions).to_be_checked(cell={"path": ["道路", "国道", "一般国道"]})
+
+layers = qgis.locator({"object_name": "theLayerTree"})          # QGIS のレイヤパネル
+layers.uncheck(cell={"path": ["道路", "国道"]})                # レイヤの下の凡例の分類
+expect(layers).not_.to_be_checked(cell={"path": ["道路", "国道"]})
+```
+
+- 人がそのチェックを押せるときだけ付け外す：項目が有効で、チェックの欄が出ていて
+  （`ItemIsUserCheckable` があり、チェックの値がある）、列が見えている。押せなければ
+  `cell_disabled` / `cell_not_checkable` / `column_hidden`。凡例の付け外しを許さない
+  レイヤツリー（`AllowLegendChangeState` の無いモデル）の分類も `cell_not_checkable`
+- モデルの `setData(..., CheckStateRole)`（チェックの欄を押したときに delegate が呼ぶ
+  のと同じ）で入れるので、`itemChanged` / `dataChanged` も、凡例の分類の表示の
+  切り替えも人の操作と同じく起きる。行は選ばない
+- 値は `"checked"` / `"unchecked"` / `"partial"` の文字で返る（`prior_value` /
+  `value_after`）。入れたあとに読み直し、頼んだ状態でなければ `value_not_applied`
+  （`verify=False` で比べない）。モデルが `setData` を断れば `set_value_failed`
+- 子が全部付いていない auto tristate の親は `"partial"`。親を付けると子も付くかは
+  モデルの決まりどおり
+- `expect(...).to_be_checked(cell=...)` は `"checked"` で満たし、`not_` は
+  `"unchecked"` / `"partial"` で満たす。行が見つからない間と、チェックの無いセルは
+  どちらの形も満たさない（`cell` の書き間違いですぐ通らないように）
 
 **重要**: `qgis_click_widget` を直接呼ぶとき disabled な widget は **即座に
 `widget_disabled` で返り、`click()` は呼ばれない**。リトライしないので、
@@ -1150,7 +1185,7 @@ qgis.locator({"scope": "popup", "class": "QAction", "text": "削除"}).click()
 | `dblclick()` | ダブルクリック（`cell=` で表の行のセル） | actionable |
 | `fill(value)` | LineEdit / TextEdit / SpinBox 等への書き込み | actionable + **editable** |
 | `select(value)` | ComboBox / Tab / List の選択 | actionable |
-| `check()` | CheckBox / RadioButton を True に | actionable |
+| `check()` | CheckBox / RadioButton を True に。`cell=` で表・ツリーの行のチェック | actionable |
 | `uncheck()` | 同 False に | actionable |
 | `close()` | その widget の窓を、× を押したときと同じく閉じる | actionable |
 | `read_rows()` | 表・ツリー・リストの行を上限なしに読む（下の「表の行を全部読む」） | visible |
@@ -1329,6 +1364,9 @@ expect(table).to_have_row_count(2500)            # 行の数を待つ
   （`"checked"` / `"unchecked"` / `"partial"`、チェックの無いセルは `None`）/ `"tooltip"`、
   または Qt のロールの番号（`UserRole + 1` など名前の無いもの）
 - `path` はツリーの段（上の「表の行」の `path` と同じ形）。その段の子の行を読む
+- 1 つのセルだけ読むなら、`E2EAutomationClient.read_cell(selector, cell, role=...)`
+  （MCP は `qgis_read_rows` に `cell`）。`cell` の形は `click(cell=...)` と同じで、
+  `{"cell": {...}, "value": 値}` を返す。`start` / `max_rows` / `path` とは一緒に使わない
 - リストは表示している列の 1 列で、`columns` は無い
 - データとして読むので、隠した行も読む。見えるまで待つが、無効な（灰色の）表も読める
 - Worker は 1 回に 1000 行までを返す。`Locator` / `E2EAutomationClient` は分けて読んで
@@ -1437,7 +1475,7 @@ expect(qgis.locator({"object_name": "status"})).to_have_text("Done", timeout_s=1
 | `to_have_text(s)` | `get_text()` 完全一致 |
 | `to_contain_text(s)` | `get_text()` 部分一致 |
 | `to_have_value(v)` | `get_value()` 一致 |
-| `to_be_checked()` | `get_value()` が True |
+| `to_be_checked()` | `get_value()` が True。`cell=` で表・ツリーの行のチェック（上の「行のチェックを付け外す」） |
 | `to_have_count(n)` | selector に当たる見えている widget の数 |
 | `to_have_row_count(n)` | 表・ツリー・リストの行の数（snapshot の `row_count` で、100 行の上限は効かない。ツリーは一番上の段の数） |
 
@@ -2649,8 +2687,8 @@ QGIS が複数あると `instance_ambiguous`）。
 | | `qgis_render_map` | 範囲・CRS・サイズ・DPI・レイヤを決めて地図を PNG に描く（[画像スナップショット](#map-image-snapshot)） |
 | UI（[Selector](#selector-リファレンス)） | `qgis_snapshot_ui` | UI の widget ツリーを JSON で返す |
 | | `qgis_click_widget` | widget をクリックする |
-| | `qgis_set_widget_value` | widget に値を入れる |
-| | `qgis_read_rows` | 表・ツリー・リストの行を読む（snapshot の 100 行の上限なし） |
+| | `qgis_set_widget_value` | widget に値を入れる（`cell` で表・ツリーの行のチェックを付け外す） |
+| | `qgis_read_rows` | 表・ツリー・リストの行を読む（snapshot の 100 行の上限なし。`cell` で 1 つのセル） |
 | | `qgis_close_widget` | widget の窓を、人が × を押したときと同じく閉じる |
 | | `qgis_check_actionability` | 操作できる状態か（在るか、見えるか、有効か、モーダルに隠れていないか、値を入れられるか）を待たずに読む |
 | | `qgis_wait_for` | widget が見える・押せるようになる、文字や値が変わる、モーダルの窓やポップアップのメニューが出る・閉じる、を待つ（[MCP の操作記録](#mcp-recording) に pytest での書き方） |

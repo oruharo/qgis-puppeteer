@@ -326,24 +326,56 @@ class Locator:
         )
 
     def check(
-        self, *, timeout_s: float | None = None, wait: bool = True, verify: bool = True
+        self,
+        *,
+        timeout_s: float | None = None,
+        wait: bool = True,
+        verify: bool = True,
+        cell: dict[str, Any] | int | None = None,
     ) -> dict[str, Any]:
-        """actionable になるまで待ってから checked=True を設定。"""
+        """actionable になるまで待ってから checked=True を設定。
+
+        ``cell`` を渡すと、表・ツリー・リストのその行のチェックを付ける（``cell`` の
+        形は :meth:`click` と同じ）。QGIS のレイヤツリーの凡例の分類も指せる::
+
+            tree.check(cell={"path": ["条件", "道路", "国道"]})
+            layers.uncheck(cell={"path": ["roads", "primary"]})  # レイヤの下の分類
+
+        人がそのチェックを押せる行（項目が有効で、チェックできる）だけで、押せなければ
+        ``WidgetOperationError``（``cell_not_checkable`` / ``cell_disabled`` など）。
+        畳まれた段は開く。人のクリックと同じく ``itemChanged`` / ``dataChanged`` が出る。
+        """
         self._wait_actionable(timeout_s=timeout_s)
         return self._client.set_widget_value(
-            self._effective_selector(), True, wait=wait, verify=verify, instance=self._instance
+            self._effective_selector(),
+            True,
+            wait=wait,
+            verify=verify,
+            cell=cell,
+            instance=self._instance,
         )
 
     def uncheck(
-        self, *, timeout_s: float | None = None, wait: bool = True, verify: bool = True
+        self,
+        *,
+        timeout_s: float | None = None,
+        wait: bool = True,
+        verify: bool = True,
+        cell: dict[str, Any] | int | None = None,
     ) -> dict[str, Any]:
         """actionable になるまで待ってから checked=False を設定。
 
         グループの中で排他のラジオボタンは、外せないので ``WidgetOperationError``。
+        ``cell`` は :meth:`check` と同じ。
         """
         self._wait_actionable(timeout_s=timeout_s)
         return self._client.set_widget_value(
-            self._effective_selector(), False, wait=wait, verify=verify, instance=self._instance
+            self._effective_selector(),
+            False,
+            wait=wait,
+            verify=verify,
+            cell=cell,
+            instance=self._instance,
         )
 
     # ------------------------------------------------------------

@@ -796,6 +796,36 @@ class TestMcpGatewayWidgetFailures:
             "path": ["道路"],
         }
 
+    def test_read_rows_with_cell_sends_no_start(self) -> None:
+        result, seen = self._call(
+            "qgis_read_rows",
+            {"success": True, "cell": {"row": 0, "column": 0}, "value": "checked"},
+            selector={"object_name": "t"},
+            cell={"path": ["a", "b"]},
+            role="check",
+        )
+        assert not result.is_error
+        assert seen == {
+            "selector": {"object_name": "t"},
+            "role": "check",
+            "cell": {"path": ["a", "b"]},
+        }
+
+    def test_set_widget_value_passes_the_cell(self) -> None:
+        result, seen = self._call(
+            "qgis_set_widget_value",
+            {"success": True, "value_after": "checked"},
+            selector={"object_name": "t"},
+            value=True,
+            cell={"path": ["a", "b"]},
+        )
+        assert not result.is_error
+        assert seen == {
+            "selector": {"object_name": "t"},
+            "value": True,
+            "cell": {"path": ["a", "b"]},
+        }
+
     def test_close_is_passed_with_wait(self) -> None:
         """#34"""
         result, seen = self._call(

@@ -434,11 +434,15 @@ def read_rows(params: dict, iface: Any = None) -> dict:
         - ``role``: 読む値。``"display"``（既定。表示の値）/ ``"edit"`` / ``"user"``
           （行に持たせた ID など）/ ``"check"``（``checked`` / ``unchecked`` /
           ``partial``、チェックの無いセルは None）/ ``"tooltip"``、または Qt のロールの番号
+        - ``cell``: 1 つのセルだけ読む（``click`` の ``cell`` と同じ形。:func:`_resolve_row`）。
+          ``start`` / ``max_rows`` / ``path`` とは一緒に使わない
 
     Returns:
         ``{"success": True, "columns": [...], "rows": [[...]], "row_count": n,
         "start": s}``。リストは 1 列（表示している列）で ``columns`` は無い。
         隠した行も読む（データとして読むため。``setRowHidden`` を見るなら snapshot）。
+        ``cell`` 付きなら ``{"success": True, "cell": {"row", "column", ...}, "value": 値}``
+        （行を探す規則は ``click`` と同じなので、隠した行は ``row_hidden``）。
     """
     del iface
     # 読むだけなので、無効な（灰色の）表も読む
@@ -463,6 +467,8 @@ def read_rows(params: dict, iface: Any = None) -> dict:
     else:
         return _invalid(widget, role_name, f"role: one of {sorted(_ROLES)} or a Qt role number")
     model = widget.model()
+    if params.get("cell") is not None:
+        return _read_cell(widget, params, role)
     parent = widget.rootIndex()
     if params.get("path") is not None:
         index, error = _resolve_row(widget, {"path": params["path"]})
@@ -480,9 +486,7 @@ def read_rows(params: dict, iface: Any = None) -> dict:
             data = model.index(row, column, parent).data(role)
         except Exception:  # noqa: BLE001 - 読めないセルは None
             return None
-        if role == Qt.ItemDataRole.CheckStateRole:
-            return None if data is None else _CHECK_STATES.get(int(data), str(data))
-        return _jsonable(data)
+        return _role_value(data, role)
 
     result: dict[str, Any] = {
         "success": True,
@@ -493,6 +497,48 @@ def read_rows(params: dict, iface: Any = None) -> dict:
     if not is_list:
         result["columns"] = [_display_header(model, c) for c in columns]
     return result
+
+
+def _read_cell(widget: QAbstractItemView, params: dict, role: Any) -> dict:
+    """``read_rows`` の ``cell`` 付き：1 つのセルの値を読む。"""
+    mixed = [k for k in ("max_rows", "path") if params.get(k) is not None]
+    if params.get("start") not in (None, 0):
+        mixed.insert(0, "start")
+    if mixed:
+        return _invalid(widget, params["cell"], f"cell without {', '.join(mixed)}")
+    index, error = _resolve_row(widget, params["cell"])
+    if error is not None:
+        return error
+    try:
+        data = index.data(role)
+    except Exception:  # noqa: BLE001 - 読めないセルは None
+        data = None
+    return {
+        "success": True,
+        "cell": _cell_summary(widget, index),
+        "value": _role_value(data, role),
+    }
+
+
+def _role_value(data: Any, role: Any) -> Any:
+    """セルの値を返す形にする。チェックは ``checked`` / ``unchecked`` / ``partial``。"""
+    if role == Qt.ItemDataRole.CheckStateRole:
+        return _check_state(data)
+    return _jsonable(data)
+
+
+def _check_state(data: Any) -> str | None:
+    """CheckStateRole の値を名前にする（チェックの無いセルは None）。
+
+    Qt6 の PyQt は ``Qt.CheckState`` の enum で返すので、番号は ``value`` から読む。
+    """
+    if data is None:
+        return None
+    number = getattr(data, "value", data)
+    try:
+        return _CHECK_STATES.get(int(number), str(data))
+    except (TypeError, ValueError):
+        return str(data)
 
 
 def close_widget(selector: dict, iface: Any = None, *, wait: bool = True) -> dict:
@@ -939,7 +985,13 @@ def _row_hidden(view: QAbstractItemView, row: int, root: Any) -> bool:
 
 
 def set_widget_value(
-    selector: dict, value: Any, iface=None, *, wait: bool = True, verify: bool = True
+    selector: dict,
+    value: Any,
+    iface=None,
+    *,
+    wait: bool = True,
+    verify: bool = True,
+    cell: Any = None,
 ) -> dict:
     """Set a value on a widget located by selector.
 
@@ -971,6 +1023,12 @@ def set_widget_value(
             値を自分で直す欄（表示用に日付を整形する ``QLineEdit`` の派生など）に
             使う。比べるかどうかをクラスでは分けない：部品ごとの一覧を持つと、
             部品の増減や版ごとの違いに追われるので、ホストの部品の知識は利用側に置く。
+        cell: 表・ツリー・リストの行のチェックを付け外す（``value`` は true / false）。
+            行の指定は ``click`` の ``cell`` と同じ（:func:`_resolve_row`）。人がそのセルの
+            チェックを押せるとき（項目が有効で ``ItemIsUserCheckable``、列が見えている）
+            だけ、モデルの ``setData(..., CheckStateRole)`` で入れる。人のクリックと同じく
+            ``itemChanged`` / ``dataChanged`` が出る。畳まれた段は開く（``expanded``）。
+            値は ``"checked"`` / ``"unchecked"`` / ``"partial"`` の文字で返る。
 
     Returns:
         Dictionary with success flag, prior value, value after, and widget metadata.
@@ -984,8 +1042,8 @@ def set_widget_value(
     if error is not None:
         return error
     if wait:
-        return _apply_widget_value(widget, value, verify=verify)
-    return _queue_widget_value(widget, value, verify=verify)
+        return _apply_widget_value(widget, value, verify=verify, cell=cell)
+    return _queue_widget_value(widget, value, verify=verify, cell=cell)
 
 
 _DATE_FORMAT = "yyyy-MM-dd"
@@ -997,20 +1055,20 @@ _DATETIME_FORMAT = "yyyy-MM-ddTHH:mm:ss"
 _BOOL_STRINGS = {"true": True, "false": False}
 
 
-def _apply_widget_value(widget: Any, value: Any, *, verify: bool = True) -> dict:
+def _apply_widget_value(widget: Any, value: Any, *, verify: bool = True, cell: Any = None) -> dict:
     """`set_widget_value` の本体：解決済みの widget に値を入れ、読み直して確かめる。"""
-    prepared = _prepare_widget_value(widget, value)
+    prepared = _prepare(widget, value, cell)
     if "error" in prepared:
         return _masked(widget, prepared)
     return _masked(widget, _set_and_verify(widget, value, prepared, verify=verify))
 
 
-def _queue_widget_value(widget: Any, value: Any, *, verify: bool = True) -> dict:
+def _queue_widget_value(widget: Any, value: Any, *, verify: bool = True, cell: Any = None) -> dict:
     """``wait=False`` の値の設定：入れる前の確認だけその場で行い、残りを積む。"""
-    prepared = _prepare_widget_value(widget, value)
+    prepared = _prepare(widget, value, cell)
     if "error" in prepared:
         return _masked(widget, prepared)
-    prior = _read_value(widget)
+    prior = _reader(widget, prepared)()
 
     def run() -> dict:
         return _masked(widget, _set_and_verify(widget, value, prepared, verify=verify))
@@ -1022,14 +1080,29 @@ def _queue_widget_value(widget: Any, value: Any, *, verify: bool = True) -> dict
         "widget": _widget_summary(widget),
         "prior_value": prior,
     }
+    if "cell" in prepared:
+        result["cell"] = prepared["cell"]
     if prepared.get("expanded"):
         result["expanded"] = prepared["expanded"]
     return _masked(widget, result)
 
 
+def _prepare(widget: Any, value: Any, cell: Any) -> dict:
+    """入れる前の確認。``cell`` 付きは行のチェック（:func:`_prepare_cell_check`）。"""
+    if cell is None:
+        return _prepare_widget_value(widget, value)
+    return _prepare_cell_check(widget, cell, value)
+
+
+def _reader(widget: Any, prepared: dict) -> Callable[[], Any]:
+    """値を読む処理。行のチェックは ``prepared["read"]``、ほかは :func:`_read_value`。"""
+    return prepared.get("read") or (lambda: _read_value(widget))
+
+
 def _set_and_verify(widget: Any, value: Any, prepared: dict, *, verify: bool) -> dict:
     """``prepared["apply"]`` で値を入れ、読み直して ``prepared["expected"]`` と比べる。"""
-    prior = _read_value(widget)
+    read = _reader(widget, prepared)
+    prior = read()
     try:
         prepared["apply"]()
     except Exception as exc:  # noqa: BLE001 - Qt / 利用側の slot の失敗を返す
@@ -1039,13 +1112,15 @@ def _set_and_verify(widget: Any, value: Any, prepared: dict, *, verify: bool) ->
             "message": str(exc),
             "widget": _widget_summary(widget),
         }
-    after = _read_value(widget)
+    after = read()
     result: dict[str, Any] = {
         "success": True,
         "widget": _widget_summary(widget),
         "prior_value": prior,
         "value_after": after,
     }
+    if "cell" in prepared:
+        result["cell"] = prepared["cell"]
     if isinstance(widget, QLineEdit) and widget.validator() is not None:
         # setText は validator を通さない。入った文字が受け付けられる形かを添える
         result["acceptable_input"] = widget.hasAcceptableInput()
@@ -1061,6 +1136,7 @@ def _set_and_verify(widget: Any, value: Any, prepared: dict, *, verify: bool) ->
             "expected": expected,
             "value_after": after,
             "prior_value": prior,
+            **({"cell": prepared["cell"]} if "cell" in prepared else {}),
             "widget": _widget_summary(widget),
         }
     return result
@@ -1188,6 +1264,93 @@ def _prepare_widget_value(widget: Any, value: Any) -> dict:  # noqa: C901 - widg
         "error": "unsupported_widget_type",
         "widget": _widget_summary(widget),
     }
+
+
+def _prepare_cell_check(widget: Any, cell: Any, value: Any) -> dict:
+    """表・ツリー・リストの行のチェックを付け外す前の確認（``cell`` 付きの値の設定）。
+
+    人がそのチェックを押せるときだけ入れる：項目が有効（``ItemIsEnabled``）で、人が
+    チェックできる（``ItemIsUserCheckable`` で、チェックの欄が出ている）、列が見えて
+    いる。行の指定・隠した行・開けないツリーの扱いは ``click`` の ``cell`` と同じ。
+    入れるのはモデルの
+    ``setData``（delegate がクリックで呼ぶのと同じ）なので、``itemChanged`` /
+    ``dataChanged`` も、QGIS のレイヤツリーなら凡例の分類の表示の切り替えも、人の
+    クリックと同じく起きる。
+    """
+    if not isinstance(widget, QAbstractItemView) or widget.model() is None:
+        return {"success": False, "error": "cell_needs_a_view", "widget": _widget_summary(widget)}
+    checked = _as_bool(value)
+    if checked is None:
+        return _invalid(widget, value, "true / false")
+    index, error = _resolve_row(widget, cell)
+    if error is not None:
+        return error
+    summary = _cell_summary(widget, index)
+    if isinstance(widget, (QTableView, QTreeView)) and not _column_shown(
+        widget, _column_header(widget), index.column()
+    ):
+        return {
+            "success": False,
+            "error": "column_hidden",
+            "cell": summary,
+            "widget": _widget_summary(widget),
+        }
+    flags = index.flags()
+    if not flags & Qt.ItemIsEnabled:
+        return {
+            "success": False,
+            "error": "cell_disabled",
+            "cell": summary,
+            "widget": _widget_summary(widget),
+        }
+    state_now = _check_state(index.data(Qt.ItemDataRole.CheckStateRole))
+    # チェックの欄は、CheckStateRole に値のあるセルにだけ描かれる（QTreeWidgetItem は
+    # 既定で ItemIsUserCheckable を持つが、欄が無ければ人には押せない）
+    if not flags & Qt.ItemIsUserCheckable or state_now is None:
+        error = {
+            "success": False,
+            "error": "cell_not_checkable",
+            "cell": summary,
+            "check_state": state_now,
+            "widget": _widget_summary(widget),
+        }
+        if not isinstance(widget, QListView):
+            error["hint"] = "point at the column that has the check box with column"
+        return error
+    collapsed, error = _collapsed_ancestors(widget, index)
+    if error is not None:
+        return error
+    persistent = QPersistentModelIndex(index)
+    # Qt5 / Qt6 のどちらのモデルも CheckStateRole は番号で受ける
+    state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+    number = int(getattr(state, "value", state))
+
+    def current() -> Any:
+        return widget.model().index(persistent.row(), persistent.column(), persistent.parent())
+
+    def apply() -> None:
+        if not persistent.isValid():
+            raise RuntimeError("the row was removed before it was checked")
+        target = current()
+        _expand_ancestors(widget, target)  # 人と同じく、畳まれた段を開いてから押す
+        widget.scrollTo(target)
+        if not widget.model().setData(target, number, Qt.ItemDataRole.CheckStateRole):
+            raise RuntimeError("the model refused the check state (setData returned False)")
+
+    def read() -> str | None:
+        if not persistent.isValid():
+            return None
+        return _check_state(current().data(Qt.ItemDataRole.CheckStateRole))
+
+    prepared: dict[str, Any] = {
+        "apply": apply,
+        "expected": "checked" if checked else "unchecked",
+        "read": read,
+        "cell": summary,
+    }
+    if collapsed:
+        prepared["expanded"] = collapsed
+    return prepared
 
 
 def _prepare_date_time(widget: Any, value: Any) -> dict:

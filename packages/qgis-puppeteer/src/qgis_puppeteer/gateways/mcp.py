@@ -1705,6 +1705,7 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
         max_rows: int | None = None,
         path: list[str | int] | None = None,
         role: str | int = "display",
+        cell: dict[str, Any] | int | None = None,
         instance: InstanceArg = None,
     ) -> str | CallToolResult:
         """表・ツリー・リストの行を読む（snapshot の 100 行の上限なし）。
@@ -1713,8 +1714,16 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
         ツリーの段（["グループ", "レイヤ"] など）で、その段の子の行を読む。role は読む値で、
         display（既定）/ edit / user（行に持たせた ID など）/ check（checked / unchecked /
         partial）/ tooltip、または Qt のロールの番号。
+
+        cell は 1 つのセルだけ読む（qgis_click_widget の cell と同じ形。start / max_rows /
+        path とは一緒に使わない）。{"cell": {"row", "column", "path"}, "value": 値} を返す。
+        ツリーの行のチェックを確かめるなら role="check"。
         """
-        params: dict[str, Any] = {"selector": selector, "start": start, "role": role}
+        params: dict[str, Any] = {"selector": selector, "role": role}
+        if cell is not None:
+            params["cell"] = cell
+        elif start:
+            params["start"] = start
         if max_rows is not None:
             params["max_rows"] = max_rows
         if path is not None:
@@ -1754,6 +1763,7 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
         value: Any,
         wait: bool = True,
         verify: bool = True,
+        cell: dict[str, Any] | int | None = None,
         instance: InstanceArg = None,
     ) -> str | CallToolResult:
         """UI ウィジェットに値を設定する。
@@ -1771,10 +1781,18 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
 
         wait は qgis_click_widget と同じ（値の変更に結ばれた処理が確認を出す場合用）。
         wait=false でも prior_value は積む前の値を返す。
+
+        cell 付きなら、表・ツリー・リストのその行のチェックを付け外す（value は true /
+        false。cell の形は qgis_click_widget と同じ。ツリーの子の行は {"path": [...]}、
+        QGIS のレイヤツリーの凡例の分類もこれで指す）。人がチェックを押せる行だけで、
+        押せなければ cell_not_checkable / cell_disabled / column_hidden。畳まれた段は
+        開く。値は "checked" / "unchecked" / "partial" で返る。
         """
         params: dict[str, Any] = {"selector": selector, "value": value}
         if not verify:
             params["verify"] = False
+        if cell is not None:
+            params["cell"] = cell
         return await _call(
             ctx,
             "qgis_set_widget_value",

@@ -74,6 +74,7 @@ class _FakeClient:
         *,
         wait: bool = True,
         verify: bool = True,
+        cell: Any = None,
         instance: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"selector": selector, "value": value}
@@ -81,6 +82,8 @@ class _FakeClient:
             params["wait"] = False
         if not verify:
             params["verify"] = False
+        if cell is not None:
+            params["cell"] = cell
         self.calls.append(("qgis_set_widget_value", params, instance))
         return self._take("qgis_set_widget_value")
 
@@ -647,6 +650,27 @@ class TestAutoWaitVariants:
         loc = Locator(client, {"object_name": "agree"})
         loc.uncheck()
         assert client.calls[-1][1]["value"] is False
+
+    def test_check_and_uncheck_pass_the_cell(self) -> None:
+        """ツリーの行のチェックは、値の設定に ``cell`` を付けて送る。"""
+        client = _FakeClient(
+            {
+                "qgis_check_actionability": [self._ok_check()] * 2,
+                "qgis_set_widget_value": [{"success": True}] * 2,
+            }
+        )
+        loc = Locator(client, {"object_name": "layers"})
+        loc.check(cell={"path": ["roads", "primary"]})
+        loc.uncheck(cell=2)
+        sent = [c[1] for c in client.calls if c[0] == "qgis_set_widget_value"]
+        assert sent == [
+            {
+                "selector": {"object_name": "layers"},
+                "value": True,
+                "cell": {"path": ["roads", "primary"]},
+            },
+            {"selector": {"object_name": "layers"}, "value": False, "cell": 2},
+        ]
 
 
 # ============================================================

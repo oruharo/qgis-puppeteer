@@ -792,6 +792,30 @@ class E2EAutomationClient:
             out["columns"] = result["columns"]
         return out
 
+    def read_cell(
+        self,
+        selector: dict[str, Any],
+        cell: dict[str, Any] | int,
+        *,
+        role: str | int = "display",
+        instance: str | None = None,
+    ) -> dict[str, Any]:
+        """表・ツリー・リストの 1 つのセルを読む（``qgis_read_rows`` の ``cell``）。
+
+        ``cell`` の形は :meth:`click_widget` と同じ。``role="check"`` でチェックの状態
+        （``"checked"`` / ``"unchecked"`` / ``"partial"``、チェックの無いセルは None）。
+
+        Returns:
+            ``{"cell": {"row", "column", "path"}, "value": 値}``。
+
+        Raises:
+            WidgetOperationError: 読めなかった（見つからない・行が無いなど）。
+        """
+        params = {"selector": selector, "cell": cell, "role": role}
+        result = self.call("qgis_read_rows", params, instance=instance)
+        _raise_for_widget_result("qgis_read_rows", result)
+        return result
+
     def close_widget(
         self,
         selector: dict[str, Any],
@@ -821,6 +845,7 @@ class E2EAutomationClient:
         *,
         wait: bool = True,
         verify: bool = True,
+        cell: dict[str, Any] | int | None = None,
         instance: str | None = None,
     ) -> dict[str, Any]:
         """`qgis_set_widget_value` を呼ぶ。
@@ -834,12 +859,18 @@ class E2EAutomationClient:
         分かる失敗（範囲外の番号など）だけが例外になり、入れたあとの失敗は
         ``get_recent_exceptions()`` に残る。
 
+        ``cell`` 付きなら、表・ツリー・リストのその行のチェックを付け外す（``value`` は
+        真偽値。``cell`` の形は :meth:`click_widget` と同じ）。値は ``"checked"`` /
+        ``"unchecked"`` / ``"partial"`` で返る。
+
         Raises:
             WidgetOperationError: 入れられなかった、または入った値が違った（#23）。
         """
         params: dict[str, Any] = {"selector": selector, "value": value}
         if not verify:
             params["verify"] = False
+        if cell is not None:
+            params["cell"] = cell
         result = self.call("qgis_set_widget_value", _with_wait(params, wait), instance=instance)
         _raise_for_widget_result("qgis_set_widget_value", result)
         return result

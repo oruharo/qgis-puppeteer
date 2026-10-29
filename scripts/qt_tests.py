@@ -48,6 +48,7 @@ QT_TEST_FILES = [
     "packages/qgis-puppeteer/tests/test_ui_tools_set_value.py",
     "packages/qgis-puppeteer/tests/test_ui_tools_table_rows.py",
     "packages/qgis-puppeteer/tests/test_ui_tools_tree_paths.py",
+    "packages/qgis-puppeteer/tests/test_ui_tools_row_checks.py",
     "packages/qgis-puppeteer/tests/test_ui_tools_read_rows.py",
     "packages/qgis-puppeteer/tests/test_ui_tools_file_widget.py",
     "packages/qgis-puppeteer/tests/test_ui_tools_close.py",

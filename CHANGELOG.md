@@ -8,6 +8,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Check boxes in table, tree and list rows can be set.** `check()` and
+  `uncheck()` only worked on check boxes and radio buttons, so a test that had
+  to tick a row of a tree of conditions, or turn off one class of a layer's
+  legend in the layer tree, called `setCheckState` or the layer tree model
+  through `execute_python`. `Locator.check(cell=...)` / `uncheck(cell=...)`
+  (MCP: `qgis_set_widget_value` with `cell`) now set the check box of the row
+  that `cell` names, in the same forms as `click(cell=...)`, opening collapsed
+  parents. They set it only when a person could click it (the item is enabled,
+  user-checkable and shows a check box, and its column is shown), through the
+  model's `setData` as the item delegate does, so `itemChanged` /
+  `dataChanged` and the legend's own handling run as for a click; the check
+  state is read back as `"checked"` / `"unchecked"` / `"partial"`.
+  `expect(locator).to_be_checked(cell=...)` waits for it, and
+  `E2EAutomationClient.read_cell()` (MCP: `qgis_read_rows` with `cell`) reads
+  one cell.
+
 - **`qgis_wait_for` MCP tool.** An MCP client had no way to wait: after a
   `wait=false` click it called `qgis_snapshot_ui` again and again to see
   whether a dialog had opened or a button had become enabled, each time

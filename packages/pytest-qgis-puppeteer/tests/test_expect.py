@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 from pytest_qgis_puppeteer import LiveOnlySelectorError, expect
+from pytest_qgis_puppeteer.automation_client import WidgetOperationError
 from pytest_qgis_puppeteer.locator import Locator, SelectorAmbiguousError
 
 # ============================================================
@@ -50,6 +51,22 @@ class _FakeClient:
             ("qgis_snapshot_ui", {"include_main_window": include_main_window}, instance)
         )
         return self._take("qgis_snapshot_ui")
+
+    def read_cell(
+        self,
+        selector: dict[str, Any],
+        cell: Any,
+        *,
+        role: str | int = "display",
+        instance: str | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            ("qgis_read_rows", {"selector": selector, "cell": cell, "role": role}, instance)
+        )
+        result = self._take("qgis_read_rows")
+        if not result.get("success"):
+            raise WidgetOperationError("qgis_read_rows", result)
+        return result
 
 
 # ============================================================
@@ -443,6 +460,72 @@ class TestPerCallTimeout:
         loc = Locator(client, {"object_name": "btn"})
         with pytest.raises(AssertionError):
             expect(loc).to_be_visible(timeout_s=0.1)
+
+
+# ============================================================
+# to_be_checked(cell=...)：表・ツリーの行のチェック
+# ============================================================
+
+
+def _cell(state: str | None) -> dict[str, Any]:
+    return {"success": True, "cell": {"row": 0, "column": 0, "path": [1, 0]}, "value": state}
+
+
+class TestToBeCheckedCell:
+    @pytest.fixture(autouse=True)
+    def _no_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("pytest_qgis_puppeteer._expect.time.sleep", lambda _s: None)
+
+    def test_waits_until_the_row_is_checked(self) -> None:
+        client = _FakeClient(
+            {
+                "qgis_check_actionability": [_act_result()] * 3,
+                "qgis_read_rows": [
+                    {"success": False, "error": "row_not_found"},
+                    _cell("unchecked"),
+                    _cell("checked"),
+                ],
+            }
+        )
+        loc = Locator(client, {"object_name": "layers"})
+        expect(loc).to_be_checked(cell={"path": ["roads", "primary"]})
+        reads = [c[1] for c in client.calls if c[0] == "qgis_read_rows"]
+        assert reads[-1] == {
+            "selector": {"object_name": "layers"},
+            "cell": {"path": ["roads", "primary"]},
+            "role": "check",
+        }
+
+    @pytest.mark.parametrize("state", ["unchecked", "partial"])
+    def test_not_is_met_by_unchecked_and_partial(self, state: str) -> None:
+        client = _FakeClient(
+            {"qgis_check_actionability": [_act_result()], "qgis_read_rows": [_cell(state)]}
+        )
+        expect(Locator(client, {"object_name": "layers"})).not_.to_be_checked(cell=0)
+
+    @pytest.mark.parametrize("negated", [False, True])
+    def test_a_cell_without_a_check_box_meets_neither(
+        self, monkeypatch: pytest.MonkeyPatch, negated: bool
+    ) -> None:
+        ticks = iter([0.0, 0.0, 10.0])
+        monkeypatch.setattr("pytest_qgis_puppeteer._expect.time.monotonic", lambda: next(ticks))
+        client = _FakeClient(
+            {"qgis_check_actionability": [_act_result()] * 2, "qgis_read_rows": [_cell(None)] * 2}
+        )
+        assertions = expect(Locator(client, {"object_name": "layers"}))
+        if negated:
+            assertions = assertions.not_
+        with pytest.raises(AssertionError, match="the cell has no check box"):
+            assertions.to_be_checked(cell=0, timeout_s=1.0)
+
+    def test_a_missing_widget_is_not_read_and_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ticks = iter([0.0, 0.0, 10.0])
+        monkeypatch.setattr("pytest_qgis_puppeteer._expect.time.monotonic", lambda: next(ticks))
+        client = _FakeClient({"qgis_check_actionability": [_act_result(exists=False)] * 2})
+        with pytest.raises(AssertionError, match="widget_not_found"):
+            expect(Locator(client, {"object_name": "layers"})).not_.to_be_checked(
+                cell=0, timeout_s=1.0
+            )
 
 
 # ============================================================
