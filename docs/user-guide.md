@@ -2903,14 +2903,35 @@ coverage が有効化される。
 5. QGIS を起こした直後なら、Hub がまだ待ち受けていないだけのことがある。
    `qgis_wait_ready` を先に呼ぶ。これは Hub が現れるまで `timeout_s` の内で待つ
 
+### `instance_timeout`
+
+**症状**: 呼び出しが `instance_timeout` で返る（MCP ツールなら
+`{"error": {"code": "instance_timeout", ...}}`、pytest なら `RequestError`）。
+メッセージに "QGIS did not reply to ... within N ms" とある。
+
+**原因**: QGIS が待つ時間（`timeout_ms`、既定 30 秒）の内に応答しなかった。
+modal ダイアログが開いたまま、または重い処理の途中で、QGIS がほかのことを
+受け付けていないことが多い。
+
+- QGIS がまだその要求を読んでいなかったなら、あとで読んだときに **実行せずに
+  捨てる**（期限切れ。QGIS のログに "Dropped expired request" と出る）。時間切れの
+  あとで、誰も結果を知らない操作が QGIS で走ることはない
+- 読んだあとで時間がかかっていたなら、その操作は **終わるかもしれない**
+
+**対処**: QGIS の画面で、開いている modal が無いか、処理が終わったかを見る。
+同じ操作をもう一度頼む前に、`qgis_snapshot_ui` などでその操作が済んでいるかを
+確かめる。時間のかかる操作なら待つ時間を伸ばす（`qgis_puppeteer.client.AutomationClient`
+の `request_timeout=` か `call(..., timeout_ms=...)`）。
+
 ### `request_timeout` / `connection_lost`
 
 **症状**: MCP ツールが `{"error": {"code": "request_timeout", ...}}` または
 `"connection_lost"` で返る。メッセージに "The command may have run in QGIS" とある。
 
-**原因**: 要求は Hub に送ったが、応答が来なかった。`request_timeout` は応答を待つ
-時間を過ぎた、`connection_lost` は応答の前に Hub との接続が切れた。どちらも、
-**コマンドは QGIS で実行されたかもしれない**。
+**原因**: 要求は Hub に送ったが、応答が来なかった。`request_timeout` は Hub 自身が
+時間内に返事をしなかった（QGIS が遅いだけなら Hub が `instance_timeout` を返すので、
+これは Hub が止まっているか、とても忙しい）、`connection_lost` は応答の前に Hub との
+接続が切れた。どちらも、**コマンドは QGIS で実行されたかもしれない**。
 
 gateway はこのとき同じ要求を送り直さない。送り直すと、クリックや Python の実行が
 QGIS で 2 回走ることがある。送り直すのは、要求が Hub に届いていないと分かって

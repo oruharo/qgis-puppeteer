@@ -11,6 +11,8 @@ import json
 
 import pytest
 from qgis_puppeteer.protocol import (
+    DEFAULT_REQUEST_TIMEOUT_MS,
+    MAX_REQUEST_TIMEOUT_MS,
     PROTOCOL_VERSION,
     AbandonLaunch,
     Bye,
@@ -29,6 +31,7 @@ from qgis_puppeteer.protocol import (
     Role,
     UpdateInfo,
     decode_message,
+    effective_timeout_ms,
     encode_message,
 )
 
@@ -120,6 +123,13 @@ class TestRoundTrip:
         assert decoded == msg
         assert isinstance(decoded, Request)
         assert decoded.caller_role is Role.AUTOMATION_CLIENT
+
+    def test_request_keeps_the_deadline_the_hub_set(self) -> None:
+        msg = Request(id="uuid-dl", command="qgis_ping", timeout_ms=5000, deadline=1_700_000_000.25)
+        decoded = decode_message(encode_message(msg))
+        assert decoded == msg
+        assert isinstance(decoded, Request)
+        assert decoded.deadline == 1_700_000_000.25
 
     def test_response_success(self) -> None:
         msg = Response(
@@ -384,3 +394,22 @@ class TestTypeProperty:
     )
     def test_type_property(self, message, expected: MessageType) -> None:
         assert message.type == expected
+
+
+class TestEffectiveTimeoutMs:
+    """Hub が待つ時間の決め方。"""
+
+    @pytest.mark.parametrize("raw", [None, "5000", True, [1], float("nan")])
+    def test_missing_or_not_a_number_uses_the_default(self, raw: object) -> None:
+        assert effective_timeout_ms(raw) == DEFAULT_REQUEST_TIMEOUT_MS
+
+    def test_a_number_is_used_as_is(self) -> None:
+        assert effective_timeout_ms(5000) == 5000
+        assert effective_timeout_ms(1500.7) == 1500
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [(0, 1), (-10, 1), (2**40, MAX_REQUEST_TIMEOUT_MS), (float("inf"), MAX_REQUEST_TIMEOUT_MS)],
+    )
+    def test_out_of_range_is_clamped(self, raw: float, expected: int) -> None:
+        assert effective_timeout_ms(raw) == expected

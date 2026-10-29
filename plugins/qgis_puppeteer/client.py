@@ -61,6 +61,9 @@ DEFAULT_HUB_URL: str = "ws://127.0.0.1:9876"
 # Origin ヘッダはデフォルトで "http://localhost"（ADR-0001 §9.2 で許可）
 DEFAULT_ORIGIN: str = "http://localhost"
 DEFAULT_REQUEST_TIMEOUT_SECONDS: float = 30.0
+# call() は Hub に timeout_ms を渡し、Hub が時間切れを instance_timeout で返す。
+# その返事が届くのを待つため、クライアントは timeout_ms よりこれだけ長く待つ
+_HUB_REPLY_GRACE_SECONDS: float = 1.0
 DEFAULT_REGISTER_TIMEOUT_SECONDS: float = 5.0
 # connect() 全体のタイムアウト（TCP + WebSocket ハンドシェイク）。
 # Hub 不在時に Windows の TCP SYN retry（〜20-40s）で Gateway がブロックするのを防ぐ。
@@ -395,7 +398,10 @@ class AutomationClient:
             command: Worker 側で解釈するコマンド名
             params: コマンド引数
             instance: selector（label / instance_id / project basename / pid）
-            timeout_ms: リクエスト個別のタイムアウト（Hub に伝搬）
+            timeout_ms: 待つ時間（ミリ秒）。省略すると ``request_timeout``。Hub に
+                渡し、Hub はこの時間が過ぎても QGIS が応答しなければ
+                ``instance_timeout`` を返す。QGIS がまだ読んでいなかった要求は
+                実行されずに捨てられる
 
         Returns:
             Response.result（任意の JSON 値）
@@ -405,12 +411,16 @@ class AutomationClient:
                 要求は届いていないので送り直してよい
             NotConnectedError: 送ったあと応答の前に接続が切れた。要求は実行
                 されたかもしれない
-            RequestError: response.ok=False（Hub / Worker のエラー応答）
-            asyncio.TimeoutError: クライアント側タイムアウト。要求は実行された
-                かもしれない
+            RequestError: response.ok=False（Hub / Worker のエラー応答）。時間内に
+                QGIS が応答しなかったときは code が ``instance_timeout``（要求は
+                実行されたかもしれない）
+            asyncio.TimeoutError: Hub が時間内に返事をしなかった。要求は実行
+                されたかもしれない
         """
         self._require_connected()
 
+        if timeout_ms is None:
+            timeout_ms = max(1, int(self._request_timeout * 1000))
         req_id = self._new_id()
         fut = self._make_future(req_id)
         await self._send(
@@ -422,7 +432,7 @@ class AutomationClient:
                 timeout_ms=timeout_ms,
             )
         )
-        msg = await self._await_reply(req_id, fut, timeout_ms)
+        msg = await self._await_reply(req_id, fut, timeout_ms / 1000.0 + _HUB_REPLY_GRACE_SECONDS)
 
         if not isinstance(msg, Response):
             raise RequestError(
@@ -457,7 +467,7 @@ class AutomationClient:
         req_id = self._new_id()
         fut = self._make_future(req_id)
         await self._send(ListInstancesRequest(id=req_id, include_disconnected=include_disconnected))
-        msg = await self._await_reply(req_id, fut, None)
+        msg = await self._await_reply(req_id, fut, self._request_timeout)
         if not isinstance(msg, ListInstancesResponse):
             raise RequestError(
                 Error(
@@ -486,7 +496,7 @@ class AutomationClient:
         req_id = self._new_id()
         fut = self._make_future(req_id)
         await self._send(ListInstancesRequest(id=req_id, include_rejected=True))
-        msg = await self._await_reply(req_id, fut, None)
+        msg = await self._await_reply(req_id, fut, self._request_timeout)
         if not isinstance(msg, ListInstancesResponse):
             raise RequestError(
                 Error(
@@ -691,12 +701,10 @@ class AutomationClient:
         self,
         req_id: str,
         fut: asyncio.Future[Message],
-        timeout_ms: int | None,
+        timeout_s: float,
     ) -> Message:
-        # タイムアウト決定：呼び出し側指定 > デフォルト
-        timeout = timeout_ms / 1000.0 if timeout_ms is not None else self._request_timeout
         try:
-            return await asyncio.wait_for(fut, timeout=timeout)
+            return await asyncio.wait_for(fut, timeout=timeout_s)
         except asyncio.TimeoutError:
             # ペンディングから除去（遅延応答は読み捨てになる）
             self._pending.pop(req_id, None)

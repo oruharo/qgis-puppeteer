@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -174,6 +175,8 @@ class WorkerState:
     instance_id: str | None = None
     # 切断後、次回接続で resume を試みるために保持する
     previous_instance_id: str | None = None
+    # request の deadline と比べる時計（Unix 時刻・秒）。テストで差し替える
+    clock: Callable[[], float] = field(default=time.time, repr=False)
 
     # ------------------------------------------------------------
     # ハンドラ管理（ADR-0001 §12）
@@ -278,11 +281,39 @@ class WorkerState:
     def on_request(self, req: Request) -> Response:
         """Request を適切なハンドラに dispatch して Response を合成する。
 
+        - deadline が過ぎている → REQUEST_EXPIRED（ハンドラは呼ばない）
         - 未知コマンド → INVALID_COMMAND
         - ハンドラ例外 → WORKER_EXECUTION_ERROR（例外型・メッセージを保持）
         - `test.*` を `AUTOMATION_CLIENT` 以外から呼んだ場合 → HANDLER_NOT_VISIBLE
           （ADR-0001 §12.7 caller_role による Tier 3 隔離）
         """
+        # 期限切れの request は実行しない。Worker は Qt メインスレッドで request を
+        # 読むので、GUI が塞がっている（modal・重い処理）間に届いた request は
+        # 塞がりが解けてから読まれる。そのころには送り主は instance_timeout を
+        # 受け取って諦めているので、ここで実行すると誰も知らない操作が QGIS で走る。
+        deadline = req.deadline
+        if isinstance(deadline, (int, float)) and not isinstance(deadline, bool):
+            late_by_s = self.clock() - deadline
+            if late_by_s > 0:
+                logger.info(
+                    "Dropped expired request %s (%s), %.3fs past its deadline",
+                    req.id,
+                    req.command,
+                    late_by_s,
+                )
+                return Response(
+                    id=req.id,
+                    ok=False,
+                    error=Error(
+                        code=ErrorCode.REQUEST_EXPIRED,
+                        message=(
+                            f"request {req.command!r} reached QGIS after its deadline "
+                            "and was not run"
+                        ),
+                        details={"command": req.command, "late_by_s": round(late_by_s, 3)},
+                    ),
+                )
+
         # caller_role による Tier 3 可視性チェック（ADR-0001 §12.9）。
         # プロトコル version 1 では Hub が必ず caller_role を注入するので、
         # `caller_role=None` は正常系では発生しない（Hub が介さない直接接続等の

@@ -68,6 +68,7 @@ from qgis_puppeteer.protocol import (
     Role,
     UpdateInfo,
     decode_message,
+    effective_timeout_ms,
     encode_message,
 )
 
@@ -383,7 +384,11 @@ class Hub(QObject):
         # ルーティング記録：origin（Client）と target（Worker）の双方を覚える。
         # target を持つことで Worker が途中で落ちたときに未完了 request を
         # 一括で失敗応答に切り替えられる（_on_disconnected 参照）。
-        self._inflight[req.id] = (conn_id, target_conn)
+        entry = (conn_id, target_conn)
+        self._inflight[req.id] = entry
+        # 待つ時間を決め、Worker が実行してよい期限（deadline）を付けて転送する。
+        # 期限を過ぎて Worker に読まれた request は実行されない（WorkerState.on_request）。
+        timeout_ms = effective_timeout_ms(req.timeout_ms)
         # ADR-0001 §12.7：Hub が register 時の role で caller_role を上書きして
         # Worker に転送する。Client 側からの申告（req.caller_role が既に
         # セットされていても）は信用しない。
@@ -393,16 +398,54 @@ class Hub(QObject):
             command=req.command,
             params=req.params,
             instance=req.instance,
-            timeout_ms=req.timeout_ms,
+            timeout_ms=timeout_ms,
+            deadline=time.time() + timeout_ms / 1000.0,
             caller_role=caller_role,
         )
         self._send(target_conn, forwarded)
+        QTimer.singleShot(
+            timeout_ms,
+            lambda rid=req.id, e=entry, cmd=req.command, ms=timeout_ms: self._expire_request(
+                rid, e, cmd, ms
+            ),
+        )
+
+    def _expire_request(
+        self, request_id: str, entry: tuple[str, str], command: str, timeout_ms: int
+    ) -> None:
+        """timeout_ms が過ぎても応答の無い request を送り主に instance_timeout で返す。"""
+        # 応答済み・切断で片づいた・同じ id の別 request に置き換わった、なら何もしない
+        if self._inflight.get(request_id) is not entry:
+            return
+        del self._inflight[request_id]
+        origin, _target = entry
+        logger.info("Request %s (%s) timed out after %d ms", request_id, command, timeout_ms)
+        if origin not in self._sockets:
+            return
+        self._send(
+            origin,
+            Response(
+                id=request_id,
+                ok=False,
+                error=Error(
+                    code=ErrorCode.INSTANCE_TIMEOUT,
+                    message=(
+                        f"QGIS did not reply to {command!r} within {timeout_ms} ms. "
+                        "If QGIS had not started it yet, QGIS drops it without running it; "
+                        "if it had, it may still finish. Check the state before sending "
+                        "it again."
+                    ),
+                    details={"timeout_ms": timeout_ms, "command": command},
+                ),
+            ),
+        )
 
     def _handle_response(self, conn_id: str, resp: Response) -> None:
         """Worker → Hub → 発信元 Client への返送。"""
         entry = self._inflight.pop(resp.id, None)
         if entry is None:
-            logger.warning("Response for unknown request id=%s", resp.id)
+            # Hub が instance_timeout を返したあとに届いた応答もここに来る
+            logger.info("Response for unknown request id=%s (timed out or abandoned)", resp.id)
             return
         origin, _target = entry
         if origin not in self._sockets:

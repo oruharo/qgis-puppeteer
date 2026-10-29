@@ -57,6 +57,8 @@ class FakeHub:
         self.rejected: list[dict[str, Any]] = []
         # request を受け取ったら転送せずに送り主の接続を切る（送ったあとの切断）
         self.drop_caller_on_request: bool = False
+        # request を転送せず、timeout_ms が過ぎたら instance_timeout を返す（本物の Hub の時間切れ）
+        self.time_out_requests: bool = False
         # Origin 検証モード（ws ハンドラでは検証できないのでテストでは無視）
 
     async def handler(self, ws: ServerConnection) -> None:
@@ -156,6 +158,23 @@ class FakeHub:
 
         if t == "request":
             self.received_requests.append(data)
+            if self.time_out_requests:
+                await asyncio.sleep(data["timeout_ms"] / 1000)
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "response",
+                            "id": data["id"],
+                            "ok": False,
+                            "error": {
+                                "code": ErrorCode.INSTANCE_TIMEOUT.value,
+                                "message": "QGIS did not reply in time",
+                                "details": {"timeout_ms": data["timeout_ms"]},
+                            },
+                        }
+                    )
+                )
+                return
             if self.drop_caller_on_request:
                 await ws.close()
                 return
@@ -684,7 +703,44 @@ class TestCall:
 
         _run(inner())
 
+    def test_call_sends_its_timeout_to_the_hub(self) -> None:
+        """timeout_ms を省いても request_timeout を Hub に渡す（Hub が時間切れを判定する）。"""
+
+        async def inner() -> None:
+            async with fake_hub_server() as (hub, url):
+                worker = _FakeWorker(url, label="solo", pid=1111)
+                await worker.start()
+                try:
+                    async with AutomationClient(url=url, request_timeout=2.5) as client:
+                        await client.call("cmd")
+                        await client.call("cmd", timeout_ms=700)
+                finally:
+                    await worker.stop()
+                assert [r["timeout_ms"] for r in hub.received_requests] == [2500, 700]
+
+        _run(inner())
+
+    def test_the_hubs_instance_timeout_reaches_the_caller(self) -> None:
+        """Hub が timeout_ms ちょうどに返す instance_timeout を、待ち切れずに捨てない。"""
+
+        async def inner() -> None:
+            async with fake_hub_server() as (hub, url):
+                hub.time_out_requests = True
+                worker = _FakeWorker(url, label="slow", pid=7)
+                await worker.start()
+                try:
+                    async with AutomationClient(url=url) as client:
+                        with pytest.raises(RequestError) as excinfo:
+                            await client.call("cmd", timeout_ms=200)
+                    assert excinfo.value.code == ErrorCode.INSTANCE_TIMEOUT
+                finally:
+                    await worker.stop()
+
+        _run(inner())
+
     def test_call_timeout(self) -> None:
+        """Hub も返事をしないときは timeout_ms に猶予を足したところで諦める。"""
+
         async def inner() -> None:
             async with fake_hub_server() as (_, url):
                 worker = _FakeWorker(url, label="slow", pid=7)

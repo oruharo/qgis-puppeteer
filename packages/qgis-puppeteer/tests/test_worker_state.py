@@ -200,6 +200,56 @@ class TestOnRequest:
 # ============================================================
 
 
+class TestExpiredRequest:
+    """deadline を過ぎて読まれた request は実行しない。"""
+
+    def _state(self, now: float, calls: list[dict[str, object]]) -> WorkerState:
+        state = WorkerState(config=WorkerConfig(pid=1), clock=lambda: now)
+        state.register_handler("click", lambda params: calls.append(params) or "clicked")
+        return state
+
+    def test_a_request_past_its_deadline_is_not_run(self) -> None:
+        calls: list[dict[str, object]] = []
+        state = self._state(1000.0, calls)
+
+        resp = state.on_request(Request(id="r1", command="click", params={"x": 1}, deadline=998.5))
+
+        assert calls == []
+        assert resp.ok is False
+        assert resp.id == "r1"
+        assert resp.error is not None
+        assert resp.error.code == ErrorCode.REQUEST_EXPIRED
+        assert resp.error.details == {"command": "click", "late_by_s": 1.5}
+
+    def test_a_request_within_its_deadline_is_run(self) -> None:
+        calls: list[dict[str, object]] = []
+        state = self._state(1000.0, calls)
+
+        resp = state.on_request(Request(id="r1", command="click", params={"x": 1}, deadline=1000.0))
+
+        assert calls == [{"x": 1}]
+        assert resp.ok is True
+        assert resp.result == "clicked"
+
+    def test_a_request_without_a_deadline_is_run(self) -> None:
+        calls: list[dict[str, object]] = []
+        state = self._state(1000.0, calls)
+
+        resp = state.on_request(Request(id="r1", command="click"))
+
+        assert calls == [{}]
+        assert resp.ok is True
+
+    def test_a_deadline_that_is_not_a_number_is_ignored(self) -> None:
+        calls: list[dict[str, object]] = []
+        state = self._state(1000.0, calls)
+
+        resp = state.on_request(Request(id="r1", command="click", deadline="soon"))  # type: ignore[arg-type]
+
+        assert calls == [{}]
+        assert resp.ok is True
+
+
 class TestHandlerNamespaceValidation:
     def test_register_core_handler_requires_qgis_prefix(self) -> None:
         state = WorkerState(config=WorkerConfig(pid=1))

@@ -21,6 +21,11 @@ from typing import Any
 # プロトコル互換性管理（ADR-0001 Open Questions 参照）
 PROTOCOL_VERSION: int = 1
 
+# request に timeout_ms が無いときに Hub が使う待ち時間（ミリ秒）
+DEFAULT_REQUEST_TIMEOUT_MS: int = 30_000
+# timeout_ms の上限。Hub は QTimer で待つので、その int の範囲に収める
+MAX_REQUEST_TIMEOUT_MS: int = 2**31 - 1
+
 
 # ============================================================
 # 列挙型
@@ -68,7 +73,11 @@ class ErrorCode(str, Enum):
     # not_found とは違い「居たが今は応答経路が無い」。details に grace_expires_in。
     INSTANCE_DISCONNECTED = "instance_disconnected"
     INSTANCE_AMBIGUOUS = "instance_ambiguous"
+    # Worker が timeout_ms 以内に応答しなかった（Hub が返す）。details に timeout_ms と command
     INSTANCE_TIMEOUT = "instance_timeout"
+    # Worker が受け取った時点で request の期限（deadline）が過ぎていたので実行しなかった。
+    # details に command と late_by_s
+    REQUEST_EXPIRED = "request_expired"
     PROTOCOL_VERSION_MISMATCH = "protocol_version_mismatch"
     INVALID_COMMAND = "invalid_command"
     WORKER_EXECUTION_ERROR = "worker_execution_error"
@@ -227,8 +236,14 @@ class Request:
     # selector：label / instance_id / project basename / pid のいずれか
     # （解決順は ADR-0001 §5）。None の場合は Hub が自動選択を試みる
     instance: str | None = None
-    # リクエストごとのタイムアウト（未指定なら Hub のデフォルトを使う）
+    # リクエストごとのタイムアウト（未指定なら Hub は DEFAULT_REQUEST_TIMEOUT_MS を使う）。
+    # Hub はこの時間が過ぎても Worker が応答しなければ送り主に instance_timeout を返す
     timeout_ms: int | None = None
+    # 実行してよい期限（Unix 時刻・秒）。Hub が Worker へ転送するときに timeout_ms から
+    # 付ける。Worker はこれを過ぎた request を実行せずに request_expired で返す
+    # （送り主はもう instance_timeout を受け取って諦めているので）。Hub と Worker は
+    # 同じ機械で動くので壁時計で比べる
+    deadline: float | None = None
     # Hub → Worker 転送時に Hub が付与する発信元 role（ADR-0001 §12.7）。
     # Client → Hub 経路ではクライアントが申告しても Hub が握りつぶして
     # register 時の role で上書きする（クライアントの申告は信用しない）。
@@ -424,6 +439,19 @@ def _coerce_leaf(value: Any) -> Any:
     return str(value)
 
 
+def effective_timeout_ms(timeout_ms: object) -> int:
+    """request の ``timeout_ms`` から、Hub が実際に待つミリ秒を決める。
+
+    無い・数でないなら ``DEFAULT_REQUEST_TIMEOUT_MS``。数なら 1〜``MAX_REQUEST_TIMEOUT_MS``
+    に丸める。
+    """
+    if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, (int, float)):
+        return DEFAULT_REQUEST_TIMEOUT_MS
+    if timeout_ms != timeout_ms:  # NaN
+        return DEFAULT_REQUEST_TIMEOUT_MS
+    return int(min(max(timeout_ms, 1), MAX_REQUEST_TIMEOUT_MS))
+
+
 def decode_message(text: str) -> Message:
     """JSON 文字列を対応する dataclass メッセージに復号する。
 
@@ -500,6 +528,7 @@ def _build_message(msg_type: MessageType, payload: dict[str, Any]) -> Message:
             params=payload.get("params", {}),
             instance=payload.get("instance"),
             timeout_ms=payload.get("timeout_ms"),
+            deadline=payload.get("deadline"),
             caller_role=caller_role,
         )
 

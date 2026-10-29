@@ -733,6 +733,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   closed the connection, a call fails at once with `RequestNotSentError`
   instead of waiting out its timeout, and `connect()` opens a new connection.
 
+- **A command that timed out could still run in QGIS later.** QGIS reads
+  requests on its GUI thread, so a request sent while a modal dialog was open
+  waited there and ran once the dialog closed, long after the caller had given
+  up. The Hub now gives each request a deadline from its `timeout_ms` (30 s when
+  absent), and QGIS drops a request it reads after the deadline without running
+  it (`request_expired`, logged in QGIS). The Hub also returns
+  `instance_timeout` when QGIS has not replied by then — the error code was
+  documented but never sent — and `AutomationClient.call()` now always sends
+  `timeout_ms` (its `request_timeout` when omitted) and waits one second longer
+  for that reply, so a slow QGIS shows up as `RequestError` with code
+  `instance_timeout` rather than `asyncio.TimeoutError`.
+
 - **`spawn_qgis` waited out the register timeout when the launch command had
   already failed.** It watched only the Hub, so a launcher that printed an
   error and exited with code 1 (a wrong path or a missing setting) left the

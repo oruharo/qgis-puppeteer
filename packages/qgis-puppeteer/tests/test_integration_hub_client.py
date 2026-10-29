@@ -109,10 +109,12 @@ def _hub_subprocess(port: int) -> Iterator[subprocess.Popen[bytes]]:
 class _AsyncFakeWorker:
     """asyncio の Worker クライアント。Hub の正規プロトコルで接続する。"""
 
-    def __init__(self, url: str, *, label: str, pid: int) -> None:
+    def __init__(self, url: str, *, label: str, pid: int, silent: bool = False) -> None:
         self.url = url
         self.label = label
         self.pid = pid
+        # True なら request に応答しない（GUI が塞がった QGIS の代わり）
+        self.silent = silent
         self._ws = None
         self._task: asyncio.Task[None] | None = None
         self.instance_id: str | None = None
@@ -145,7 +147,7 @@ class _AsyncFakeWorker:
                 if isinstance(raw, bytes):
                     continue
                 data = json.loads(raw)
-                if data["type"] != "request":
+                if data["type"] != "request" or self.silent:
                     continue
                 # command / params / caller_role を echo して検証可能にする
                 # （caller_role は Hub が注入するフィールド、ADR-0001 §12.9）
@@ -160,6 +162,8 @@ class _AsyncFakeWorker:
                                 "params": data.get("params", {}),
                                 "worker_label": self.label,
                                 "caller_role": data.get("caller_role"),
+                                "timeout_ms": data.get("timeout_ms"),
+                                "deadline": data.get("deadline"),
                             },
                         }
                     )
@@ -218,13 +222,17 @@ class TestHubClientIntegration:
                         assert instances[0].pid == 1111
 
                         result = await client.call("qgis_ping", {"foo": "bar"}, timeout_ms=5_000)
+                        deadline = result.pop("deadline")
                         assert result == {
                             "command": "qgis_ping",
                             "params": {"foo": "bar"},
                             "worker_label": "solo",
                             # ADR-0001 §12.7: Hub が呼び出し元 role を付与する
                             "caller_role": "automation_client",
+                            "timeout_ms": 5_000,
                         }
+                        # Hub が timeout_ms から実行の期限を付けて転送する
+                        assert abs(deadline - (time.time() + 5.0)) < 2.0
                 finally:
                     await worker.stop()
 
@@ -323,6 +331,33 @@ class TestHubClientIntegration:
                     assert ack["error"]["details"]["reason"] == "launch_abandoned"
                     # 接続は生きていて、続けて使える
                     assert await client.list_instances() == []
+
+            _run(inner())
+
+    def test_an_unanswered_request_times_out_via_real_hub(self) -> None:
+        """Worker が応答しないと、Hub が timeout_ms ごろに instance_timeout を返す。"""
+        port = _get_free_port()
+        with _hub_subprocess(port):
+
+            async def inner() -> None:
+                url = f"ws://127.0.0.1:{port}"
+                worker = _AsyncFakeWorker(url, label="busy", pid=2222, silent=True)
+                await worker.start()
+                try:
+                    async with AutomationClient(url=url) as client:
+                        await asyncio.sleep(0.05)
+                        started = time.monotonic()
+                        with pytest.raises(RequestError) as excinfo:
+                            await client.call("qgis_click", timeout_ms=500)
+                        elapsed = time.monotonic() - started
+                    assert excinfo.value.code == ErrorCode.INSTANCE_TIMEOUT
+                    assert excinfo.value.error.details == {
+                        "timeout_ms": 500,
+                        "command": "qgis_click",
+                    }
+                    assert 0.4 <= elapsed < 1.4
+                finally:
+                    await worker.stop()
 
             _run(inner())
 

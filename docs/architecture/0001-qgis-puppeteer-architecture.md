@@ -233,11 +233,22 @@ label が空の場合は `{project_basename}-{pid 下4桁}` を自動採番。
   "id": "uuid-3",
   "instance": "A",
   "command": "qgis_list_layers",
-  "params": {}
+  "params": {},
+  "timeout_ms": 30000
 }
 
 // hub → worker (instance "A" の接続に転送、id は維持)
-// ... 同じ内容
+// 同じ内容に、Hub が deadline（Unix 時刻・秒）と caller_role を足す
+{
+  "type": "request",
+  "id": "uuid-3",
+  "instance": "A",
+  "command": "qgis_list_layers",
+  "params": {},
+  "timeout_ms": 30000,
+  "deadline": 1761745200.5,
+  "caller_role": "automation_client"
+}
 
 // worker → hub → client
 {
@@ -247,6 +258,15 @@ label が空の場合は `{project_basename}-{pid 下4桁}` を自動採番。
   "result": { "layers": [...] }
 }
 ```
+
+##### 時間切れ
+
+- `timeout_ms` は Hub が Worker の応答を待つ時間（ミリ秒）。無ければ 30000。1〜2³¹−1 に丸める。`AutomationClient.call()` は毎回送る（省略時は `request_timeout`）
+- Hub は転送するときに `deadline = 今 + timeout_ms` を付け、`timeout_ms` が過ぎても応答が無ければ送り主に `instance_timeout` を返す（`details` に `timeout_ms` と `command`）。そのあとに届いた応答は捨てる
+- Worker は `deadline` を過ぎた request を実行せず `request_expired` で返す。Worker は Qt メインスレッドで request を読むので、GUI が塞がっている間（modal・重い処理）に届いた request は塞がりが解けてから読まれる。そのころには送り主はもう `instance_timeout` を受け取って諦めているので、実行すると誰も結果を知らない操作が QGIS で走ってしまう
+- Hub と Worker は同じ機械で動くので、`deadline` は壁時計で比べる。受け取った時刻を基準にしないのは、GUI が塞がっている間は受け取ること自体が遅れるため
+- Worker が読んだあと、`deadline` までに終わらなかった request は止めない。`instance_timeout` は「実行されたかもしれない」を意味する
+- クライアントは `timeout_ms` に 1 秒足した時間まで待つ（Hub の `instance_timeout` を受け取るため）。それでも返事が無ければ `asyncio.TimeoutError`
 
 ##### インスタンス一覧
 
@@ -279,7 +299,8 @@ label が空の場合は `{project_basename}-{pid 下4桁}` を自動採番。
 エラーコード初期セット：
 - `instance_not_found`: 指定 instance が見つからない
 - `instance_ambiguous`: 複数マッチ（instance 未指定で 2 台以上）
-- `instance_timeout`: Worker からの応答がタイムアウト
+- `instance_timeout`: Worker が `timeout_ms` 以内に応答しなかった（Hub が返す。§3「時間切れ」）
+- `request_expired`: Worker が読んだ時点で request の `deadline` が過ぎていたので実行しなかった（Worker が返す。送り主には通常届かない）
 - `protocol_version_mismatch`: プロトコルバージョン不整合
 - `invalid_command`: 未知のコマンド
 - `worker_execution_error`: Worker 側で例外発生（stack trace を `error.details` に）
@@ -1105,7 +1126,7 @@ E2E fixture は両方設定する。dev Claude Desktop ユーザーは両方未�
    - サーバー発イベント（`instance_added` / `instance_removed`）
    - 長時間コマンド用の進捗メッセージ（`progress`）
    - リクエストのキャンセル（`type=cancel` で `id` 指定の abort）
-   - request 側 `timeout_ms` フィールド
+   - ~~request 側 `timeout_ms` フィールド~~：実装済み。Hub の時間切れ判定と Worker の `deadline`（§3「時間切れ」）
    - プロトコルバージョン交渉（SemVer + `supported_versions`）
    - 追加エラーコード（`hub_overloaded`, `protocol_error`, `worker_busy`）
 4. **ContextVar の sticky 効果の実機検証**：FastMCP の Task スコープで `qgis_use_instance` が次のツール呼び出しまで生存するか確認が必要。生存しない場合は「Claude セッション ID をキーにした dict」に切り替え（プロトコル無改修）
