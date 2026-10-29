@@ -27,7 +27,9 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "websockets>=12.0",        # AutomationClient / MCP gateway の WS（Hub / Worker は Qt の WS）
+    # AutomationClient / MCP gateway の WS（Hub / Worker は Qt の WS）。
+    # client.py が使う websockets.asyncio.client は 13.0 から
+    "websockets>=13.0",
     # PyQt5 / qgis は QGIS バンドル経由 (Worker / Hub 起動時) なので pip 依存にしない
 ]
 
@@ -35,7 +37,8 @@ dependencies = [
 # Claude Desktop / MCP gateway を使うときに追加で必要
 # gateway は mcp 2.x の API（mcp.server.mcpserver）に依存する。上限なしだと
 # 次のメジャーで import から壊れるので、メジャー単位で上限を付ける。
-mcp = ["mcp>=2,<3"]
+# pydantic は gateway が Field を直接 import するので、mcp 経由で入るとしても宣言する。
+mcp = ["mcp>=2,<3", "pydantic>=2"]
 
 [project.urls]
 Homepage = "https://github.com/oruharo/qgis-puppeteer"
