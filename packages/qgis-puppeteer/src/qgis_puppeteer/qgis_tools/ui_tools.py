@@ -296,8 +296,13 @@ def click_widget(
         press, error = _mouse_press(widget, kind, cell, result)
         if error is not None:
             return error
-    elif isinstance(widget, QAbstractButton):
-        press = widget.click
+    elif isinstance(widget, QWidget) and hasattr(widget, "click") and callable(widget.click):
+        button = widget
+
+        def press() -> None:
+            focus_like_a_click(button)
+            button.click()
+
     elif isinstance(widget, QAction):
         menu = _menu_showing(widget)
         if menu is not None:
@@ -403,6 +408,7 @@ def _mouse_press(
         covered = covered_point(target, pos)
         if covered is not None:
             return covered
+        focus_like_a_click(target)
         _send_mouse(target, pos, kind)
         return None
 
@@ -583,6 +589,24 @@ def close_widget(selector: dict, iface: Any = None, *, wait: bool = True) -> dic
         return result
     result["closed"] = bool(window.close())
     return result
+
+
+def focus_like_a_click(widget: Any) -> None:
+    """人が ``widget`` を押したときと同じく、フォーカスを移す。
+
+    Qt は押された widget から親へたどり、``ClickFocus`` を受ける最初の widget に
+    フォーカスを渡す（窓の境で止まる）。``click()`` / ``sendEvent`` ではこれが
+    起きないので、ここで同じことをする。表のセルのエディタはフォーカスが外れたときに
+    値を確定するので、押す前に移さないと編集中の値が確定しない。
+    """
+    current = widget if isinstance(widget, QWidget) else None
+    while current is not None:
+        if current.isEnabled() and current.focusPolicy() & Qt.ClickFocus:
+            current.setFocus(Qt.MouseFocusReason)
+            return
+        if current.isWindow():
+            return
+        current = current.parentWidget()
 
 
 def covered_point(target: QWidget, pos: Any) -> dict | None:

@@ -719,6 +719,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A click moves the focus first, as a person's click does.** A click called
+  `click()` or sent mouse events, and neither moves the focus, so a table cell
+  being edited kept its editor: the editor commits its value when it loses the
+  focus, and a "Save" button clicked through qgis-puppeteer ran before the value
+  was committed. Every click (`Locator.click()`, `click_widget()`, MCP
+  `qgis_click_widget`, with or without `cell`, `kind` and `wait=False`) now
+  gives the focus as Qt does for a mouse press: to the first widget, from the
+  clicked one up to its window, that takes focus by click. A widget that takes
+  no focus, such as a tool bar button, leaves the focus where it is.
+
 - **The pytest plugin requires pytest 8.4 or later.** It declared pytest 7.0,
   but its tests read how pytest 8.4 stores a fixture's scope and failed on
   earlier versions.
