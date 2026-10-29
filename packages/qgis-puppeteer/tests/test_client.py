@@ -19,6 +19,7 @@ from qgis_puppeteer.client import (
     NotConnectedError,
     RegisterError,
     RequestError,
+    RequestNotSentError,
 )
 from qgis_puppeteer.protocol import ErrorCode, Role
 from websockets.asyncio.server import ServerConnection, serve
@@ -54,6 +55,8 @@ class FakeHub:
         self.projects: dict[str, str | None] = {}
         # include_rejected=True の list_instances で返す断った登録（#13）
         self.rejected: list[dict[str, Any]] = []
+        # request を受け取ったら転送せずに送り主の接続を切る（送ったあとの切断）
+        self.drop_caller_on_request: bool = False
         # Origin 検証モード（ws ハンドラでは検証できないのでテストでは無視）
 
     async def handler(self, ws: ServerConnection) -> None:
@@ -153,6 +156,9 @@ class FakeHub:
 
         if t == "request":
             self.received_requests.append(data)
+            if self.drop_caller_on_request:
+                await ws.close()
+                return
             selector = data.get("instance")
             target_ws = self._pick_worker(selector)
             if target_ws is None:
@@ -327,8 +333,60 @@ class TestConnect:
     def test_call_before_connect_raises(self) -> None:
         async def inner() -> None:
             client = AutomationClient()
-            with pytest.raises(NotConnectedError):
+            with pytest.raises(RequestNotSentError):
                 await client.call("cmd")
+
+        _run(inner())
+
+
+class TestConnectionLoss:
+    """送る前の切断と送ったあとの切断を分ける（送り直してよいのは前者だけ）。"""
+
+    def test_after_the_hub_dropped_the_connection_a_call_is_not_sent(self) -> None:
+        async def inner() -> None:
+            async with fake_hub_server() as (hub, url):
+                worker = _FakeWorker(url, label="alpha", pid=1)
+                await worker.start()
+                await worker.ready.wait()
+                client = AutomationClient(url=url)
+                await client.connect()
+                try:
+                    hub.drop_caller_on_request = True
+                    with pytest.raises(NotConnectedError):
+                        await client.call("first")
+                    hub.drop_caller_on_request = False
+                    # reader が切断に気づいたあとは、送る前に断る（届かない要求を
+                    # 応答待ちの時間切れまで待たせない）
+                    with pytest.raises(RequestNotSentError):
+                        await client.call("second", timeout_ms=5_000)
+                    assert [r["command"] for r in hub.received_requests] == ["first"]
+                    # connect() で張り直せば、また送れる
+                    await client.connect()
+                    result = await client.call("third")
+                    assert result["command"] == "third"
+                finally:
+                    await client.close()
+                    await worker.stop()
+
+        _run(inner())
+
+    def test_a_drop_after_sending_is_not_reported_as_not_sent(self) -> None:
+        """送ったあとで切れたら NotConnectedError そのもの（実行されたかもしれない）。"""
+
+        async def inner() -> None:
+            async with fake_hub_server() as (hub, url):
+                worker = _FakeWorker(url, label="alpha", pid=1)
+                await worker.start()
+                await worker.ready.wait()
+                hub.drop_caller_on_request = True
+                try:
+                    async with AutomationClient(url=url) as client:
+                        with pytest.raises(NotConnectedError) as exc_info:
+                            await client.call("cmd", timeout_ms=5_000)
+                        assert not isinstance(exc_info.value, RequestNotSentError)
+                        assert len(hub.received_requests) == 1
+                finally:
+                    await worker.stop()
 
         _run(inner())
 

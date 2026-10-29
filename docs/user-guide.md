@@ -2903,6 +2903,23 @@ coverage が有効化される。
 5. QGIS を起こした直後なら、Hub がまだ待ち受けていないだけのことがある。
    `qgis_wait_ready` を先に呼ぶ。これは Hub が現れるまで `timeout_s` の内で待つ
 
+### `request_timeout` / `connection_lost`
+
+**症状**: MCP ツールが `{"error": {"code": "request_timeout", ...}}` または
+`"connection_lost"` で返る。メッセージに "The command may have run in QGIS" とある。
+
+**原因**: 要求は Hub に送ったが、応答が来なかった。`request_timeout` は応答を待つ
+時間を過ぎた、`connection_lost` は応答の前に Hub との接続が切れた。どちらも、
+**コマンドは QGIS で実行されたかもしれない**。
+
+gateway はこのとき同じ要求を送り直さない。送り直すと、クリックや Python の実行が
+QGIS で 2 回走ることがある。送り直すのは、要求が Hub に届いていないと分かって
+いるとき（QGIS や Hub を起こし直したあと、gateway が古い接続を抱えていたとき）
+だけで、それは呼び出し側には見えない。
+
+**対処**: 接続は gateway が張り直すので、次の呼び出しはそのまま通る。同じ操作を
+もう一度頼む前に、`qgis_snapshot_ui` などで、その操作が済んでいるかを確かめる。
+
 ### `did not register to Hub and answer a command within Ns`（pytest）
 
 **症状**: QGIS は起動するが、テストに入る前に
@@ -3129,7 +3146,8 @@ gateway の stderr にだけ記録する。呼び出し側からは何が起き�
 
 **対処**: gateway は全ツールを最後の砦で包んでいて、どこで例外が出ても
 `code: "gateway_internal_error"` に例外の型・traceback の末尾・ログファイルの
-場所を載せて返す。接続まわりの例外は 1 回だけ張り直して再試行する。
+場所を載せて返す。この場合は接続を張り直すが、同じ呼び出しを送り直しはしない
+（要求が QGIS に届いたかどうか分からないため。[`request_timeout` / `connection_lost`](#request_timeout--connection_lost) と同じ）。
 
 それでも本文なしの形が出る、または原因を追いたいときは **gateway のログ
 ファイル**を見る。stderr は MCP クライアントが飲み込むが、同じ内容が

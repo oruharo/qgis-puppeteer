@@ -79,6 +79,7 @@ if TYPE_CHECKING:
         RegisterError,
         RegistrationRejectedError,
         RequestError,
+        RequestNotSentError,
     )
 
 # client の公開名。websockets を要するので、参照されたときに import する。
@@ -90,6 +91,7 @@ _CLIENT_EXPORTS = frozenset(
         "RegisterError",
         "RegistrationRejectedError",
         "RequestError",
+        "RequestNotSentError",
     }
 )
 
@@ -157,6 +159,7 @@ __all__ = [
     "RegisterError",
     "RegistrationRejectedError",
     "RequestError",
+    "RequestNotSentError",
     # hub_spawn（Hub 起動競合回避）
     "DEFAULT_HUB_HOST",
     "DEFAULT_HUB_PORT",

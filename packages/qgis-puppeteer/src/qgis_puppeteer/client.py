@@ -78,7 +78,19 @@ class AutomationClientError(Exception):
 
 
 class NotConnectedError(AutomationClientError):
-    """connect() 未実行で呼ばれた操作。"""
+    """Hub との接続が無い、または応答を待つ間に切れた。
+
+    この型そのものは「送ったあとで切れた」ときに出る。要求は QGIS 側で実行
+    されたかもしれないので、黙って送り直してはいけない。送る前に分かったときは
+    子の :class:`RequestNotSentError` になる。
+    """
+
+
+class RequestNotSentError(NotConnectedError):
+    """要求を送る前に、接続が無い・切れていると分かった。
+
+    要求は Hub に届いていないので、接続し直して同じ要求を送り直してよい。
+    """
 
 
 class RegisterError(AutomationClientError):
@@ -257,6 +269,9 @@ class AutomationClient:
         self._pending: dict[str, asyncio.Future[Message]] = {}
         # 切断フラグ（close 中の reader 例外を抑止するため）
         self._closing: bool = False
+        # reader が終わった（Hub 側から切れた）。以後の送信は届かないので、
+        # 送る前に RequestNotSentError にする
+        self._lost: bool = False
 
     # ------------------------------------------------------------
     # ライフサイクル
@@ -280,7 +295,12 @@ class AutomationClient:
         接続不能を単一のエラー型で扱えるようにするため）。
         """
         if self._ws is not None:
-            return
+            if not self._lost:
+                return
+            # 切れた接続を抱えたまま。捨てて張り直す
+            await self._hard_close()
+        self._lost = False
+        self._closing = False
 
         # Origin ヘッダを明示（Hub 側で完全一致検証されるため）
         try:
@@ -381,9 +401,13 @@ class AutomationClient:
             Response.result（任意の JSON 値）
 
         Raises:
-            NotConnectedError: connect() 未完了で呼ばれた
+            RequestNotSentError: 送る前に接続が無い・切れていると分かった。
+                要求は届いていないので送り直してよい
+            NotConnectedError: 送ったあと応答の前に接続が切れた。要求は実行
+                されたかもしれない
             RequestError: response.ok=False（Hub / Worker のエラー応答）
-            asyncio.TimeoutError: クライアント側タイムアウト
+            asyncio.TimeoutError: クライアント側タイムアウト。要求は実行された
+                かもしれない
         """
         self._require_connected()
 
@@ -650,7 +674,9 @@ class AutomationClient:
 
     def _require_connected(self) -> None:
         if self._ws is None:
-            raise NotConnectedError("connect() has not completed")
+            raise RequestNotSentError("connect() has not completed")
+        if self._lost:
+            raise RequestNotSentError("connection to the Hub was lost")
 
     def _new_id(self) -> str:
         return uuid.uuid4().hex
@@ -677,8 +703,19 @@ class AutomationClient:
             raise
 
     async def _send(self, msg: Message) -> None:
+        """送る。送れなかったら待っている Future を外して RequestNotSentError。
+
+        websockets は閉じた（閉じかけの）接続への send を書き込む前に
+        ConnectionClosed で断るので、ここで落ちた要求は Hub に届いていない。
+        """
         assert self._ws is not None
-        await self._ws.send(encode_message(msg))
+        try:
+            await self._ws.send(encode_message(msg))
+        except (websockets.exceptions.ConnectionClosed, OSError) as e:
+            msg_id = getattr(msg, "id", None)
+            if msg_id is not None:
+                self._pending.pop(msg_id, None)
+            raise RequestNotSentError(f"could not send to the Hub: {e}") from e
 
     # ------------------------------------------------------------
     # reader：受信ループ
@@ -707,6 +744,7 @@ class AutomationClient:
         except Exception:
             logger.exception("Reader loop crashed")
         finally:
+            self._lost = True
             self._fail_pending(NotConnectedError("connection closed"))
 
     def _dispatch(self, msg: Message) -> None:

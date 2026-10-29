@@ -52,6 +52,7 @@ from qgis_puppeteer.client import (
     NotConnectedError,
     RegistrationRejectedError,
     RequestError,
+    RequestNotSentError,
 )
 from qgis_puppeteer.gateways.recording import ENV_RECORD, McpRecorder
 from qgis_puppeteer.hub_state import select_by_selector
@@ -424,19 +425,14 @@ async def _connect_or_exc(
     return client, None
 
 
-# コネクション死活検知：これらの例外が出たら cached client は再利用不可。
-# `NotConnectedError`: client 側 reader が切断検知済みで Future を fail させた
-# `ConnectionClosed*`: websockets 層で close frame または ABORT を受けた
-# `OSError`: Windows の WinError 10053 / 10054 等、TCP 層での強制切断
-# `asyncio.TimeoutError` / `TimeoutError`: worker が応答不能（過去のハンドラ
-#   クラッシュで無応答になったケース等）。client 自体の WebSocket は生きて
-#   いる可能性もあるが、stale 扱いで一度リセットして引き直す方が復旧が速い。
-_STALE_CONNECTION_EXC = (
+# 送ったあとで Hub との接続が切れた。要求は QGIS で実行されたかもしれない。
+# `NotConnectedError`: client の reader が切断を見つけ、応答待ちの Future を落とした
+# `ConnectionClosed*` / `OSError`: client が包みきれなかった接続の失敗（念のため）
+# 送る前に分かった切断（`RequestNotSentError`）はこれより先に捕る。
+_LOST_AFTER_SEND_EXC = (
     NotConnectedError,
     websockets.exceptions.ConnectionClosed,
     OSError,
-    asyncio.TimeoutError,
-    TimeoutError,
 )
 
 
@@ -446,18 +442,24 @@ _T = TypeVar("_T")
 async def _with_client(
     gateway: GatewayContext, op: Callable[[AutomationClient], Awaitable[_T]]
 ) -> _T | CallToolResult:
-    """Hub 接続を取って ``op`` を走らせる。stale な接続なら 1 度だけ張り直す。
+    """Hub 接続を取って ``op`` を走らせる。届かなかった要求だけ 1 度送り直す。
 
     QGIS/Hub の再起動を挟むと、cached client が死んだ WebSocket を抱えたまま
-    残るため 1 回目の呼び出しが ConnectionClosed / WinError 10053 等で落ちる。
-    その場合は client をリセットして再接続→リトライする。worker コマンドだけ
-    でなく `qgis_list_instances` / `qgis_use_instance` / `qgis_wait_ready` も
-    同じ経路を通す — Hub を入れ替えた直後に「list は通るのに use_instance は
+    残る。そのとき client は送る前に `RequestNotSentError` を投げるので、
+    client をリセットして再接続し、``op`` をもう 1 度走らせる。worker コマンド
+    だけでなく `qgis_list_instances` / `qgis_use_instance` / `qgis_wait_ready`
+    も同じ経路を通す — Hub を入れ替えた直後に「list は通るのに use_instance は
     落ちる」のは、どのツールが先に stale socket を踏むかの運だった。
 
+    送ったあとの失敗（応答待ちの時間切れ、切断、想定外の例外）は送り直さない。
+    クリックや Python の実行が QGIS で 2 回走ってしまう。接続はリセットして
+    次の呼び出しで張り直し、今回は「実行されたかもしれない」tool error を返す。
+
+    ``op`` が要求を 2 つ以上送るなら、送り直しで前の要求がもう 1 度走っても
+    困らないもの（読むだけのもの）に限ること。
+
     接続失敗は `hub_unreachable` の tool error。``op`` が投げる business error
-    （RequestError 等）は ``op`` 側で結果に変換すること。``op`` から出た
-    TimeoutError は stale 扱いになるので、意味のある timeout は ``op`` 内で捕る。
+    （RequestError 等）は ``op`` 側で結果に変換すること。
     """
     for attempt in (0, 1):
         client, err = await _get_client_or_error(gateway)
@@ -466,31 +468,60 @@ async def _with_client(
         assert client is not None
         try:
             return await op(client)
-        except _STALE_CONNECTION_EXC as e:
+        except RequestNotSentError as e:
             if attempt == 0:
-                logger.warning(
-                    "Stale connection detected (%s); resetting and retrying",
-                    type(e).__name__,
-                )
+                logger.warning("Request was not sent (%s); reconnecting and sending again", e)
                 await gateway.reset_client()
                 continue
             return _format_unreachable(gateway, e)
+        except (asyncio.TimeoutError, TimeoutError) as e:
+            # TimeoutError は OSError の子なので、_LOST_AFTER_SEND_EXC より先に捕る
+            await gateway.reset_client()
+            return _may_have_run_result(
+                "request_timeout",
+                "No reply from the QGIS Puppeteer Hub in time.",
+                gateway,
+                e,
+            )
+        except _LOST_AFTER_SEND_EXC as e:
+            await gateway.reset_client()
+            return _may_have_run_result(
+                "connection_lost",
+                "The connection to the QGIS Puppeteer Hub dropped before the reply came.",
+                gateway,
+                e,
+            )
         except Exception as e:  # noqa: BLE001 - 最後の砦
             # ここに来る例外は business error ではない（それは op が結果に変換
-            # している）。想定外の型でも接続まわりの可能性が高いので、1 回目は
-            # 同じくリセットして張り直す。2 回目も落ちたら、SDK に任せて本文の
-            # 無い "Error executing tool" にするのではなく、型と traceback を
-            # 載せた JSON で返す — 呼び出し側から gateway の stderr は見えない。
-            if attempt == 0:
-                logger.exception(
-                    "Unexpected %s while talking to the Hub; resetting the connection "
-                    "and retrying once",
-                    type(e).__name__,
-                )
-                await gateway.reset_client()
-                continue
+            # している）。接続まわりの可能性もあるのでリセットはするが、要求は
+            # 届いたかもしれないので送り直さない。SDK に任せて本文の無い
+            # "Error executing tool" にするのではなく、型と traceback を載せた
+            # JSON で返す — 呼び出し側から gateway の stderr は見えない。
+            await gateway.reset_client()
             return _internal_error_result(e)
     raise AssertionError("unreachable")  # pragma: no cover
+
+
+def _may_have_run_result(
+    code: str, message: str, gateway: GatewayContext, exc: BaseException
+) -> CallToolResult:
+    """送ったあとで結果が分からなくなった要求の tool error。"""
+    return _error_result(
+        {
+            "error": {
+                "code": code,
+                "message": (
+                    message + " The command may have run in QGIS; check the state "
+                    "before sending it again."
+                ),
+                "details": {
+                    "type": type(exc).__name__,
+                    "reason": str(exc),
+                    "url": gateway.url,
+                },
+            }
+        }
+    )
 
 
 def _internal_error_result(exc: BaseException) -> CallToolResult:

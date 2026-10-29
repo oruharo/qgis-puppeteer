@@ -152,17 +152,18 @@ class TestMcpGatewayListInstances:
         assert used["ok"] is True
         assert used["current"]["label"] == "alpha"
 
-    def test_unexpected_client_error_is_retried_then_reported_with_type(
+    def test_unexpected_client_error_is_reported_with_type_and_not_sent_again(
         self, monkeypatch: Any
     ) -> None:
-        """stale 判定に無い例外でも、1 回目はリセット + 再試行、2 回目は型付き JSON。
+        """想定外の例外は送り直さず、型付き JSON で返す。接続は張り直す。
 
         検証 3: Hub 入れ替え後に qgis_list_instances が本文の無い
         "Error executing tool" で落ち、何度呼んでも回復しなかった。gateway の
-        stderr は呼び出し側から見えないので、例外を外へ漏らさない。
+        stderr は呼び出し側から見えないので、例外を外へ漏らさない。要求が
+        届いたかどうか分からないので、同じ呼び出しの中では送り直さない。
         """
 
-        async def run() -> tuple[dict[str, Any], dict[str, Any]]:
+        async def run() -> tuple[dict[str, Any], int, list[dict[str, Any]]]:
             async with fake_hub_server() as (_, hub_url):
                 worker = _FakeWorker(hub_url, label="alpha", pid=1111)
                 await worker.start()
@@ -179,37 +180,154 @@ class TestMcpGatewayListInstances:
                 original = AutomationClient.list_instances
                 calls = {"n": 0}
 
-                async def flaky(self: AutomationClient, **kw: Any) -> Any:
+                async def broken_once(self: AutomationClient, **kw: Any) -> Any:
                     calls["n"] += 1
                     if calls["n"] == 1:
                         raise RuntimeError("boom from a place nobody expected")
                     return await original(self, **kw)
 
-                async def always_broken(self: AutomationClient, **kw: Any) -> Any:
-                    raise RuntimeError("still broken")
-
                 gateway = build_gateway(lifespan=_lifespan)
                 async with Client(gateway, raise_exceptions=True) as client:
-                    monkeypatch.setattr(AutomationClient, "list_instances", flaky)
-                    ok = json.loads(
-                        _extract_text(await client.call_tool("qgis_list_instances", {}))
-                    )
-                    monkeypatch.setattr(AutomationClient, "list_instances", always_broken)
+                    monkeypatch.setattr(AutomationClient, "list_instances", broken_once)
                     result = await client.call_tool("qgis_list_instances", {})
                     assert result.is_error
                     broken = json.loads(_extract_text(result))
+                    tried = calls["n"]
+                    after = json.loads(
+                        _extract_text(await client.call_tool("qgis_list_instances", {}))
+                    )
                     await worker.stop()
-                    return ok, broken
+                    return broken, tried, after
 
-        ok, broken = _run(run())
-        # 1 回目の想定外例外は接続を張り直して吸収され、結果は正常
-        assert ok[0]["label"] == "alpha"
-        # 2 回続けて落ちたら、型と traceback を載せた JSON になる（SDK の
-        # 本文なし "Error executing tool" にはしない）
+        broken, tried, after = _run(run())
+        assert tried == 1
+        # 型と traceback を載せた JSON（SDK の本文なし "Error executing tool" にはしない）
         assert broken["error"]["code"] == "gateway_internal_error"
         assert broken["error"]["details"]["type"] == "RuntimeError"
-        assert "still broken" in broken["error"]["message"]
-        assert "always_broken" in broken["error"]["details"]["traceback"]
+        assert "boom from a place nobody expected" in broken["error"]["message"]
+        assert "broken_once" in broken["error"]["details"]["traceback"]
+        # 次の呼び出しは張り直した接続で通る
+        assert after[0]["label"] == "alpha"
+
+    def test_a_command_that_never_left_is_sent_again_once(self) -> None:
+        """cached client が切れた接続を抱えていたら、張り直して 1 回だけ送る。"""
+
+        async def run() -> tuple[dict[str, Any], list[str]]:
+            async with fake_hub_server() as (hub, hub_url):
+                worker = _FakeWorker(hub_url, label="alpha", pid=1111)
+                await worker.start()
+                await worker.ready.wait()
+                ctx = GatewayContext(url=hub_url, origin=DEFAULT_ORIGIN)
+
+                @asynccontextmanager
+                async def _lifespan(_server: Any) -> AsyncIterator[GatewayContext]:
+                    try:
+                        yield ctx
+                    finally:
+                        await ctx.reset_client()
+
+                gateway = build_gateway(lifespan=_lifespan)
+                async with Client(gateway, raise_exceptions=True) as client:
+                    await client.call_tool("qgis_list_instances", {})
+                    assert ctx.client is not None
+                    await ctx.client.close()  # Hub 再起動相当
+                    result = await client.call_tool("qgis_list_layers", {})
+                    assert not result.is_error
+                    await worker.stop()
+                    return (
+                        json.loads(_extract_text(result)),
+                        [r["command"] for r in hub.received_requests],
+                    )
+
+        result, commands = _run(run())
+        assert result["command"] == "qgis_list_layers"
+        assert commands == ["qgis_list_layers"]
+
+    def test_a_command_lost_after_sending_is_not_sent_again(self) -> None:
+        """送ったあとで切れたら、送り直さずに「実行されたかもしれない」と返す。"""
+
+        async def run() -> tuple[dict[str, Any], list[str], bool]:
+            async with fake_hub_server() as (hub, hub_url):
+                worker = _FakeWorker(hub_url, label="alpha", pid=1111)
+                await worker.start()
+                await worker.ready.wait()
+                ctx = GatewayContext(url=hub_url, origin=DEFAULT_ORIGIN)
+
+                @asynccontextmanager
+                async def _lifespan(_server: Any) -> AsyncIterator[GatewayContext]:
+                    try:
+                        yield ctx
+                    finally:
+                        await ctx.reset_client()
+
+                gateway = build_gateway(lifespan=_lifespan)
+                async with Client(gateway, raise_exceptions=True) as client:
+                    hub.drop_caller_on_request = True
+                    result = await client.call_tool(
+                        "qgis_click_widget", {"selector": {"object_name": "ok"}}
+                    )
+                    assert result.is_error
+                    payload = json.loads(_extract_text(result))
+                    commands = [r["command"] for r in hub.received_requests]
+                    hub.drop_caller_on_request = False
+                    after = await client.call_tool("qgis_list_layers", {})
+                    await worker.stop()
+                    return payload, commands, bool(after.is_error)
+
+        payload, commands, after_failed = _run(run())
+        assert commands == ["qgis_click_widget"]
+        assert payload["error"]["code"] == "connection_lost"
+        assert "may have run" in payload["error"]["message"]
+        # 接続は張り直されている
+        assert after_failed is False
+
+    def test_a_timed_out_command_is_not_sent_again(self, monkeypatch: Any) -> None:
+        """応答待ちの時間切れは送り直さない（クリックが 2 回走る）。"""
+        from qgis_puppeteer.gateways import mcp as gw
+
+        class _QuickClient(AutomationClient):
+            def __init__(self, **kw: Any) -> None:
+                super().__init__(request_timeout=0.3, **kw)
+
+        monkeypatch.setattr(gw, "AutomationClient", _QuickClient)
+
+        async def run() -> tuple[dict[str, Any], list[str]]:
+            async with fake_hub_server() as (hub, hub_url):
+                worker = _FakeWorker(hub_url, label="alpha", pid=1111)
+                # 応答を返さない Worker（GUI スレッドが塞がっている QGIS）
+                worker.responder = lambda req: {
+                    "type": "response",
+                    "id": "never-matches",
+                    "ok": True,
+                    "result": None,
+                }
+                await worker.start()
+                await worker.ready.wait()
+                ctx = GatewayContext(url=hub_url, origin=DEFAULT_ORIGIN)
+
+                @asynccontextmanager
+                async def _lifespan(_server: Any) -> AsyncIterator[GatewayContext]:
+                    try:
+                        yield ctx
+                    finally:
+                        await ctx.reset_client()
+
+                gateway = build_gateway(lifespan=_lifespan)
+                async with Client(gateway, raise_exceptions=True) as client:
+                    result = await client.call_tool(
+                        "qgis_click_widget", {"selector": {"object_name": "ok"}}
+                    )
+                    assert result.is_error
+                    await worker.stop()
+                    return (
+                        json.loads(_extract_text(result)),
+                        [r["command"] for r in hub.received_requests],
+                    )
+
+        payload, commands = _run(run())
+        assert commands == ["qgis_click_widget"]
+        assert payload["error"]["code"] == "request_timeout"
+        assert "may have run" in payload["error"]["message"]
 
     def test_exception_outside_with_client_is_still_structured(self, monkeypatch: Any) -> None:
         """検証 4: `_with_client` の外で出た例外も本文なしにはしない。

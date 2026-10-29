@@ -719,6 +719,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The MCP gateway could run a command twice.** When a reply did not come in
+  time, or the connection dropped while waiting, or anything unexpected went
+  wrong, the gateway reconnected and sent the same request again. The first
+  one had already reached QGIS, so a click or a Python run could happen twice.
+  The gateway now sends a request again only when it knows the request never
+  left (the cached connection was already closed, as after restarting QGIS or
+  the Hub). Otherwise it reconnects for the next call and returns
+  `request_timeout` or `connection_lost`, saying the command may have run.
+  `AutomationClient` tells the two apart: a call that was not sent raises
+  `RequestNotSentError`, a subclass of `NotConnectedError`; a connection lost
+  after sending still raises `NotConnectedError` itself. Once the Hub has
+  closed the connection, a call fails at once with `RequestNotSentError`
+  instead of waiting out its timeout, and `connect()` opens a new connection.
+
 - **`spawn_qgis` waited out the register timeout when the launch command had
   already failed.** It watched only the Hub, so a launcher that printed an
   error and exited with code 1 (a wrong path or a missing setting) left the
