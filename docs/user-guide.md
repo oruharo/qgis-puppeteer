@@ -845,7 +845,7 @@ selector dict の全キー。複数キー指定は AND セマンティクス。
 | `role` | str | snapshot の `role`（Qt のアクセシビリティの役割） |
 | `attr` | dict | snapshot の node の任意のキーの完全一致（`{"enabled": False}` など） |
 | `window` | bool | `True` でトップレベルの窓（`isWindow()`）だけ、`False` で窓の中の部品だけ |
-| `class_inherits` | str | Qt の型がこのクラスか、それを継承している（`QObject.inherits()`）。`class` と違い、C++ が作って sip が基底の型で包んだ widget（Python からは `QDialog` に見える `QgsAttributeDialog` など）にも、Python のサブクラスにも当たる |
+| `class_inherits` | str | Qt の型がこのクラスか、それを継承している（`QObject.inherits()`）。`class` と違い、C++ が作って sip が基底の型で包んだ widget（Python からは `QDialog` に見える `QgsAttributeDialog` など）にも、Python のサブクラスにも当たる。Python に型の無い Qt の中の部品（`QAbstractButton` に見える、タブの × の `CloseButton` や表の角の `QTableCornerButton`）も、この名前で分けられる |
 
 `object_name_re` / `title_contains` / `text_contains` / `text_re` / `role` / `attr` は、snapshot の node と
 同じ形の情報で判定する。`expect` や `wait_for_widget`（snapshot で探す）でも、`click()`
@@ -1019,7 +1019,7 @@ Locator の操作は、これを **`WidgetOperationError`** にする（`error` 
   指す:
 
   ```python
-  layers = qgis.locator({"object_name": "theLayerTree"})     # QGIS のレイヤパネル
+  layers = qgis.locator({"object_name": "theLayerTreeView"}) # QGIS のレイヤパネル
   tree = qgis.locator({"object_name": "buildingTree"})       # ホストの窓のツリー
   layers.select({"path": ["道路", "国道"]})                  # グループの中のレイヤ
   tree.dblclick(cell={"path": ["建物", 1, "滅失済"]})         # 文字と番号を混ぜてよい
@@ -1053,11 +1053,15 @@ conditions = qgis.locator({"object_name": "conditionTree"})
 conditions.check(cell={"path": ["道路", "国道", "一般国道"]})   # 畳まれた段は開く
 expect(conditions).to_be_checked(cell={"path": ["道路", "国道", "一般国道"]})
 
-layers = qgis.locator({"object_name": "theLayerTree"})          # QGIS のレイヤパネル
-layers.uncheck(cell={"path": ["道路", "国道"]})                # レイヤの下の凡例の分類
+layers = qgis.locator({"object_name": "theLayerTreeView"})      # QGIS のレイヤパネル
+layers.uncheck(cell={"path": ["道路", "国道"]})                 # レイヤ「道路」の凡例の分類「国道」
+layers.check(cell={"path": ["交通", "鉄道", "JR"]})             # グループの中のレイヤの分類
 expect(layers).not_.to_be_checked(cell={"path": ["道路", "国道"]})
 ```
 
+- レイヤツリーの `path` は上の段から順に書く。グループの中のレイヤの分類は、グループの
+  名前から（`["グループ", "レイヤ", "分類のラベル"]`）。パネルの `object_name` は
+  `theLayerTreeView`（`iface.layerTreeView()`）
 - 人がそのチェックを押せるときだけ付け外す：項目が有効で、チェックの欄が出ていて
   （`ItemIsUserCheckable` があり、チェックの値がある）、列が見えている。押せなければ
   `cell_disabled` / `cell_not_checkable` / `column_hidden`。凡例の付け外しを許さない
@@ -1355,7 +1359,7 @@ data = table.read_rows()                         # 全部（1000 行ずつ分け
 data["columns"], data["rows"], data["row_count"]
 table.read_rows(start=2000, max_rows=100)        # 一部
 table.read_rows(role="user")["rows"]             # 行に持たせた ID（Qt.UserRole）
-layers = qgis.locator({"object_name": "theLayerTree"})  # QGIS のレイヤパネル
+layers = qgis.locator({"object_name": "theLayerTreeView"})  # QGIS のレイヤパネル
 layers.read_rows(path=["道路"], role="check")    # ツリーの段の子の行のチェック
 expect(table).to_have_row_count(2500)            # 行の数を待つ
 ```
