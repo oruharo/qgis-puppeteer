@@ -719,6 +719,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The pytest plugin requires pytest 8.4 or later.** It declared pytest 7.0,
+  but its tests read how pytest 8.4 stores a fixture's scope and failed on
+  earlier versions.
+
 - **The MCP gateway could run a command twice.** When a reply did not come in
   time, or the connection dropped while waiting, or anything unexpected went
   wrong, the gateway reconnected and sent the same request again. The first

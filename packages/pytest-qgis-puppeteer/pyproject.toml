@@ -27,7 +27,7 @@ classifiers = [
     "Topic :: Software Development :: Testing",
 ]
 dependencies = [
-    "pytest>=7.0",
+    "pytest>=8.4",
     "pytest-asyncio>=0.21",
     "qgis-puppeteer>=0.1.0",
     # Python 3.11 未満では tomllib 不在のため tomli を使う（_environments の TOML loader）

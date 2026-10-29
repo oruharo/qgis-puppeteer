@@ -658,7 +658,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "pytest", specifier = ">=7.0" },
+    { name = "pytest", specifier = ">=8.4" },
     { name = "pytest-asyncio", specifier = ">=0.21" },
     { name = "qgis-puppeteer", editable = "packages/qgis-puppeteer" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
@@ -737,7 +737,7 @@ dev = [
 dev = [
     { name = "pyqt5", marker = "sys_platform == 'linux'", specifier = ">=5.15.10" },
     { name = "pyright", specifier = ">=1.1" },
-    { name = "pytest", specifier = ">=7.0" },
+    { name = "pytest", specifier = ">=8.4" },
     { name = "pytest-asyncio", specifier = ">=0.21" },
     { name = "ruff", specifier = ">=0.5" },
 ]
