@@ -1722,7 +1722,7 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
         params: dict[str, Any] = {"selector": selector, "role": role}
         if cell is not None:
             params["cell"] = cell
-        elif start:
+        if start:  # 0 は既定なので送らない。cell と一緒なら Worker が断る
             params["start"] = start
         if max_rows is not None:
             params["max_rows"] = max_rows

@@ -811,6 +811,18 @@ class TestMcpGatewayWidgetFailures:
             "cell": {"path": ["a", "b"]},
         }
 
+    def test_read_rows_passes_start_with_cell(self) -> None:
+        """cell と start は一緒に使えない。黙って捨てずに Worker に断らせる"""
+        _, seen = self._call(
+            "qgis_read_rows",
+            {"success": False, "error": "invalid_value"},
+            selector={"object_name": "t"},
+            cell={"row": 0},
+            start=5,
+        )
+        assert seen["start"] == 5
+        assert seen["cell"] == {"row": 0}
+
     def test_set_widget_value_passes_the_cell(self) -> None:
         result, seen = self._call(
             "qgis_set_widget_value",
