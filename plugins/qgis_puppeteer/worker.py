@@ -51,6 +51,7 @@ from qgis_puppeteer.protocol import (
     Response,
     decode_message,
     encode_message,
+    reply_to_undecodable,
 )
 from qgis_puppeteer.worker_state import (
     Handler,
@@ -350,6 +351,14 @@ class Worker(QObject):
             msg = decode_message(text)
         except ProtocolDecodeError as e:
             logger.warning("Worker decode error: %s", e)
+            # 知らない type（新しい Hub から来た、など）でも、id があれば答えて
+            # 送り主を待たせない
+            reply = reply_to_undecodable(e, receiver="QGIS")
+            if reply is not None:
+                try:
+                    self._ws.sendTextMessage(encode_message(reply))
+                except Exception:
+                    logger.exception("Failed to answer an undecodable message")
             return
 
         if isinstance(msg, RegisterAck):

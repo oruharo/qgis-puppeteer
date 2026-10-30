@@ -43,6 +43,7 @@ from qgis_puppeteer.protocol import (
     Response,
     Role,
     UpdateInfo,
+    error_code_value,
 )
 
 logger = logging.getLogger("qgis_puppeteer.worker_state")
@@ -97,7 +98,7 @@ class WorkerRegisterError(Exception):
 
     def __init__(self, error: Error | None) -> None:
         self.error = error
-        msg = f"worker register failed: {error.code.value if error else 'unknown'}"
+        msg = f"worker register failed: {error_code_value(error.code) if error else 'unknown'}"
         if error:
             msg += f" ({error.message})"
         super().__init__(msg)
@@ -414,13 +415,13 @@ class WorkerState:
 def register_failure_reason(error: Error | None) -> str:
     """``register_failed`` に載せる理由。``details["reason"]`` があれば添える。
 
-    例: ``label_conflict`` / ``label_conflict: too_long`` /
-    ``label_conflict: launch_abandoned``（#16）。
+    例: ``label_conflict`` / ``label_conflict: too_long`` / ``launch_abandoned``（#16）。
     """
     if error is None:
         return "unknown"
+    code = error_code_value(error.code)
     detail = error.details.get("reason") if isinstance(error.details, dict) else None
-    return f"{error.code.value}: {detail}" if detail else error.code.value
+    return f"{code}: {detail}" if detail else code
 
 
 def _own_fingerprint() -> str | None:

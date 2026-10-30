@@ -441,9 +441,11 @@ class TestRegisterFailureReason:
         from qgis_puppeteer.protocol import Error, ErrorCode
         from qgis_puppeteer.worker_state import register_failure_reason
 
-        err = Error(ErrorCode.LABEL_CONFLICT, "x", {"reason": "launch_abandoned"})
-        assert register_failure_reason(err) == "label_conflict: launch_abandoned"
-        assert register_failure_reason(Error(ErrorCode.LABEL_CONFLICT, "x")) == "label_conflict"
+        err = Error(ErrorCode.LABEL_CONFLICT, "x", {"reason": "too_long"})
+        assert register_failure_reason(err) == "label_conflict: too_long"
+        assert register_failure_reason(Error(ErrorCode.LAUNCH_ABANDONED, "x")) == "launch_abandoned"
+        # この版の知らないコードも、そのまま理由になる
+        assert register_failure_reason(Error("added_later", "x")) == "added_later"
         assert register_failure_reason(None) == "unknown"
 
 

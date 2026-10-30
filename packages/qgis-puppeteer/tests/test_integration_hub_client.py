@@ -328,9 +328,80 @@ class TestHubClientIntegration:
                     finally:
                         await ws.close()
                     assert ack["ok"] is False
-                    assert ack["error"]["details"]["reason"] == "launch_abandoned"
+                    assert ack["error"]["code"] == "launch_abandoned"
                     # 接続は生きていて、続けて使える
                     assert await client.list_instances() == []
+
+            _run(inner())
+
+    def test_unknown_message_type_is_answered_via_real_hub(self) -> None:
+        """知らない type でも id があれば unsupported_message で答え、無ければ黙る。"""
+        port = _get_free_port()
+        with _hub_subprocess(port):
+
+            async def inner() -> None:
+                url = f"ws://127.0.0.1:{port}"
+                ws = await ws_connect(url, additional_headers={"Origin": "http://localhost"})
+                try:
+                    await ws.send(json.dumps({"type": "added_later", "id": "q-1"}))
+                    reply = json.loads(await asyncio.wait_for(ws.recv(), 5.0))
+                    assert reply["type"] == "response"
+                    assert reply["id"] == "q-1"
+                    assert reply["error"]["code"] == "unsupported_message"
+                    assert reply["error"]["details"] == {"type": "added_later"}
+                    # id が無ければ答えない（次に届くのは list_instances の答え）
+                    await ws.send(json.dumps({"type": "added_later"}))
+                    await ws.send(json.dumps({"type": "list_instances", "id": "l-1"}))
+                    nxt = json.loads(await asyncio.wait_for(ws.recv(), 5.0))
+                    assert (nxt["type"], nxt["id"]) == ("list_instances_response", "l-1")
+                finally:
+                    await ws.close()
+
+            _run(inner())
+
+    def test_response_from_another_worker_is_ignored_via_real_hub(self) -> None:
+        """Hub は、その request を転送した Worker からの応答だけを届ける。"""
+        port = _get_free_port()
+        with _hub_subprocess(port):
+
+            async def inner() -> None:
+                url = f"ws://127.0.0.1:{port}"
+                target = _AsyncFakeWorker(url, label="target", pid=31, silent=True)
+                await target.start()
+                other = _AsyncFakeWorker(url, label="other", pid=32, silent=True)
+                await other.start()
+                client = await ws_connect(url, additional_headers={"Origin": "http://localhost"})
+                try:
+                    await client.send(
+                        json.dumps({"type": "register", "id": "c-reg", "role": "automation_client"})
+                    )
+                    assert json.loads(await client.recv())["ok"] is True
+                    await client.send(
+                        json.dumps(
+                            {
+                                "type": "request",
+                                "id": "req-1",
+                                "command": "qgis_ping",
+                                "instance": "target",
+                                "timeout_ms": 800,
+                            }
+                        )
+                    )
+                    await asyncio.sleep(0.2)
+                    assert other._ws is not None
+                    await other._ws.send(
+                        json.dumps(
+                            {"type": "response", "id": "req-1", "ok": True, "result": "forged"}
+                        )
+                    )
+                    reply = json.loads(await asyncio.wait_for(client.recv(), 5.0))
+                    assert reply["id"] == "req-1"
+                    assert reply["ok"] is False
+                    assert reply["error"]["code"] == "instance_timeout"
+                finally:
+                    await client.close()
+                    await target.stop()
+                    await other.stop()
 
             _run(inner())
 

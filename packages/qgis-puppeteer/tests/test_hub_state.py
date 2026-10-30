@@ -959,8 +959,7 @@ class TestAbandonedLaunches:
         state.abandon_launch("lt-late")
         out = state.register_worker("conn-1", _worker_req(label="fresh-x", launch_token="lt-late"))
         assert out.ok is False
-        assert out.error.code == ErrorCode.LABEL_CONFLICT  # 古いプラグインも読めるコード
-        assert out.error.details["reason"] == "launch_abandoned"
+        assert out.error.code is ErrorCode.LAUNCH_ABANDONED
         # 断った記録にも残る（spawn が pid を知れる）
         [rec] = state.list_rejected()
         assert rec.launch_token == "lt-late"

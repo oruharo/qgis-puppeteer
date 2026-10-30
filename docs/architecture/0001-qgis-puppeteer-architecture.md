@@ -304,6 +304,15 @@ label が空の場合は `{project_basename}-{pid 下4桁}` を自動採番。
 - `protocol_version_mismatch`: プロトコルバージョン不整合
 - `invalid_command`: 未知のコマンド
 - `worker_execution_error`: Worker 側で例外発生（stack trace を `error.details` に）
+- `unsupported_message`: 受け手の知らない `type` のメッセージだった（`details.type`）。元のメッセージの `id` で返す
+- `launch_abandoned`: 起こした側がもう待っていない `launch_token` の Worker の登録を断った（ADR-0005、#16）
+
+> **2026-10-30 追記（寛容な復号）**: 版の違う相手が足したものを読み捨てない。
+>
+> - 知らないエラーコードは、文字列のまま `Error.code` に持つ（`ErrorCode | str`）。応答ごと捨てて呼び出し側を時間切れまで待たせないため
+> - 知らないフィールドは無視する
+> - 知らない `type` のメッセージには、`id` が読めれば、その `id` で `unsupported_message` を返す（Hub も Worker も）。壊れたメッセージには `invalid_command` を返す。`id` が読めないメッセージと、壊れた応答（`response` など）には答えず、ログに残すだけにする
+> - Hub は、request を転送した Worker の接続から来た応答だけを送り主に届ける
 
 ### 4. ライフサイクル
 

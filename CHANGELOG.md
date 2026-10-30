@@ -573,6 +573,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed (breaking)
 
+- **Refusing the QGIS of an abandoned launch has its own error code.** The Hub
+  refused the registration of a QGIS whose starter had stopped waiting with
+  `label_conflict` and `details.reason = "launch_abandoned"`, so that older
+  plugins could read the code. It now uses the code `launch_abandoned`; the
+  plugin's `register_failed` carries `launch_abandoned`. A version now reads
+  codes it does not know, so a new code no longer needs an old one's name.
+
 - **`title` is the title a person sees** (#37). A selector's `title` (and
   `title_contains`) matched the `windowTitle()` of any widget, so waiting
   for a window by its title also hit widgets inside it whose title nobody
@@ -718,6 +725,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (still JSON-formatted for Claude).
 
 ### Fixed
+
+- **A reply with an error code the reader does not know is no longer dropped.**
+  Decoding failed on an unknown `error.code`, so the reply was thrown away and
+  the caller waited until its timeout. `Error.code` (and `RequestError.code`)
+  is now an `ErrorCode`, or the code as a string when this version does not
+  know it; `e.code == ErrorCode.X` works as before, and `error_code_value()`
+  gives the string in both cases. Unknown fields are ignored, as before.
+
+- **A message of an unknown type is answered.** The Hub answered any message
+  it could not read with id `"<unknown>"`, which no sender could match, and
+  QGIS did not answer at all, so the sender waited until its timeout. Both now
+  answer with the message's own id: `unsupported_message` for a type they do
+  not know (`details.type`), `invalid_command` for a broken message. A message
+  without a readable id, or a broken reply, is only logged.
+
+- **The Hub passes on a reply only from the QGIS it sent the request to.** It
+  matched replies by id alone, so any connection could answer a request in
+  place of the QGIS that was running it.
 
 - **A click moves the focus first, as a person's click does.** A click called
   `click()` or sent mouse events, and neither moves the focus, so a table cell
@@ -967,9 +992,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that it abandoned the `launch_token` (new client-to-Hub message
   `abandon_launch`; no reply, so an older Hub that cannot read it only answers
   with an error the client drops). The Hub refuses that token's registrations
-  for the next 30 minutes with `label_conflict` and
-  `details.reason = "launch_abandoned"` (an existing code, so older plugins
-  can read it), and records them like other refusals. The QGIS Puppeteer
+  for the next 30 minutes with `launch_abandoned`, and records them like
+  other refusals. The QGIS Puppeteer
   plugin closes its QGIS when it was started with a `launch_token`, has never
   registered, and is refused for any reason; it uses `close_qgis`, falls back
   to exiting after 12 seconds, and logs why to QgsMessageLog and stderr. A

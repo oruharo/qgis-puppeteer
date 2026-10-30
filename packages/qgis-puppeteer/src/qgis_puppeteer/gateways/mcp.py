@@ -56,7 +56,7 @@ from qgis_puppeteer.client import (
 )
 from qgis_puppeteer.gateways.recording import ENV_RECORD, McpRecorder
 from qgis_puppeteer.hub_state import select_by_selector
-from qgis_puppeteer.protocol import Role
+from qgis_puppeteer.protocol import Role, error_code_value
 from qgis_puppeteer.selector_match import live_only_keys
 from qgis_puppeteer.waiting import WaitUntil
 
@@ -633,7 +633,7 @@ async def _call(
             return _error_result(
                 {
                     "error": {
-                        "code": e.code.value if e.code is not None else None,
+                        "code": error_code_value(e.code),
                         "message": str(e),
                         "details": e.details,
                     }
@@ -1148,7 +1148,7 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
                 return _error_result(
                     {
                         "error": {
-                            "code": e.code.value if e.code is not None else None,
+                            "code": error_code_value(e.code),
                             "message": str(e),
                             "details": e.details,
                         }
@@ -1668,7 +1668,7 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
                 return _error_result(
                     {
                         "error": {
-                            "code": e.code.value if e.code is not None else None,
+                            "code": error_code_value(e.code),
                             "message": str(e),
                             "details": e.details,
                         }

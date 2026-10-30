@@ -70,6 +70,7 @@ from qgis_puppeteer.protocol import (
     decode_message,
     effective_timeout_ms,
     encode_message,
+    reply_to_undecodable,
 )
 
 if TYPE_CHECKING:
@@ -234,19 +235,20 @@ class Hub(QObject):
         try:
             msg = decode_message(text)
         except ProtocolDecodeError as e:
-            logger.warning("Decode error from %s: %s", conn_id, e)
-            self._send_error_response(
-                conn_id,
-                request_id="<unknown>",
-                code=ErrorCode.INVALID_COMMAND,
-                message=f"Protocol decode error: {e}",
-            )
+            self._reply_to_undecodable(conn_id, e)
             return
 
         try:
             self._dispatch(conn_id, msg)
         except Exception:
             logger.exception("Dispatch error for conn=%s type=%s", conn_id, msg.type)
+
+    def _reply_to_undecodable(self, conn_id: str, e: ProtocolDecodeError) -> None:
+        """読めなかったメッセージに、送り主が待ち続けずに済むよう答える（id が分かれば）。"""
+        logger.warning("Decode error from %s: %s", conn_id, e)
+        reply = reply_to_undecodable(e, receiver="Hub")
+        if reply is not None:
+            self._send(conn_id, reply)
 
     def _dispatch(self, conn_id: str, msg: Message) -> None:
         # isinstance narrowing で `Message` Union を具象クラスへ絞り、各 handler
@@ -441,13 +443,26 @@ class Hub(QObject):
         )
 
     def _handle_response(self, conn_id: str, resp: Response) -> None:
-        """Worker → Hub → 発信元 Client への返送。"""
-        entry = self._inflight.pop(resp.id, None)
+        """Worker → Hub → 発信元 Client への返送。
+
+        受け付けるのは、その request を転送した Worker の接続から来た応答だけ。
+        ほかの接続が同じ id で答えても、本物の応答の代わりに届けない。
+        """
+        entry = self._inflight.get(resp.id)
         if entry is None:
             # Hub が instance_timeout を返したあとに届いた応答もここに来る
             logger.info("Response for unknown request id=%s (timed out or abandoned)", resp.id)
             return
-        origin, _target = entry
+        origin, target = entry
+        if target != conn_id:
+            logger.warning(
+                "Ignoring response id=%s from %s: the request went to %s",
+                resp.id,
+                conn_id,
+                target,
+            )
+            return
+        del self._inflight[resp.id]
         if origin not in self._sockets:
             logger.info("Originating client %s gone; dropping response", origin)
             return

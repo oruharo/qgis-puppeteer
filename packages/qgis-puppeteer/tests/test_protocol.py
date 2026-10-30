@@ -29,10 +29,13 @@ from qgis_puppeteer.protocol import (
     Request,
     Response,
     Role,
+    UnknownMessageTypeError,
     UpdateInfo,
     decode_message,
     effective_timeout_ms,
     encode_message,
+    error_code_value,
+    reply_to_undecodable,
 )
 
 # ============================================================
@@ -323,8 +326,25 @@ class TestDecodeErrors:
             decode_message('{"id": "x"}')
 
     def test_unknown_type(self) -> None:
-        with pytest.raises(ProtocolDecodeError, match="unknown type"):
+        with pytest.raises(UnknownMessageTypeError, match="unknown type") as ei:
             decode_message('{"type": "evil_type", "id": "x"}')
+        assert (ei.value.message_id, ei.value.message_type) == ("x", "evil_type")
+
+    def test_unhashable_type_is_an_unknown_type(self) -> None:
+        with pytest.raises(UnknownMessageTypeError):
+            decode_message('{"type": ["request"], "id": "x"}')
+
+    def test_broken_message_keeps_its_id(self) -> None:
+        """壊れていても id が読めれば、受け手がその id で答えられる。"""
+        with pytest.raises(ProtocolDecodeError) as ei:
+            decode_message('{"type": "request", "id": "r-1"}')
+        assert not isinstance(ei.value, UnknownMessageTypeError)
+        assert (ei.value.message_id, ei.value.message_type) == ("r-1", "request")
+
+    def test_non_string_id_is_not_kept(self) -> None:
+        with pytest.raises(ProtocolDecodeError) as ei:
+            decode_message('{"type": "evil_type", "id": 7}')
+        assert ei.value.message_id is None
 
     def test_top_level_is_not_object(self) -> None:
         with pytest.raises(ProtocolDecodeError, match="expected JSON object"):
@@ -339,12 +359,77 @@ class TestDecodeErrors:
         with pytest.raises(ProtocolDecodeError):
             decode_message('{"type": "register", "id": "x", "role": "intruder"}')
 
-    def test_unknown_error_code(self) -> None:
-        with pytest.raises(ProtocolDecodeError):
-            decode_message(
-                '{"type": "response", "id": "x", "ok": false,'
-                ' "error": {"code": "made_up_code", "message": "x"}}'
-            )
+
+class TestTolerantDecoding:
+    """新しい版の相手が足したものを、読み捨てずに受け取る。"""
+
+    def test_unknown_error_code_is_kept_as_a_string(self) -> None:
+        msg = decode_message(
+            '{"type": "response", "id": "x", "ok": false,'
+            ' "error": {"code": "made_up_code", "message": "m", "details": {"a": 1}}}'
+        )
+        assert isinstance(msg, Response)
+        assert msg.error == Error(code="made_up_code", message="m", details={"a": 1})
+        assert error_code_value(msg.error.code) == "made_up_code"
+
+    def test_known_error_code_is_an_error_code(self) -> None:
+        msg = decode_message(
+            '{"type": "response", "id": "x", "ok": false,'
+            ' "error": {"code": "instance_timeout", "message": "m"}}'
+        )
+        assert isinstance(msg, Response)
+        assert msg.error is not None
+        assert msg.error.code is ErrorCode.INSTANCE_TIMEOUT
+        assert error_code_value(msg.error.code) == "instance_timeout"
+
+    def test_unknown_fields_are_ignored(self) -> None:
+        msg = decode_message(
+            '{"type": "request", "id": "x", "command": "c", "added_later": {"k": 1}}'
+        )
+        assert msg == Request(id="x", command="c")
+
+
+class TestReplyToUndecodable:
+    """読めなかったメッセージへの返事（Hub と Worker が使う）。"""
+
+    @staticmethod
+    def _error(text: str) -> ProtocolDecodeError:
+        with pytest.raises(ProtocolDecodeError) as ei:
+            decode_message(text)
+        return ei.value
+
+    def test_unknown_type_with_id_gets_unsupported_message(self) -> None:
+        reply = reply_to_undecodable(
+            self._error('{"type": "added_later", "id": "q-1"}'), receiver="Hub"
+        )
+        assert reply is not None
+        assert (reply.id, reply.ok) == ("q-1", False)
+        assert reply.error is not None
+        assert reply.error.code is ErrorCode.UNSUPPORTED_MESSAGE
+        assert reply.error.details == {"type": "added_later"}
+        assert reply.error.message.startswith("Hub ")
+
+    def test_broken_request_with_id_gets_invalid_command(self) -> None:
+        reply = reply_to_undecodable(
+            self._error('{"type": "request", "id": "q-2"}'), receiver="Hub"
+        )
+        assert reply is not None
+        assert reply.id == "q-2"
+        assert reply.error is not None
+        assert reply.error.code is ErrorCode.INVALID_COMMAND
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            '{"type": "added_later"}',
+            "{not json",
+            '{"type": "response", "id": "q-3"}',
+            '{"type": "register_ack", "id": "q-4"}',
+            '{"type": "list_instances_response", "id": "q-5", "instances": [{}]}',
+        ],
+    )
+    def test_no_reply_without_an_id_or_to_a_reply(self, text: str) -> None:
+        assert reply_to_undecodable(self._error(text), receiver="QGIS") is None
 
 
 # ============================================================

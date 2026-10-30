@@ -87,6 +87,16 @@ class ErrorCode(str, Enum):
     REGISTRATION_DENIED = "registration_denied"
     HANDLER_ALREADY_REGISTERED = "handler_already_registered"
     HANDLER_NOT_VISIBLE = "handler_not_visible"
+    # 受け手の知らない type のメッセージだった（新しい版の相手から来た、など）。
+    # 元のメッセージに id があれば、その id で返す。details に type
+    UNSUPPORTED_MESSAGE = "unsupported_message"
+    # 起こした側がもう待っていない launch_token の Worker の登録を断った（#16）
+    LAUNCH_ABANDONED = "launch_abandoned"
+
+
+def error_code_value(code: ErrorCode | str) -> str:
+    """``Error.code`` を文字列にする。知らないコード（文字列のまま）もそのまま返す。"""
+    return code.value if isinstance(code, ErrorCode) else str(code)
 
 
 # ============================================================
@@ -154,9 +164,15 @@ class RejectedRegistration:
 
 @dataclass(frozen=True)
 class Error:
-    """エラーレスポンスの詳細。"""
+    """エラーレスポンスの詳細。
 
-    code: ErrorCode
+    ``code`` は、この版が知っているコードなら ``ErrorCode``、知らないコード
+    （新しい版の相手が足したもの）なら受け取った文字列のまま。``ErrorCode`` は
+    ``str`` の Enum なので、``error.code == ErrorCode.X`` はどちらでも書ける。
+    文字列が要るときは ``error_code_value()`` を使う。
+    """
+
+    code: ErrorCode | str
     message: str
     # ambiguous の場合の候補、label_conflict の suggested_label など、
     # エラーコード固有の付加情報を格納する
@@ -340,7 +356,7 @@ class AbandonLaunch:
     """Client → Hub: この ``launch_token`` で起こした QGIS をもう待たない（#16）。
 
     ``spawn_qgis`` は登録を待ちきれなかったときに送る。Hub はこの token の登録を
-    以後断り（`ABANDONED_LAUNCH_REASON`）、その QGIS は QGIS Puppeteer
+    以後断り（``ErrorCode.LAUNCH_ABANDONED``）、その QGIS は QGIS Puppeteer
     プラグインが自分で閉じる。待ちが切れた後に遅れて登録してくる QGIS を
     残さないため。Hub は応答しない（古い Hub は読めずにエラーを返すが、
     クライアントは知らない id の返事を捨てる）。
@@ -352,12 +368,6 @@ class AbandonLaunch:
     @property
     def type(self) -> MessageType:
         return MessageType.ABANDON_LAUNCH
-
-
-# 見捨てた launch_token の登録を断るときの ``Error.details["reason"]``（#16）。
-# エラーコード自体は既存の ``label_conflict`` を使う（古いプラグインは新しい
-# コードを読めないため）
-ABANDONED_LAUNCH_REASON = "launch_abandoned"
 
 
 # Union 型：プロトコルで流通する全メッセージ型
@@ -380,7 +390,31 @@ Message = (
 
 
 class ProtocolDecodeError(ValueError):
-    """不正な JSON / 未知の type / 必須フィールド欠落などの解読失敗。"""
+    """不正な JSON / 未知の type / 必須フィールド欠落などの解読失敗。
+
+    JSON のオブジェクトとしては読めたときは、``message_id`` に ``id``（文字列の
+    ときだけ）、``message_type`` に ``type`` の値が入る。受け手はこれを見て、
+    送り主が答えを待たずに済むよう、その id でエラーを返せる。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        message_id: str | None = None,
+        message_type: object = None,
+    ) -> None:
+        super().__init__(message)
+        self.message_id = message_id
+        self.message_type = message_type
+
+
+class UnknownMessageTypeError(ProtocolDecodeError):
+    """``type`` がこの版の知らない値だった。
+
+    新しい版の相手が足したメッセージかもしれないので、壊れたメッセージとは
+    分けて扱う（受け手は ``unsupported_message`` で答える）。
+    """
 
 
 def encode_message(message: Message) -> str:
@@ -469,22 +503,79 @@ def decode_message(text: str) -> Message:
     if not isinstance(raw, dict):
         raise ProtocolDecodeError(f"expected JSON object at top level, got {type(raw).__name__}")
 
+    raw_id = raw.get("id")
+    message_id = raw_id if isinstance(raw_id, str) else None
     type_str = raw.get("type")
     if type_str is None:
-        raise ProtocolDecodeError("missing 'type' field")
+        raise ProtocolDecodeError("missing 'type' field", message_id=message_id)
 
     try:
         msg_type = MessageType(type_str)
-    except ValueError as e:
-        raise ProtocolDecodeError(f"unknown type: {type_str!r}") from e
+    except (ValueError, TypeError) as e:
+        raise UnknownMessageTypeError(
+            f"unknown type: {type_str!r}", message_id=message_id, message_type=type_str
+        ) from e
 
-    # type は dataclass の property で自動付与されるため、payload からは除外
+    # type は dataclass の property で自動付与されるため、payload からは除外。
+    # 知らないフィールドは各 _build_* が読まないので無視される（新しい版の相手が
+    # 足したフィールドで落ちないように）
     payload = {k: v for k, v in raw.items() if k != "type"}
 
     try:
         return _build_message(msg_type, payload)
-    except (TypeError, KeyError, ValueError) as e:
-        raise ProtocolDecodeError(f"failed to build {msg_type.value} message: {e}") from e
+    except (TypeError, KeyError, ValueError, AttributeError) as e:
+        raise ProtocolDecodeError(
+            f"failed to build {msg_type.value} message: {e}",
+            message_id=message_id,
+            message_type=type_str,
+        ) from e
+
+
+# 応答の type。壊れていても、これには答えない（応答に応答しない）
+_REPLY_TYPES = frozenset(
+    {
+        MessageType.RESPONSE.value,
+        MessageType.REGISTER_ACK.value,
+        MessageType.LIST_INSTANCES_RESPONSE.value,
+    }
+)
+
+
+def reply_to_undecodable(error: ProtocolDecodeError, *, receiver: str) -> Response | None:
+    """読めなかったメッセージへの返事を作る。返さなくてよいときは None。
+
+    送り主が答えを待ち続けずに済むよう、id が分かれば、その id でエラーを返す。
+    知らない type なら ``unsupported_message``（新しい版の相手が足した
+    メッセージかもしれない）、壊れていれば ``invalid_command``。id が分からない
+    ときは、返しても送り主が照合できないので返さない。応答が壊れていたときも
+    返さない。
+
+    Args:
+        error: ``decode_message`` が上げた例外
+        receiver: 受け手の名前（"Hub" / "QGIS"）。返事の文言に入る
+    """
+    if error.message_id is None:
+        return None
+    if isinstance(error.message_type, str) and error.message_type in _REPLY_TYPES:
+        return None
+    if isinstance(error, UnknownMessageTypeError):
+        return Response(
+            id=error.message_id,
+            ok=False,
+            error=Error(
+                code=ErrorCode.UNSUPPORTED_MESSAGE,
+                message=(
+                    f"{receiver} does not know the message type {error.message_type!r} "
+                    "(is it from a newer version?)"
+                ),
+                details={"type": error.message_type},
+            ),
+        )
+    return Response(
+        id=error.message_id,
+        ok=False,
+        error=Error(code=ErrorCode.INVALID_COMMAND, message=f"Protocol decode error: {error}"),
+    )
 
 
 # ============================================================
@@ -597,11 +688,20 @@ def _build_message(msg_type: MessageType, payload: dict[str, Any]) -> Message:
 
 
 def _build_error(raw: dict[str, Any] | None) -> Error | None:
-    """dict から Error dataclass を構築する（None 透過）。"""
+    """dict から Error dataclass を構築する（None 透過）。
+
+    知らないエラーコードは落とさず、文字列のまま持つ（新しい版の相手が足した
+    コードで、応答ごと読み捨てて呼び出し側を時間切れまで待たせないため）。
+    """
     if raw is None:
         return None
+    raw_code = str(raw["code"])
+    try:
+        code: ErrorCode | str = ErrorCode(raw_code)
+    except ValueError:
+        code = raw_code
     return Error(
-        code=ErrorCode(raw["code"]),
+        code=code,
         message=str(raw.get("message", "")),
         details=dict(raw.get("details", {})),
     )

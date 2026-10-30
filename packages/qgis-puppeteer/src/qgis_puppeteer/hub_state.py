@@ -23,12 +23,12 @@ from pathlib import PurePosixPath, PureWindowsPath
 from urllib.parse import urlparse
 
 from qgis_puppeteer.protocol import (
-    ABANDONED_LAUNCH_REASON,
     Error,
     ErrorCode,
     InstanceInfo,
     RegisterRequest,
     RejectedRegistration,
+    error_code_value,
 )
 
 # ============================================================
@@ -379,12 +379,11 @@ class HubState:
             return self._reject(
                 req,
                 Error(
-                    code=ErrorCode.LABEL_CONFLICT,
+                    code=ErrorCode.LAUNCH_ABANDONED,
                     message=(
                         "The side that started this QGIS (launch_token="
                         f"{req.launch_token}) stopped waiting for it"
                     ),
-                    details={"reason": ABANDONED_LAUNCH_REASON},
                 ),
             )
 
@@ -562,7 +561,7 @@ class HubState:
                     launch_token=token,
                     pid=req.pid,
                     label=req.label,
-                    code=error.code.value,
+                    code=error_code_value(error.code),
                     message=error.message,
                 ),
                 self._clock(),

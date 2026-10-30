@@ -62,6 +62,7 @@ from qgis_puppeteer.protocol import (
     Role,
     decode_message,
     encode_message,
+    error_code_value,
 )
 from qgis_puppeteer.qgis_env import find_qgis_python_launcher
 from qgis_puppeteer.worker_state import (
@@ -201,6 +202,7 @@ __all__ = [
     "Role",
     "decode_message",
     "encode_message",
+    "error_code_value",
     # worker_state（Worker 純ロジック）
     "Handler",
     "WorkerConfig",

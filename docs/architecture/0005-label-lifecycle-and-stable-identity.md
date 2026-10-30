@@ -268,8 +268,10 @@ token も label 規約も無い場合に限り、Hub は `registered_seq`（単�
 > - Hub は断った登録を token ごとに覚え、`list_instances(include_rejected=True)` で
 >   理由と QGIS の pid を返す（#13）。起こした側は待たずに失敗し、pid で止める
 > - 起こした側が登録を待ちきれなかったら、`abandon_launch`（Hub あて、応答なし）で
->   token を知らせる。Hub はその token の登録を以後断る（コードは `label_conflict`、
->   `details.reason = "launch_abandoned"`。古いプラグインが読めるコードのまま）（#16）
+>   token を知らせる。Hub はその token の登録を以後断る（コードは `launch_abandoned`）（#16）
+>   - 当初は古いプラグインが読めるよう `label_conflict` と `details.reason = "launch_abandoned"`
+>     にしていた。知らないコードも読めるようになった（ADR-0001 §3、2026-10-30）ので、
+>     専用のコードにした
 > - QGIS Puppeteer プラグインは、token 付きで起こされ、まだ一度も登録できていない
 >   ときに登録を断られたら、理由を問わず自分で閉じる（閉じきれなければ約 12 秒後に
 >   強制終了し、理由を QgsMessageLog と stderr に残す）。一度でも登録できた QGIS は、

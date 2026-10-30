@@ -53,6 +53,7 @@ from qgis_puppeteer.protocol import (
     Role,
     decode_message,
     encode_message,
+    error_code_value,
 )
 
 logger = logging.getLogger("qgis_puppeteer.client")
@@ -101,7 +102,7 @@ class RegisterError(AutomationClientError):
 
     def __init__(self, error: Error | None) -> None:
         self.error = error
-        msg = f"register failed: {error.code.value if error else 'unknown'}"
+        msg = f"register failed: {error_code_value(error.code) if error else 'unknown'}"
         if error:
             msg += f" ({error.message})"
         super().__init__(msg)
@@ -112,10 +113,11 @@ class RequestError(AutomationClientError):
 
     def __init__(self, error: Error) -> None:
         self.error = error
-        super().__init__(f"{error.code.value}: {error.message}")
+        super().__init__(f"{error_code_value(error.code)}: {error.message}")
 
     @property
-    def code(self) -> ErrorCode:
+    def code(self) -> ErrorCode | str:
+        """エラーコード。この版の知らないコードは文字列のまま（``Error.code``）。"""
         return self.error.code
 
     @property

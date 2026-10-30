@@ -355,3 +355,49 @@ class TestWorkerIntegration:
             finally:
                 worker.disconnect_from_hub()
                 _spin_until(app, lambda: not worker.is_registered, timeout=3.0)
+
+    def test_worker_answers_an_unknown_message_type(self) -> None:
+        """新しい Hub から知らない type が来ても、id があれば unsupported_message で答える。"""
+        import json
+
+        from websockets.asyncio.server import serve
+
+        port = _get_free_port()
+        replies: list[Any] = []
+        server_ready = threading.Event()
+
+        async def fake_hub() -> None:
+            done = asyncio.Event()
+
+            async def handler(ws: Any) -> None:
+                reg = json.loads(await ws.recv())
+                await ws.send(
+                    json.dumps(
+                        {"type": "register_ack", "id": reg["id"], "ok": True, "instance_id": "w-x"}
+                    )
+                )
+                await ws.send(json.dumps({"type": "added_later", "id": "h-1"}))
+                replies.append(json.loads(await asyncio.wait_for(ws.recv(), 5.0)))
+                done.set()
+
+            async with serve(handler, "127.0.0.1", port):
+                server_ready.set()
+                await asyncio.wait_for(done.wait(), 10.0)
+
+        holder: list[Any] = []
+        t = _asyncio_in_thread(fake_hub, holder)
+        assert server_ready.wait(5.0)
+        app = _qapp()
+        worker = Worker(hub_url=f"ws://127.0.0.1:{port}", pid=9005, label="e2e-new-hub")
+        try:
+            worker.connect_to_hub()
+            _spin_while_thread(app, t)
+        finally:
+            worker.disconnect_from_hub()
+            _spin_until(app, lambda: not worker.is_registered, timeout=3.0)
+
+        assert holder == [("ok", None)], holder
+        [reply] = replies
+        assert (reply["type"], reply["id"], reply["ok"]) == ("response", "h-1", False)
+        assert reply["error"]["code"] == "unsupported_message"
+        assert reply["error"]["details"] == {"type": "added_later"}
