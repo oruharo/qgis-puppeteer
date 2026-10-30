@@ -356,7 +356,7 @@ label が空の場合は `{project_basename}-{pid 下4桁}` を自動採番。
 
 > **2026-10-30 改訂（Hub ファイルで決める）**: 「親がロックを持ったまま、Hub が使えるようになったのを確かめてから放す」モデルはそのままに、次のように変えた。この節の以下のコード（port 別のロック / pid ファイル、TCP probe、`bind` 失敗で降りる敗者）は当初案として残す。実装は `qgis_puppeteer.hub_spawn`・`qgis_puppeteer.hub_probe`。
 >
-> - **「生きた Hub」は Hub ファイルで決める**（`find_live_hub`）：Hub ファイルがある・その `pid` が生きている・ファイルのアドレスで挨拶（§3）が通る。TCP probe はポートを開いた別のプロセスと Hub を見分けられないので使わない。Hub は listen してから Hub ファイルを書くので、ファイルが現れるまでの窓も挨拶で塞がる。
+> - **「生きた Hub」は Hub ファイルで決める**（`find_live_hub`）：Hub ファイルがある・ファイルのアドレスで挨拶（§3）が通る。ファイルの `pid` は確かめない（2026-10-31 改訂。読む側から Hub のプロセスが見えるとは限らない。ADR-0006 D2・D6）。TCP probe はポートを開いた別のプロセスと Hub を見分けられないので使わない。Hub は listen してから Hub ファイルを書くので、ファイルが現れるまでの窓も挨拶で塞がる。
 > - Hub は port 0 で待ち受けるので、ポートはぶつからない。ロックは Hub ファイルの隣（`hub.json` なら `hub.json.lock`）で、Hub ファイルごとに分かれる。pid ファイルは廃止（pid は Hub ファイルに書く）。
 > - 手順（`ensure_hub`）：生きた Hub がいれば使う。いなければロックを取り、もう一度確かめてから Hub を起こし、生きた Hub が現れるまで待つ。ロックを別のプロセスが持っていれば、生きた Hub が現れるまで待つ。起こした Hub が先に終われば、その終了コードを `HubStartupError` に書く。
 > - Hub も起動時に確かめる：同じ Hub ファイルに生きた Hub がもういれば、ファイルを上書きせずに降りる。
@@ -842,7 +842,7 @@ Origin 検証はブラウザしか防がない。同じ機械のほかのプロ�
 - 読めない（無い・壊れた・書式の版が違う・token が無い）ときは `HubFileError`（`OSError` の子）。MCP gateway は `hub_unreachable` として返す
 - pytest プラグインが起こす Hub は session の一時フォルダの Hub ファイルを使い、`spawn_qgis` が起こす QGIS には `QPUPPETEER_HUB_FILE` でそれを教える
 
-> **2026-10-30 追記（ネットワーク用の Hub ファイル）**: `--listen` の Hub は、ネットワーク用の token（ローカル用と別）・自己署名の証明書と RSA 2048 の鍵（`qgis_puppeteer.selfsigned` が標準ライブラリだけで作る）をリモートのフォルダ（`--remote-dir`。既定は Windows が `%LOCALAPPDATA%` の、POSIX が `$XDG_STATE_HOME` か `~/.local/state` の `qgis_puppeteer/remote`。0600）に一度だけ作って残し、起きるたびに使い回す（`--rotate` で作り直す。壊れていれば 3 つとも作り直す）。別の機械へ写す `remote/hub.json` には、ネットワークのアドレス（`0.0.0.0` ならループバック以外の自機の IPv4）・ネットワーク用の token・`tls.fingerprint_sha256` を書き、pid は書かない（Hub が止まっても消さない）。クライアントはこれを `QPUPPETEER_HUB_FILE` で指す。CA と名前は確かめず、証明書の SHA-256 がファイルの指紋と一致するかだけを挨拶の前に確かめ（pin）、違えば切って `HubAuthError`（ほかのアドレスは試さない）。挨拶（hello / proof）は TLS の中でもそのまま行う。pid の無いファイルでは pid を確かめない。
+> **2026-10-30 追記（ネットワーク用の Hub ファイル）**: `--listen` の Hub は、ネットワーク用の token（ローカル用と別）・自己署名の証明書と RSA 2048 の鍵（`qgis_puppeteer.selfsigned` が標準ライブラリだけで作る）をリモートのフォルダ（`--remote-dir`。既定は Windows が `%LOCALAPPDATA%` の、POSIX が `$XDG_STATE_HOME` か `~/.local/state` の `qgis_puppeteer/remote`。0600）に一度だけ作って残し、起きるたびに使い回す（`--rotate` で作り直す。壊れていれば 3 つとも作り直す）。別の機械へ写す `remote/hub.json` には、ネットワークのアドレス（`0.0.0.0` ならループバック以外の自機の IPv4）・ネットワーク用の token・`tls.fingerprint_sha256` を書き、pid は書かない（Hub が止まっても消さない）。クライアントはこれを `QPUPPETEER_HUB_FILE` で指す。CA と名前は確かめず、証明書の SHA-256 がファイルの指紋と一致するかだけを挨拶の前に確かめ（pin）、違えば切って `HubAuthError`（ほかのアドレスは試さない）。挨拶（hello / proof）は TLS の中でもそのまま行う。
 
 ### 10. 将来検討事項
 

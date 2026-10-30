@@ -73,8 +73,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   close the connection and raise `HubAuthError` (`HubFingerprintError`, a
   `HubProbeError`, in `greet_hub`) without trying the other addresses;
   `find_live_hub` then returns `None`. A `tls` without a usable
-  fingerprint is a `HubFileError`. A Hub file without a `pid` skips the pid
-  check.
+  fingerprint is a `HubFileError`.
 - **The address can be overridden.** `AutomationClient(address=...)`,
   `find_live_hub(path, address=...)`, `E2EAutomationClient(address=...)` and
   the pytest option `--qgis-hub-address` (dev mode only) connect to that
@@ -685,9 +684,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     file and starts a Hub when that file names no live Hub. **If you keep
     `QPUPPETEER_HUB_FILE` set in your environment, a QGIS you start by hand
     no longer starts a Hub.**
-  - A Hub is live when its Hub file exists, the `pid` in it is running and
-    the greeting at its address succeeds (`qgis_puppeteer.hub_probe`), not
-    when something accepts TCP on the port. The lock that keeps two QGIS from
+  - A Hub is live when its Hub file exists and the greeting at its address
+    succeeds (`qgis_puppeteer.hub_probe`), not when something accepts TCP on
+    the port. The `pid` in the file is not checked: the reader may not see
+    the Hub's processes (WSL reading a Windows Hub file), and a stale file
+    fails the greeting anyway. The lock that keeps two QGIS from
     starting a Hub at once is next to the Hub file (`hub.json.lock`), and a
     Hub that finds a live Hub on its Hub file exits instead of taking it
     over.

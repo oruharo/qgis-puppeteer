@@ -76,8 +76,10 @@ Hub は待ち受けを始めたら、本人だけが読めるファイルに、�
   フォルダ 0700・ファイル 0600）。全員が同じ規則で決める。
 - **ポートは OS に選ばせる（port 0）**。ユーザーごと・pytest の session ごとに別の Hub・
   別のポートになり、空きポートの取り合いが無くなる。
-- 「生きた Hub」は、Hub ファイルがある・pid が生きている・ファイルのアドレスで挨拶（D3）が
-  通る、の 3 つで決める。TCP が通るだけでは Hub とみなさない。
+- 「生きた Hub」は、Hub ファイルがある・ファイルのアドレスで挨拶（D3）が通る、の 2 つで
+  決める。TCP が通るだけでは Hub とみなさない。ファイルの pid は確かめない（読む側から
+  Hub のプロセスが見えるとは限らない。D6）。古いファイルは挨拶で見分けられる（Hub が
+  落ちていればつながらず、同じポートに別の Hub が起きていれば token が合わない）。
 - lock は Hub ファイルの隣に置き（Hub ファイルごと・ユーザーごとに分かれる）、pid ファイルと
   ログの共有をやめる（ログも Hub ファイルの隣）。
 - 環境変数は `QPUPPETEER_HUB_FILE` 1 つにする。`QPUPPETEER_HUB_URL` / `HOST` / `PORT` /
@@ -160,9 +162,9 @@ Hub:          register_ack {…, protocol_version, package_version, hub_proof}
 - NAT モード（WSL の既定）では WSL から Windows の 127.0.0.1 に届かないので、Windows で
   `--listen` の Hub を常駐させ、その `remote\hub.json` を指す。
 - mirrored モード（`networkingMode=mirrored`）では WSL の 127.0.0.1 が Windows に届くので、
-  Windows の既定の Hub ファイルを `/mnt/c/...` で直接指す使い方も考えた。ただし、その
-  ファイルの pid は Windows の pid で WSL からは見えないため、pid を確かめる「生きた Hub」の
-  判定（pytest の dev モード）は通らない。いまは `--listen` の Hub を使う。
+  Windows の既定の Hub ファイルを `/mnt/c/...` で直接指してもよい。そのファイルの pid は
+  Windows の pid で WSL からは見えない。はじめは「生きた Hub」の判定で pid を確かめていた
+  ため通らず、`--listen` の Hub を使うとしていたが、pid を確かめるのをやめた（D2）。
 
 ## Consequences
 
@@ -183,7 +185,8 @@ Hub:          register_ack {…, protocol_version, package_version, hub_proof}
 - プロトコル 2 は版 1 とつながらない。QGIS のプラグイン・Hub・pytest 側を同じ版でそろえる必要がある。
 - ネットワーク用の Hub ファイルは秘密の情報で、渡した相手は QGIS に Python を実行させられる。
   管理は利用者に任せる。
-- WSL の mirrored モードで、Windows の既定の Hub ファイルを直接使えない（D6）。
+- pid を確かめないので、古い Hub ファイルでも挨拶まで試す。アドレスがループバックなら
+  断られてすぐ終わるが、届かないアドレスを指していれば挨拶の時間切れ（既定 2 秒）まで待つ。
 
 ### Breaking changes
 

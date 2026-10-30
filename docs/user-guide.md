@@ -2632,10 +2632,16 @@ export QPUPPETEER_HUB_FILE=/mnt/c/Users/<名前>/AppData/Local/qgis_puppeteer/re
   見た Windows のアドレス（`ip route show default` の `via` の後ろ）を
   `--qgis-hub-address` / `address=` で渡す。WSL の仮想のネットワークは、
   ファイアウォールでパブリックのネットワークとして扱われることがある。
-- mirrored モード（`.wslconfig` の `networkingMode=mirrored`）でも同じ手順を使う。
-  Windows の既定の Hub ファイル（`qgis_puppeteer\hub.json`）を直接指すのは避ける。
-  中の pid は Windows のプロセスのもので WSL からは見えないので、pytest の dev モードは
-  「Hub が動いていない」とみなして止まる。
+- mirrored モード（`.wslconfig` の `networkingMode=mirrored`）では WSL の 127.0.0.1 が
+  Windows に届くので、`--listen` の Hub を起こさずに、Windows の既定の Hub ファイルを
+  直接指してもよい:
+
+  ```bash
+  export QPUPPETEER_HUB_FILE=/mnt/c/Users/<名前>/AppData/Local/qgis_puppeteer/hub.json
+  ```
+
+  このファイルの token は Hub が起きるたびに変わるが、毎回同じ場所に書かれるので
+  指し直さなくてよい。
 - WSL の pytest は Windows の QGIS を起こせないので、dev モードで走らせる。
 
 <a id="permissions"></a>

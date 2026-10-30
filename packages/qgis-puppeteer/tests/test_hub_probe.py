@@ -1,4 +1,4 @@
-"""hub_probe のテスト：pid の生死、アドレスの分解、挨拶、生きた Hub の見つけ方。
+"""hub_probe のテスト：アドレスの分解、挨拶、生きた Hub の見つけ方。
 
 偽の Hub は websockets の同期サーバを別スレッドで立てる（``greet_hub`` は同期で、
 標準ライブラリだけの小さな WebSocket クライアントなので、本物の websockets の
@@ -29,7 +29,6 @@ from qgis_puppeteer.hub_probe import (
     describe_hub_file,
     find_live_hub,
     greet_hub,
-    pid_alive,
     split_address,
 )
 from qgis_puppeteer.protocol import (
@@ -165,23 +164,6 @@ class TestSplitAddress:
 
 
 # ============================================================
-# pid_alive
-# ============================================================
-
-
-class TestPidAlive:
-    def test_this_process_is_alive(self) -> None:
-        assert pid_alive(os.getpid()) is True
-
-    @pytest.mark.parametrize("pid", [0, -1])
-    def test_non_positive_pids_are_not_alive(self, pid: int) -> None:
-        assert pid_alive(pid) is False
-
-    def test_a_finished_process_is_not_alive(self) -> None:
-        assert pid_alive(_dead_pid()) is False
-
-
-# ============================================================
 # greet_hub
 # ============================================================
 
@@ -279,12 +261,12 @@ class TestFindLiveHub:
         (tmp_path / "hub.json").write_text("{not json", encoding="utf-8")
         assert find_live_hub(tmp_path / "hub.json") is None
 
-    def test_a_dead_pid_means_no_hub(self, tmp_path: Path) -> None:
-        """pid が死んでいれば、アドレスで誰かが待っていても見ない（挨拶もしない）。"""
+    def test_a_pid_this_side_cannot_see_does_not_matter(self, tmp_path: Path) -> None:
+        """pid が見えなくても、挨拶が通れば生きた Hub（WSL から Windows の Hub ファイル）。"""
         hub = _FakeHub()
         with _serve(hub) as address:
-            _write(tmp_path / "hub.json", address, token=hub.token, pid=_dead_pid())
-            assert find_live_hub(tmp_path / "hub.json") is None
+            written = _write(tmp_path / "hub.json", address, token=hub.token, pid=_dead_pid())
+            assert find_live_hub(tmp_path / "hub.json") == written
 
     def test_nobody_at_the_address_means_no_hub(self, tmp_path: Path) -> None:
         _write(tmp_path / "hub.json", f"127.0.0.1:{_closed_port()}", token="t")

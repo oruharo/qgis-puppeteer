@@ -1,13 +1,16 @@
-"""Hub が生きているかを確かめる（Hub ファイル・pid・挨拶）。
+"""Hub が生きているかを確かめる（Hub ファイル・挨拶）。
 
-「生きた Hub がいる」とは、次の 3 つがそろうこと（同じ機械の Hub）:
+「生きた Hub がいる」とは、次の 2 つがそろうこと:
 
 1. Hub ファイルがあって読める
-2. ファイルの pid のプロセスが生きている（pid の無い、別の機械へ写すネットワーク用の
-   ファイルでは確かめない）
-3. ファイルの ``addresses`` のどれかで挨拶（``qgis_puppeteer.handshake``）が通る
+2. ファイルの ``addresses`` のどれかで挨拶（``qgis_puppeteer.handshake``）が通る
    ＝相手が同じ token を知っている Hub だと、互いに確かめられた。ファイルに ``tls``
    があれば TLS でつなぎ、証明書の指紋も照合する（``qgis_puppeteer.hub_remote``）
+
+ファイルの pid は確かめない。読む側から Hub の pid が見えるとは限らない（WSL の
+mirrored モードで Windows の Hub ファイルを読むと、Windows の pid は WSL から
+見えない）。古いファイルは挨拶で見分けられる（Hub が落ちていればつながらず、同じ
+ポートに別の Hub が起きていれば token が合わない）。
 
 どれかが欠ければ、そのファイルは古い（Hub が落ちた、別のプログラムがそのポートを
 使っている、など）とみなして無視する。指紋の合わない相手が出たら、ほかのアドレスは
@@ -27,7 +30,6 @@ import hashlib
 import os
 import socket
 import struct
-import sys
 import time
 import uuid
 from pathlib import Path
@@ -78,57 +80,6 @@ class HubProbeError(Exception):
 
 class HubFingerprintError(HubProbeError):
     """TLS の相手の証明書が Hub ファイルの指紋と合わない（挨拶の前に切った）。"""
-
-
-# ============================================================
-# pid
-# ============================================================
-
-
-def pid_alive(pid: int) -> bool:
-    """pid のプロセスが生きているか。分からないときは True（生きている側に倒す）。"""
-    if pid <= 0:
-        return False
-    if sys.platform == "win32":
-        return _pid_alive_windows(pid)
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # 別のユーザーのプロセスとして生きている
-        return True
-    except OSError:
-        return True
-    return True
-
-
-def _pid_alive_windows(pid: int) -> bool:
-    import ctypes
-    from ctypes import wintypes
-
-    process_query_limited_information = 0x1000
-    error_access_denied = 5
-    still_active = 259
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
-    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
-    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
-    kernel32.CloseHandle.restype = wintypes.BOOL
-
-    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
-    if not handle:
-        # 無いプロセスは ERROR_INVALID_PARAMETER。権限で開けないのは生きている
-        return ctypes.get_last_error() == error_access_denied
-    try:
-        code = wintypes.DWORD()
-        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-            return True
-        return code.value == still_active
-    finally:
-        kernel32.CloseHandle(handle)
 
 
 # ============================================================
@@ -244,10 +195,10 @@ def find_live_hub(
 ) -> HubFileInfo | None:
     """``path`` の Hub ファイルが生きた Hub を指していれば、その中身を返す。
 
-    ファイルが無い・壊れている・pid が死んでいる・どのアドレスでも挨拶が通らないなら
-    None（古いファイルは無視する）。TLS で証明書の指紋が合わない相手が出たら、
-    ほかのアドレスは試さずに None（``AutomationClient`` はそこで ``HubAuthError`` に
-    なるので、ここで「生きている」と答えない）。
+    ファイルが無い・壊れている・どのアドレスでも挨拶が通らないなら None（古いファイルは
+    無視する）。ファイルの pid は確かめない（モジュールの説明）。TLS で証明書の指紋が
+    合わない相手が出たら、ほかのアドレスは試さずに None（``AutomationClient`` はそこで
+    ``HubAuthError`` になるので、ここで「生きている」と答えない）。
 
     Args:
         address: ファイルの ``addresses`` の代わりに試すアドレス（VM の NAT の先など、
@@ -257,8 +208,6 @@ def find_live_hub(
         info = read_hub_file(path)
         fingerprint = pinned_fingerprint(info, path)
     except HubFileError:
-        return None
-    if info.pid is not None and not pid_alive(info.pid):
         return None
     for candidate in (address,) if address is not None else info.addresses:
         try:
