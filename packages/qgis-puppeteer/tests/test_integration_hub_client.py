@@ -87,20 +87,22 @@ def _hub_subprocess(port: int, *extra_args: str) -> Iterator[subprocess.Popen[by
 
 @contextmanager
 def _hub_process(port: int, hub_file: Path, *extra_args: str) -> Iterator[subprocess.Popen[bytes]]:
-    proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "qgis_puppeteer.hub",
-            "--port",
-            str(port),
-            "--hub-file",
-            str(hub_file),
-            *extra_args,
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    # 出力はファイルに向ける（読まない PIPE だと数 KB で詰まり、Hub がログの書き込みで止まる）
+    with hub_file.with_name("hub.log").open("ab") as log:
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "qgis_puppeteer.hub",
+                "--port",
+                str(port),
+                "--hub-file",
+                str(hub_file),
+                *extra_args,
+            ],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
     try:
         _wait_hub_live(hub_file)
         yield proc

@@ -102,30 +102,31 @@ def _remote_hub(
     # 前の回の remote の hub.json が残っていても、新しい Hub が書き直すまで待てるように
     with suppress(FileNotFoundError):
         remote_file.unlink()
-    proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "qgis_puppeteer.hub",
-            "--hub-file",
-            str(hub_file),
-            "--listen",
-            f"{host}:{listen_port}",
-            "--remote-dir",
-            str(remote_dir),
-            *(["--rotate"] if rotate else []),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    # 出力はファイルに向ける（読まない PIPE だと数 KB で詰まり、Hub がログの書き込みで止まる）
+    log_path = tmp / "hub.log"
+    with log_path.open("ab") as log:
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "qgis_puppeteer.hub",
+                "--hub-file",
+                str(hub_file),
+                "--listen",
+                f"{host}:{listen_port}",
+                "--remote-dir",
+                str(remote_dir),
+                *(["--rotate"] if rotate else []),
+            ],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
     try:
         deadline = time.monotonic() + _START_TIMEOUT_S
         while find_live_hub(remote_file) is None:
             if proc.poll() is not None:
-                _, err = proc.communicate()
-                raise RuntimeError(
-                    f"Hub exited with {proc.returncode}: {err.decode(errors='replace')[-2000:]}"
-                )
+                tail = log_path.read_text(encoding="utf-8", errors="replace")[-2000:]
+                raise RuntimeError(f"Hub exited with {proc.returncode}: {tail}")
             if time.monotonic() > deadline:
                 raise TimeoutError(f"the network Hub file {remote_file} did not become live")
             time.sleep(0.2)

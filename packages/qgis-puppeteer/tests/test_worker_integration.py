@@ -110,11 +110,13 @@ def hub_command(port: int, hub_file: Path) -> list[str]:
 
 @contextmanager
 def _hub_process(port: int, hub_file: Path) -> Iterator[subprocess.Popen[bytes]]:
-    proc = subprocess.Popen(
-        hub_command(port, hub_file),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    # 出力はファイルに向ける（読まない PIPE だと数 KB で詰まり、Hub がログの書き込みで止まる）
+    with hub_file.with_name("hub.log").open("ab") as log:
+        proc = subprocess.Popen(
+            hub_command(port, hub_file),
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
     try:
         _wait_hub_live(hub_file)
         yield proc
