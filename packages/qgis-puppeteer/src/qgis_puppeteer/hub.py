@@ -316,6 +316,11 @@ class Hub(QObject):
 
         while self._server.hasPendingConnections():
             ws = self._server.nextPendingConnection()
+            # 受け取った接続は Python 側が持ち主になっている。そのままだと
+            # `_sockets` から外した瞬間に C++ のオブジェクトが消え、それが
+            # その接続の disconnected の中だと落ちる。Hub の子にして C++ 側に
+            # 持たせ、消すのは `_on_disconnected` の deleteLater に任せる
+            ws.setParent(self)
             conn_id = str(id(ws))
             self._sockets[conn_id] = ws
             # kind は register メッセージ受信時に確定するため、ここでは未定
@@ -749,7 +754,10 @@ class Hub(QObject):
             self._inflight = {
                 rid: entry for rid, entry in self._inflight.items() if entry[0] != conn_id
             }
-        self._sockets.pop(conn_id, None)
+        ws = self._sockets.pop(conn_id, None)
+        if ws is not None:
+            # いまはこの接続の disconnected の中なので、すぐには消さない
+            ws.deleteLater()
         self._hello_nonces.pop(conn_id, None)
         self._sessions.pop(conn_id, None)
         logger.info("Disconnected: %s (kind=%s)", conn_id, kind)

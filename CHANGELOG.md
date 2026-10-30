@@ -837,6 +837,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The Hub no longer crashes when a connection closes.** It let go of a
+  closed connection while that connection was still delivering its
+  `disconnected` signal, which could free the socket under Qt and crash the
+  Hub (an access violation, `0xC0000005` on Windows), most often just after
+  it started, when the check that the Hub is alive disconnects. The Hub now
+  owns its connections on the Qt side and deletes a closed one only after
+  that signal returns.
+
 - **A Hub that cannot listen exits with an error.** It exited with 0, as if
   another Hub had won the port, so whoever started it could not tell a
   failure from a normal stop. It now exits with 1 and logs why.
