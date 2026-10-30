@@ -54,6 +54,17 @@ class TestBuildRegister:
         assert msg.label is None
         assert msg.project is None
 
+    def test_carries_the_handshake_and_versions(self) -> None:
+        """hello への答え（nonce・proof・選んだ版）と、話せる範囲・ライブラリの版を載せる。"""
+        from qgis_puppeteer._version import __version__
+        from qgis_puppeteer.protocol import SUPPORTED_PROTOCOL
+
+        state = WorkerState(config=WorkerConfig(pid=1, label="l"))
+        msg = state.build_register("m", nonce="n-1", proof="p-1", protocol_version=2)
+        assert (msg.nonce, msg.proof, msg.protocol_version) == ("n-1", "p-1", 2)
+        assert msg.protocol == SUPPORTED_PROTOCOL
+        assert msg.package_version == __version__
+
 
 class TestReconnectBackoff:
     def test_doubles_per_failure_and_caps(self) -> None:
@@ -447,6 +458,22 @@ class TestRegisterFailureReason:
         # この版の知らないコードも、そのまま理由になる
         assert register_failure_reason(Error("added_later", "x")) == "added_later"
         assert register_failure_reason(None) == "unknown"
+
+    def test_a_version_mismatch_asks_to_install_the_same_version(self) -> None:
+        """版が合わなければ、Hub とこのプラグインの版を並べて「同じ版を」と言う。"""
+        from qgis_puppeteer._version import __version__
+        from qgis_puppeteer.protocol import Error, ErrorCode
+        from qgis_puppeteer.worker_state import register_failure_reason
+
+        err = Error(ErrorCode.PROTOCOL_VERSION_MISMATCH, "x", {"hub_package_version": "9.9.9"})
+        assert register_failure_reason(err) == (
+            "protocol_version_mismatch: the Hub runs qgis-puppeteer 9.9.9 and this "
+            f"plugin is {__version__}; install the same version"
+        )
+        # Hub の版が分からなくても言う
+        bare = register_failure_reason(Error(ErrorCode.PROTOCOL_VERSION_MISMATCH, "x"))
+        assert "(unknown)" in bare
+        assert bare.endswith("install the same version")
 
 
 def test_registration_carries_the_source_fingerprint() -> None:

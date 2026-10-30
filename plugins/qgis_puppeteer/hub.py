@@ -7,6 +7,9 @@ ADR-0001 §4, §6, §9 に基づき、`QCoreApplication` 上で
 ## 責務
 
 - 127.0.0.1:9876 で WebSocket listen（Origin 完全一致検証付き）
+- Hub ファイル（`qgis_puppeteer.hub_file`）に接続情報と token を書く
+- 接続ごとに挨拶（`qgis_puppeteer.handshake`）：hello を送り、proof の通った
+  register が来るまでほかのメッセージを受け付けない
 - 接続イベントを `HubState` に委譲
 - `request` / `response` の双方向ルーティング（`id` で対応付け）
 - grace 期限切れの定期 sweep
@@ -32,6 +35,7 @@ import os
 import signal
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -46,6 +50,20 @@ from PyQt5.QtWebSockets import (  # type: ignore[import-not-found]
     QWebSocketServer,
 )
 
+from qgis_puppeteer._version import __version__
+from qgis_puppeteer.handshake import (
+    check_register,
+    generate_nonce,
+    generate_token,
+    hub_proof,
+)
+from qgis_puppeteer.hub_file import (
+    HubFileInfo,
+    now_iso,
+    remove_hub_file,
+    resolve_hub_file_path,
+    write_hub_file,
+)
 from qgis_puppeteer.hub_state import (
     IDLE_SHUTDOWN_DELAY_SECONDS,
     LIVENESS_PROBE_SECONDS,
@@ -53,10 +71,12 @@ from qgis_puppeteer.hub_state import (
     validate_origin,
 )
 from qgis_puppeteer.protocol import (
+    SUPPORTED_PROTOCOL,
     AbandonLaunch,
     Bye,
     Error,
     ErrorCode,
+    Hello,
     ListInstancesRequest,
     ListInstancesResponse,
     Message,
@@ -70,6 +90,7 @@ from qgis_puppeteer.protocol import (
     decode_message,
     effective_timeout_ms,
     encode_message,
+    error_code_value,
     reply_to_undecodable,
 )
 
@@ -86,6 +107,8 @@ PID_DIR_ENV: str = "APPDATA"  # Windows 想定。%APPDATA%\qgis_puppeteer\
 PID_DIR_NAME: str = "qgis_puppeteer"  # %APPDATA% 配下のサブディレクトリ名
 LOG_FILE_NAME: str = "hub.log"
 PID_FILE_TEMPLATE: str = "hub-{port}.pid"  # port ごとに分離（ADR-0001 §4）
+# 接続してから proof の通った register が来るまで待つ時間。過ぎたら切る
+REGISTER_TIMEOUT_MS: int = 10_000
 
 logger = logging.getLogger("qgis_puppeteer.hub")
 
@@ -98,6 +121,19 @@ logger = logging.getLogger("qgis_puppeteer.hub")
 class _ConnectionKind:
     WORKER = "worker"
     CLIENT = "client"  # mcp_gateway / automation_client をまとめて扱う
+
+
+@dataclass(frozen=True)
+class _Session:
+    """挨拶の通った接続。register_ack の hub_proof と版に使う。"""
+
+    hub_nonce: str
+    client_nonce: str
+    protocol_version: int
+
+
+class HubFileWriteError(Exception):
+    """Hub ファイルを書けなかった。つなぐ側が token を読めないので Hub は動けない。"""
 
 
 # ============================================================
@@ -117,12 +153,31 @@ class Hub(QObject):
         *,
         port: int = HUB_PORT,
         pid_file: Path | None = None,
+        hub_file: Path | None = None,
+        token: str | None = None,
+        register_timeout_ms: int = REGISTER_TIMEOUT_MS,
         parent: QObject | None = None,
     ) -> None:
+        """
+        Args:
+            hub_file: 接続情報を書く Hub ファイル。None なら書かない（token を
+                ``token`` で渡して直接つなぐテスト用）
+            token: 挨拶の token。None なら作る（ふだんはこちら。起きるたびに変わる）
+            register_timeout_ms: 接続してから register を待つ時間
+        """
         super().__init__(parent)
         self._port = port
         self._pid_file = pid_file
+        self._hub_file = hub_file
+        self._token = token if token is not None else generate_token()
+        self._register_timeout_ms = register_timeout_ms
+        self._wrote_hub_file = False
         self._state = HubState()
+
+        # 挨拶：hello を送ったが、まだ proof の通った register が来ていない接続 → hub の nonce
+        self._hello_nonces: dict[str, str] = {}
+        # 挨拶の通った接続
+        self._sessions: dict[str, _Session] = {}
 
         # 接続ごとの管理情報
         # conn_id（id(ws) の文字列化）→ (QWebSocket, kind)
@@ -159,14 +214,52 @@ class Hub(QObject):
     # 起動・終了
     # ------------------------------------------------------------
 
+    @property
+    def token(self) -> str:
+        return self._token
+
+    @property
+    def hub_file(self) -> Path | None:
+        return self._hub_file
+
     def start(self) -> None:
-        """listen 開始。bind 失敗時は例外を投げる（敗者 Hub は呼び出し側で exit）。"""
+        """listen を始め、Hub ファイルを書く。
+
+        Raises:
+            OSError: bind に失敗した（敗者 Hub は呼び出し側で exit）
+            HubFileWriteError: Hub ファイルを書けなかった（listen はやめている）
+        """
         ok = self._server.listen(QHostAddress.LocalHost, self._port)
         if not ok:
             raise OSError(
                 f"Hub failed to bind to 127.0.0.1:{self._port}: {self._server.errorString()}"
             )
-        logger.info("Hub listening on 127.0.0.1:%d", self._port)
+        port = self._server.serverPort()
+        logger.info("Hub listening on 127.0.0.1:%d", port)
+
+        # listen できた Hub だけが書く（bind に負けた Hub は勝った Hub のファイルを
+        # 上書きしない）。書いてからイベントループに戻るので、ファイルを読んだ相手が
+        # つないでくるのは書いた後
+        if self._hub_file is not None:
+            try:
+                write_hub_file(
+                    self._hub_file,
+                    HubFileInfo(
+                        addresses=(f"127.0.0.1:{port}",),
+                        token=self._token,
+                        pid=os.getpid(),
+                        package_version=__version__,
+                        protocol=SUPPORTED_PROTOCOL,
+                        started_at=now_iso(),
+                    ),
+                )
+            except OSError as e:
+                self._server.close()
+                raise HubFileWriteError(
+                    f"Hub could not write its Hub file {self._hub_file}: {e}"
+                ) from e
+            self._wrote_hub_file = True
+            logger.info("Hub file: %s", self._hub_file)
 
         if self._pid_file is not None:
             self._pid_file.parent.mkdir(parents=True, exist_ok=True)
@@ -185,6 +278,13 @@ class Hub(QObject):
                 self._pid_file.unlink(missing_ok=True)
             except OSError as e:
                 logger.warning("Failed to remove PID file: %s", e)
+        if self._wrote_hub_file and self._hub_file is not None:
+            # 自分の token のときだけ消す（あとから起きた別の Hub のファイルは残す）
+            try:
+                remove_hub_file(self._hub_file, token=self._token)
+            except OSError as e:
+                logger.warning("Failed to remove the Hub file: %s", e)
+            self._wrote_hub_file = False
         logger.info("Hub stopped")
 
     # ------------------------------------------------------------
@@ -223,6 +323,7 @@ class Hub(QObject):
             ws.pong.connect(lambda _e=0, _p=b"", cid=conn_id: self._on_pong(cid))
             ws.disconnected.connect(lambda cid=conn_id: self._on_disconnected(cid))
             logger.info("New connection: %s", conn_id)
+            self._greet(conn_id)
 
         # register 到達後に正規の再判定。このパスでは既にタイマー止まってるので no-op
         self._reassess_idle_shutdown()
@@ -231,7 +332,98 @@ class Hub(QObject):
     # メッセージ受信
     # ------------------------------------------------------------
 
+    def _greet(self, conn_id: str) -> None:
+        """挨拶の 1 通目（hello）を送り、register を待つ時間を計り始める。"""
+        nonce = generate_nonce()
+        self._hello_nonces[conn_id] = nonce
+        self._send(
+            conn_id, Hello(hub_version=__version__, protocol=SUPPORTED_PROTOCOL, nonce=nonce)
+        )
+        # conn_id は id(ws) なので、切れた接続の id が使い回されうる。nonce で照合する
+        QTimer.singleShot(
+            self._register_timeout_ms,
+            lambda cid=conn_id, n=nonce: self._on_register_timeout(cid, n),
+        )
+
+    def _on_register_timeout(self, conn_id: str, nonce: str) -> None:
+        if self._hello_nonces.get(conn_id) != nonce:
+            return
+        logger.warning(
+            "No register from %s within %d ms; closing", conn_id, self._register_timeout_ms
+        )
+        ws = self._sockets.get(conn_id)
+        if ws is not None:
+            ws.abort()
+
+    def _on_unauthenticated_message(self, conn_id: str, text: str) -> None:
+        """挨拶の済んでいない接続から来たメッセージ。register だけを受け付ける。"""
+        hub_nonce = self._hello_nonces.get(conn_id)
+        try:
+            msg = decode_message(text)
+        except ProtocolDecodeError as e:
+            logger.warning("Undecodable message from %s before register: %s", conn_id, e)
+            self._refuse_before_register(conn_id, e.message_id)
+            return
+        if hub_nonce is None or not isinstance(msg, RegisterRequest):
+            logger.warning("Message %s from %s before register; closing", msg.type, conn_id)
+            self._refuse_before_register(conn_id, getattr(msg, "id", None))
+            return
+
+        error = check_register(msg, token=self._token, hub_nonce=hub_nonce)
+        if error is not None:
+            logger.warning("Rejected register from %s: %s", conn_id, error_code_value(error.code))
+            self._send(
+                conn_id,
+                RegisterAck(id=msg.id, ok=False, error=error, package_version=__version__),
+            )
+            self._close(conn_id)
+            return
+
+        del self._hello_nonces[conn_id]
+        assert msg.nonce is not None  # check_register が確かめた
+        self._sessions[conn_id] = _Session(
+            hub_nonce=hub_nonce, client_nonce=msg.nonce, protocol_version=msg.protocol_version
+        )
+        try:
+            self._handle_register(conn_id, msg)
+        except Exception:
+            logger.exception("Register error for conn=%s", conn_id)
+
+    def _refuse_before_register(self, conn_id: str, message_id: object) -> None:
+        """register の前に来たほかのメッセージを断って切る（id が分かれば答えてから）。"""
+        if isinstance(message_id, str):
+            self._send_error_response(
+                conn_id,
+                request_id=message_id,
+                code=ErrorCode.UNAUTHORIZED,
+                message="Send register (with a valid proof) before any other message",
+            )
+        self._close(conn_id)
+
+    def _close(self, conn_id: str) -> None:
+        ws = self._sockets.get(conn_id)
+        if ws is not None:
+            ws.close()
+
+    def _ack(self, conn_id: str, req_id: str, **fields: object) -> RegisterAck:
+        """register_ack を作る。挨拶の通った接続なら版と hub_proof を載せる。"""
+        session = self._sessions.get(conn_id)
+        return RegisterAck(
+            id=req_id,
+            **fields,  # type: ignore[arg-type]
+            protocol_version=None if session is None else session.protocol_version,
+            package_version=__version__,
+            hub_proof=(
+                None
+                if session is None
+                else hub_proof(self._token, session.client_nonce, session.hub_nonce)
+            ),
+        )
+
     def _on_text_message(self, conn_id: str, text: str) -> None:
+        if conn_id not in self._sessions:
+            self._on_unauthenticated_message(conn_id, text)
+            return
         try:
             msg = decode_message(text)
         except ProtocolDecodeError as e:
@@ -310,7 +502,7 @@ class Hub(QObject):
         # 発信元 role を保持して、Worker への request 転送時に注入する
         # （ADR-0001 §12.7 caller_role 伝達）。
         self._client_roles[conn_id] = req.role
-        self._send(conn_id, RegisterAck(id=req.id, ok=True))
+        self._send(conn_id, self._ack(conn_id, req.id, ok=True))
         self._reassess_idle_shutdown()
 
     def _apply_worker_outcome(self, conn_id: str, req_id: str, outcome: object) -> None:
@@ -323,16 +515,18 @@ class Hub(QObject):
                     "Evicted instances on label takeover/supersede: %s",
                     list(outcome.evicted_instance_ids),  # type: ignore[attr-defined]
                 )
-            ack = RegisterAck(
-                id=req_id,
+            ack = self._ack(
+                conn_id,
+                req_id,
                 ok=True,
                 instance_id=outcome.instance_id,  # type: ignore[attr-defined]
                 resumed=outcome.resumed,  # type: ignore[attr-defined]
                 superseded=outcome.superseded,  # type: ignore[attr-defined]
             )
         else:
-            ack = RegisterAck(
-                id=req_id,
+            ack = self._ack(
+                conn_id,
+                req_id,
                 ok=False,
                 error=outcome.error,  # type: ignore[attr-defined]
             )
@@ -553,6 +747,8 @@ class Hub(QObject):
                 rid: entry for rid, entry in self._inflight.items() if entry[0] != conn_id
             }
         self._sockets.pop(conn_id, None)
+        self._hello_nonces.pop(conn_id, None)
+        self._sessions.pop(conn_id, None)
         logger.info("Disconnected: %s (kind=%s)", conn_id, kind)
         self._reassess_idle_shutdown()
 
@@ -718,6 +914,21 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Disable PID file creation (for tests).",
     )
+    parser.add_argument(
+        "--hub-file",
+        default=None,
+        help=(
+            "Where to write the Hub file (address and token for clients). "
+            "Default: $QPUPPETEER_HUB_FILE, else the per-user default location."
+        ),
+    )
+    # テストで register 待ちの時間切れを短くするため（ふだんは使わない）
+    parser.add_argument(
+        "--register-timeout-ms",
+        type=int,
+        default=REGISTER_TIMEOUT_MS,
+        help=argparse.SUPPRESS,
+    )
     return parser.parse_args(argv)
 
 
@@ -725,16 +936,25 @@ def main(argv: list[str] | None = None) -> int:
     """python -m qgis_puppeteer.hub のエントリポイント。
 
     bind 失敗（既に別の Hub が動作中）は exit code 0 で降りる（敗者 Hub）。
+    Hub ファイルを書けなければ 2。
     """
     _setup_logging()
     args = _parse_args(sys.argv[1:] if argv is None else argv)
 
     app = QCoreApplication(sys.argv)
     pid_file = None if args.no_pid_file else _default_pid_file(args.port)
-    hub = Hub(port=args.port, pid_file=pid_file)
+    hub = Hub(
+        port=args.port,
+        pid_file=pid_file,
+        hub_file=resolve_hub_file_path(args.hub_file),
+        register_timeout_ms=args.register_timeout_ms,
+    )
 
     try:
         hub.start()
+    except HubFileWriteError as e:
+        logger.error("%s", e)
+        return 2
     except OSError as e:
         logger.info("Hub bind failed (other Hub already running?): %s", e)
         return 0

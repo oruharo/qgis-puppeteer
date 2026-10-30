@@ -118,6 +118,8 @@ class WorkerEntry:
     unresponsive_since: float | None = None
     # #17: Worker が登録時に申告したライブラリの指紋（旧プラグインは None）
     source_fingerprint: str | None = None
+    # Worker が登録時に申告したライブラリの版
+    package_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -488,6 +490,7 @@ class HubState:
             last_seen_at=now,
             label_explicit=label_explicit,
             source_fingerprint=req.source_fingerprint,
+            package_version=req.package_version,
         )
         self._workers_by_conn[conn_id] = entry
         self._conn_by_instance[instance_id] = conn_id
@@ -847,6 +850,7 @@ class HubState:
             project=entry.project,
             launch_token=entry.launch_token,
             source_fingerprint=entry.source_fingerprint,
+            package_version=entry.package_version,
             registered_seq=entry.registered_seq,
             registered_at=entry.registered_at,
             label_explicit=entry.label_explicit,

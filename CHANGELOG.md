@@ -8,6 +8,33 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The Hub file.** When the Hub listens it writes its address and a token,
+  new each start, to a file only its user can read (`hub.json` under
+  `%LOCALAPPDATA%\qgis_puppeteer` on Windows, `$XDG_RUNTIME_DIR/qgis_puppeteer`
+  or `~/.local/state/qgis_puppeteer` elsewhere; the folder 0700 and the file
+  0600 on POSIX), replacing it in one step, and removes it when it stops
+  unless another Hub has written it since. The QGIS plugin, the MCP gateway,
+  `AutomationClient` and the pytest plugin read the token from it for the
+  greeting, so another user of the machine cannot drive your QGIS. The
+  environment variable `QPUPPETEER_HUB_FILE` moves it for all of them, the
+  Hub takes `--hub-file`, `AutomationClient` takes `hub_file=` (or the token
+  itself as `token=`), and `E2EAutomationClient` takes `hub_file=` and
+  exposes it as `hub_file`. The pytest plugin gives the Hub it starts a file
+  of the session's own (in dev mode it reads the running Hub's), and
+  `spawn_qgis` points the QGIS it starts at it. A
+  missing or unreadable file raises `HubFileError`, an `OSError`, so the MCP
+  gateway reports it as `hub_unreachable`; `qgis_puppeteer.hub_file` reads
+  and writes the file.
+
+- **`HubAuthError`.** `AutomationClient.connect()` raises it when the other
+  end is not a Hub it can trust: no `hello` came, the first message was not
+  `hello` (not a Hub, or an older Hub), or `register_ack` did not carry the
+  matching `hub_proof`.
+
+- **The package version is reported.** `qgis_puppeteer.__version__`;
+  `InstanceInfo.package_version` (the version of the plugin in each QGIS) in
+  `list_instances`; `AutomationClient.hub_package_version`.
+
 - **Check boxes in table, tree and list rows can be set.** `check()` and
   `uncheck()` only worked on check boxes and radio buttons, so a test that had
   to tick a row of a tree of conditions, or turn off one class of a layer's
@@ -572,6 +599,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fires too late to capture import-time lines and would silently under-report.
 
 ### Changed (breaking)
+
+- **Connecting to the Hub needs its token (protocol version 2).** Anything
+  that could open a WebSocket to the Hub's port could list the QGIS
+  instances, send them commands (including `execute_python`) and register as
+  a QGIS, and any process that listened on that port first could pose as the
+  Hub. The Hub now greets each connection with `hello` (its version range and
+  a nonce) and accepts only a `register` that proves, with an HMAC of the
+  nonces, that the sender knows the token in the Hub file (see Added); its
+  `register_ack` carries `hub_proof` in turn, and the QGIS plugin and
+  `AutomationClient` drop a Hub whose proof does not match (the plugin never
+  closes QGIS on such a Hub's word). A connection that sends anything else
+  first is answered `unauthorized` and closed, and one that has not
+  registered within 10 seconds is closed. `register` and `register_ack` carry
+  `protocol_version`, the sender's `protocol` range and `package_version`. The
+  Hub checks the version before the proof, so an older client or plugin is
+  told `protocol_version_mismatch` with both versions in `details`, and the
+  plugin's `register_failed` says which qgis-puppeteer the Hub runs and asks
+  for the same version. Use the same version for the plugin, the Hub and the
+  clients.
 
 - **Refusing the QGIS of an abandoned launch has its own error code.** The Hub
   refused the registration of a QGIS whose starter had stopped waiting with

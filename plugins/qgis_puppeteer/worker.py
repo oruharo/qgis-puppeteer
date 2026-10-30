@@ -5,8 +5,9 @@ ADR-0001 §4 "Worker 側" に基づき、`QWebSocket` で Hub に逆向き接続
 
 ## 責務
 
-- Hub に dial out（`QWebSocket.open`）し register を送る
-- register_ack で instance_id を受理（`registered` シグナル発火）
+- Hub に dial out（`QWebSocket.open`）し、Hub の hello を受けたら Hub ファイルの
+  token で proof を作って register を送る（`qgis_puppeteer.handshake`）
+- register_ack の hub_proof を確かめ、instance_id を受理（`registered` シグナル発火）
 - request を handler に dispatch して response を返送
 - 切断時に auto-reconnect（`QTimer` で遅延再試行）
 - 明示的終了時は `bye` を送ってクリーンに閉じる
@@ -38,6 +39,13 @@ from PyQt5.QtWebSockets import (  # type: ignore[import-not-found]
     QWebSocketProtocol,
 )
 
+from qgis_puppeteer.handshake import (
+    ack_is_trusted,
+    choose_protocol_version,
+    client_proof,
+    generate_nonce,
+)
+from qgis_puppeteer.hub_file import HubFileError, read_hub_file, resolve_hub_file_path
 from qgis_puppeteer.hub_spawn import (
     HubStartupError,
     ensure_hub_reachable,
@@ -45,6 +53,7 @@ from qgis_puppeteer.hub_spawn import (
 from qgis_puppeteer.protocol import (
     Error,
     ErrorCode,
+    Hello,
     ProtocolDecodeError,
     RegisterAck,
     Request,
@@ -105,10 +114,19 @@ class Worker(QObject):
         hub_spawn_command: Sequence[str] | None = None,
         hub_spawn_env: dict[str, str] | None = None,
         hub_log_file: Path | None = None,
+        hub_file: str | os.PathLike[str] | None = None,
         parent: QObject | None = None,
     ) -> None:
+        """
+        Args:
+            hub_file: token を読む Hub ファイル。None なら ``QPUPPETEER_HUB_FILE``、
+                それも無ければ既定の場所（``qgis_puppeteer.hub_file``）
+        """
         super().__init__(parent)
         self._hub_url = QUrl(hub_url)
+        self._hub_file = hub_file
+        # 挨拶の途中：(token, hub の nonce, 自分の nonce)。register_ack で使う
+        self._handshake: tuple[str, str, str] | None = None
         self._origin = origin
         self._auto_reconnect = auto_reconnect
         self._reconnect_delay_ms = reconnect_delay_ms
@@ -329,13 +347,12 @@ class Worker(QObject):
     # ------------------------------------------------------------
 
     def _on_connected(self) -> None:
-        """ハンドシェイク成功：register メッセージを送信。"""
-        self._reconnect_failures = 0
-        msg = self._state.build_register(self._new_msg_id())
-        self._ws.sendTextMessage(encode_message(msg))
+        """ハンドシェイク成功。register は Hub の hello を受けてから送る。"""
+        self._handshake = None
 
     def _on_disconnected(self) -> None:
         """切断：状態を更新し、必要なら再接続を予約。"""
+        self._handshake = None
         was_registered = self._state.is_registered
         self._state.on_disconnect()
         if was_registered:
@@ -361,14 +378,51 @@ class Worker(QObject):
                     logger.exception("Failed to answer an undecodable message")
             return
 
-        if isinstance(msg, RegisterAck):
+        if isinstance(msg, Hello):
+            self._handle_hello(msg)
+        elif isinstance(msg, RegisterAck):
             self._handle_register_ack(msg)
         elif isinstance(msg, Request):
             self._handle_request(msg)
         else:
             logger.warning("Worker received unexpected message type %s", msg.type.value)
 
+    def _handle_hello(self, hello: Hello) -> None:
+        """Hub の挨拶に、Hub ファイルの token で作った proof 付きの register で答える。
+
+        Hub ファイルはここで（毎回）読む。Hub はファイルを書いてから接続を受け付ける
+        ので、ここで読めば今の Hub の token が取れる（Hub が起き直すと token は変わる）。
+        読めなければ切って、再接続に任せる。
+        """
+        path = resolve_hub_file_path(self._hub_file)
+        try:
+            token = read_hub_file(path).token
+        except HubFileError as e:
+            logger.warning("Cannot read the Hub file; will reconnect: %s", e)
+            self._ws.close()
+            return
+        nonce = generate_nonce()
+        self._handshake = (token, hello.nonce, nonce)
+        msg = self._state.build_register(
+            self._new_msg_id(),
+            nonce=nonce,
+            proof=client_proof(token, hello.nonce, nonce),
+            protocol_version=choose_protocol_version(hello.protocol),
+        )
+        self._ws.sendTextMessage(encode_message(msg))
+
     def _handle_register_ack(self, ack: RegisterAck) -> None:
+        handshake, self._handshake = self._handshake, None
+        if handshake is None or not ack_is_trusted(
+            ack, token=handshake[0], client_nonce=handshake[2], hub_nonce=handshake[1]
+        ):
+            # token を知らない相手（Hub ではない、または別の Hub）。言うことを
+            # 聞かない（launch_abandoned で QGIS を閉じたりしない）。切って再接続に任せる
+            logger.warning(
+                "Ignoring a register_ack without a valid Hub proof (not our Hub?); will reconnect"
+            )
+            self._ws.close()
+            return
         try:
             self._state.on_register_ack(ack)
         except WorkerRegisterError as e:
@@ -381,6 +435,7 @@ class Worker(QObject):
             self._ws.close()
             return
         assert self._state.instance_id is not None
+        self._reconnect_failures = 0
         logger.info("Worker registered as %s", self._state.instance_id)
         self.registered.emit(self._state.instance_id)
 

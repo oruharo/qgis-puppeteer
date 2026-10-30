@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
-import sys
 import threading
 import time
 from pathlib import Path
@@ -34,13 +33,16 @@ from qgis_puppeteer.hub_state import HEARTBEAT_TIMEOUT_SECONDS  # noqa: E402
 from qgis_puppeteer.protocol import ErrorCode, InstanceInfo  # noqa: E402
 from qgis_puppeteer.worker import Worker  # noqa: E402
 
+from tests._handshake_helpers import hub_file_env  # noqa: E402
 from tests.test_worker_integration import (  # noqa: E402
     _asyncio_in_thread,
     _get_free_port,
+    _hub_process,
     _hub_subprocess,
     _qapp,
     _spin_until,
     _spin_while_thread,
+    hub_command,
 )
 
 pytestmark = pytest.mark.integration
@@ -95,16 +97,11 @@ class TestHubRespawn:
         """
         port = _get_free_port()
         app = _qapp()
-        spawn_cmd = [
-            sys.executable,
-            "-m",
-            "qgis_puppeteer.hub",
-            "--port",
-            str(port),
-            "--no-pid-file",
-        ]
         spawned_before = len(hub_spawn._SPAWNED_CHILDREN)
-        with _hub_subprocess(port) as hub1:
+        # 起こし直した Hub も同じ Hub ファイルに書く。token は変わるが、Worker は
+        # hello のたびに読み直すので登録し直せる
+        with hub_file_env() as hub_file, _hub_process(port, hub_file) as hub1:
+            spawn_cmd = hub_command(port, hub_file)
             worker = Worker(
                 hub_url=f"ws://127.0.0.1:{port}",
                 pid=9101,

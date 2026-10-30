@@ -9,19 +9,43 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import tempfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import pytest
+from qgis_puppeteer._version import __version__
 from qgis_puppeteer.client import (
     AutomationClient,
+    HubAuthError,
     NotConnectedError,
     RegisterError,
     RequestError,
     RequestNotSentError,
 )
-from qgis_puppeteer.protocol import ErrorCode, Role
+from qgis_puppeteer.handshake import (
+    check_register,
+    client_proof,
+    generate_nonce,
+    generate_token,
+    hub_proof,
+)
+from qgis_puppeteer.hub_file import ENV_HUB_FILE, HubFileInfo, write_hub_file
+from qgis_puppeteer.protocol import (
+    PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL,
+    Error,
+    ErrorCode,
+    Hello,
+    RegisterAck,
+    RegisterRequest,
+    Role,
+    decode_message,
+    encode_message,
+)
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
@@ -33,7 +57,8 @@ from websockets.exceptions import ConnectionClosed
 class FakeHub:
     """テスト用の最小 Hub。プロトコルに準拠した応答を返す。
 
-    - register を受信したら register_ack を返す
+    - 接続されたら hello（nonce 付き）を送り、register の proof を本物の Hub と
+      同じ ``check_register`` で確かめ、hub_proof 付きの register_ack を返す
     - list_instances を受信したら現在の worker 一覧を返す
     - request を受信したら routing して worker に転送、response を
       発信元に返送する
@@ -41,6 +66,10 @@ class FakeHub:
     """
 
     def __init__(self) -> None:
+        # 挨拶の token（fake_hub_server が Hub ファイルに書く）
+        self.token = generate_token()
+        # register_ack に合わない hub_proof を載せる（偽の Hub を真似る）
+        self.wrong_hub_proof: bool = False
         # instance_id → worker ws
         self.workers: dict[str, ServerConnection] = {}
         # request id → 発信元 ws
@@ -63,32 +92,51 @@ class FakeHub:
 
     async def handler(self, ws: ServerConnection) -> None:
         """クライアント 1 接続分のライフサイクル。"""
-        # 最初は register を期待
+        # 最初に hello を送り、register を待つ
+        hub_nonce = generate_nonce()
+        await ws.send(
+            encode_message(
+                Hello(hub_version=__version__, protocol=SUPPORTED_PROTOCOL, nonce=hub_nonce)
+            )
+        )
         first = await ws.recv()
         if isinstance(first, bytes):
             await ws.close()
             return
         msg = json.loads(first)
         assert msg["type"] == "register"
+        req = decode_message(first)
+        assert isinstance(req, RegisterRequest)
 
         role = msg["role"]
         reg_id = msg["id"]
 
-        if self.reject_register:
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "register_ack",
-                        "id": reg_id,
-                        "ok": False,
-                        "error": {
-                            "code": ErrorCode.LABEL_CONFLICT.value,
-                            "message": "test-induced failure",
-                            "details": {},
-                        },
-                    }
+        def ack(ok: bool, **fields: Any) -> str:
+            proof = hub_proof(self.token, req.nonce or "", hub_nonce)
+            return encode_message(
+                RegisterAck(
+                    id=reg_id,
+                    ok=ok,
+                    protocol_version=PROTOCOL_VERSION,
+                    package_version=__version__,
+                    hub_proof="0" * 64 if self.wrong_hub_proof else proof,
+                    **fields,
                 )
             )
+
+        refused = check_register(req, token=self.token, hub_nonce=hub_nonce)
+        if refused is not None:
+            await ws.send(
+                encode_message(
+                    RegisterAck(id=reg_id, ok=False, error=refused, package_version=__version__)
+                )
+            )
+            await ws.close()
+            return
+
+        if self.reject_register:
+            failure = Error(code=ErrorCode.LABEL_CONFLICT, message="test-induced failure")
+            await ws.send(ack(False, error=failure))
             await ws.close()
             return
 
@@ -99,17 +147,7 @@ class FakeHub:
             instance_id = f"worker-{label.lower()}-{pid}"
             self.workers[instance_id] = ws
 
-        await ws.send(
-            json.dumps(
-                {
-                    "type": "register_ack",
-                    "id": reg_id,
-                    "ok": True,
-                    "instance_id": instance_id,
-                    "resumed": False,
-                }
-            )
-        )
+        await ws.send(ack(True, instance_id=instance_id))
 
         try:
             async for raw in ws:
@@ -231,13 +269,49 @@ class FakeHub:
 
 @asynccontextmanager
 async def fake_hub_server(port: int = 0) -> AsyncIterator[tuple[FakeHub, str]]:
+    """偽の Hub を立て、本物と同じく Hub ファイルに token を書く。
+
+    その間 ``QPUPPETEER_HUB_FILE`` をそのファイルに向けるので、url だけで作った
+    ``AutomationClient``（gateway の中のものも）がこの Hub の token を読む。
+    """
     hub = FakeHub()
     # port=0 で OS に空きポートを割り当てさせる（「あとから Hub が立つ」を
     # 再現したいテストは、先に確保したポート番号を渡す）
-    async with serve(hub.handler, "127.0.0.1", port) as server:
-        sock = next(iter(server.sockets))
-        port = sock.getsockname()[1]
-        yield hub, f"ws://127.0.0.1:{port}"
+    with tempfile.TemporaryDirectory() as tmp:
+        hub_file = Path(tmp) / "hub.json"
+        saved = os.environ.get(ENV_HUB_FILE)
+        os.environ[ENV_HUB_FILE] = str(hub_file)
+        try:
+            async with serve(hub.handler, "127.0.0.1", port) as server:
+                sock = next(iter(server.sockets))
+                port = sock.getsockname()[1]
+                write_hub_file(
+                    hub_file,
+                    HubFileInfo(addresses=(f"127.0.0.1:{port}",), token=hub.token),
+                )
+                yield hub, f"ws://127.0.0.1:{port}"
+        finally:
+            if saved is None:
+                os.environ.pop(ENV_HUB_FILE, None)
+            else:
+                os.environ[ENV_HUB_FILE] = saved
+
+
+def signed_register(msg_id: str, hello: Hello, *, role: Role, **fields: Any) -> RegisterRequest:
+    """``hello`` に proof で答える register（token は ``QPUPPETEER_HUB_FILE`` から読む）。"""
+    from qgis_puppeteer.hub_file import read_hub_file, resolve_hub_file_path
+
+    token = read_hub_file(resolve_hub_file_path()).token
+    nonce = generate_nonce()
+    return RegisterRequest(
+        id=msg_id,
+        role=role,
+        protocol=SUPPORTED_PROTOCOL,
+        package_version=__version__,
+        nonce=nonce,
+        proof=client_proof(token, hello.nonce, nonce),
+        **fields,
+    )
 
 
 def _run(coro: Any) -> Any:
@@ -271,17 +345,13 @@ class _FakeWorker:
         from websockets.asyncio.client import connect
 
         self._ws = await connect(self.url, additional_headers={"Origin": "http://localhost"})
-        reg_id = "worker-reg-1"
+        hello = decode_message(await self._ws.recv())
+        assert isinstance(hello, Hello)
         await self._ws.send(
-            json.dumps(
-                {
-                    "type": "register",
-                    "id": reg_id,
-                    "role": "worker",
-                    "protocol_version": 1,
-                    "pid": self.pid,
-                    "label": self.label,
-                }
+            encode_message(
+                signed_register(
+                    "worker-reg-1", hello, role=Role.WORKER, pid=self.pid, label=self.label
+                )
             )
         )
         ack = json.loads(await self._ws.recv())
@@ -346,6 +416,76 @@ class TestConnect:
                     await client.connect()
                 assert exc_info.value.error is not None
                 assert exc_info.value.error.code == ErrorCode.LABEL_CONFLICT
+
+        _run(inner())
+
+    def test_hub_package_version_is_read_from_the_ack(self) -> None:
+        async def inner() -> None:
+            async with fake_hub_server() as (_, url), AutomationClient(url=url) as client:
+                assert client.hub_package_version == __version__
+
+        _run(inner())
+
+    def test_token_can_be_given_directly(self) -> None:
+        async def inner() -> None:
+            async with fake_hub_server() as (hub, url):
+                client = AutomationClient(url=url, token=hub.token, hub_file="missing.json")
+                await client.connect()
+                await client.close()
+
+        _run(inner())
+
+    def test_a_wrong_token_is_refused_as_unauthorized(self) -> None:
+        async def inner() -> None:
+            async with fake_hub_server() as (_, url):
+                client = AutomationClient(url=url, token="not-the-token", register_timeout=2.0)
+                with pytest.raises(RegisterError) as exc_info:
+                    await client.connect()
+                assert exc_info.value.error is not None
+                assert exc_info.value.error.code == ErrorCode.UNAUTHORIZED
+
+        _run(inner())
+
+    def test_a_hub_that_does_not_know_the_token_is_not_trusted(self) -> None:
+        """hub_proof が合わない ack は、ok=True でも信用しない。"""
+
+        async def inner() -> None:
+            async with fake_hub_server() as (hub, url):
+                hub.wrong_hub_proof = True
+                client = AutomationClient(url=url, register_timeout=2.0)
+                with pytest.raises(HubAuthError):
+                    await client.connect()
+
+        _run(inner())
+
+    def test_a_server_that_does_not_say_hello_is_not_a_hub(self) -> None:
+        async def silent(ws: ServerConnection) -> None:
+            await ws.wait_closed()
+
+        async def inner() -> None:
+            async with serve(silent, "127.0.0.1", 0) as server:
+                port = next(iter(server.sockets)).getsockname()[1]
+                client = AutomationClient(
+                    url=f"ws://127.0.0.1:{port}", token="t", register_timeout=0.5
+                )
+                with pytest.raises(HubAuthError):
+                    await client.connect()
+
+        _run(inner())
+
+    def test_a_server_whose_first_message_is_not_hello_is_not_a_hub(self) -> None:
+        async def chatty(ws: ServerConnection) -> None:
+            await ws.send(json.dumps({"type": "list_instances_response", "id": "x"}))
+            await ws.wait_closed()
+
+        async def inner() -> None:
+            async with serve(chatty, "127.0.0.1", 0) as server:
+                port = next(iter(server.sockets)).getsockname()[1]
+                client = AutomationClient(
+                    url=f"ws://127.0.0.1:{port}", token="t", register_timeout=2.0
+                )
+                with pytest.raises(HubAuthError):
+                    await client.connect()
 
         _run(inner())
 

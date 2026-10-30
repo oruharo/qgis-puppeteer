@@ -5,7 +5,9 @@ ADR-0001 §2, §3 に基づき、McpGateway やテストハーネスから Worke
 
 ## 責務
 
-- Hub に `role=automation_client` として接続・登録
+- Hub に `role=automation_client` として接続・登録。Hub の hello に、Hub ファイル
+  （`qgis_puppeteer.hub_file`）の token で作った proof で答え、Hub の
+  hub_proof を確かめる（`qgis_puppeteer.handshake`）
 - `request` を送って `id` で対応する `response` を待機
 - `list_instances` で現在の active Worker 一覧を取得
 - エラー応答を Python 例外として伝播
@@ -29,16 +31,27 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import uuid
 from typing import Any
 
 import websockets
 from websockets.asyncio.client import ClientConnection, connect
 
+from qgis_puppeteer._version import __version__
+from qgis_puppeteer.handshake import (
+    ack_is_trusted,
+    choose_protocol_version,
+    client_proof,
+    generate_nonce,
+)
+from qgis_puppeteer.hub_file import read_hub_file, resolve_hub_file_path
 from qgis_puppeteer.protocol import (
+    SUPPORTED_PROTOCOL,
     AbandonLaunch,
     Error,
     ErrorCode,
+    Hello,
     InstanceInfo,
     ListInstancesRequest,
     ListInstancesResponse,
@@ -106,6 +119,15 @@ class RegisterError(AutomationClientError):
         if error:
             msg += f" ({error.message})"
         super().__init__(msg)
+
+
+class HubAuthError(AutomationClientError):
+    """つないだ相手を Hub として信用できない。
+
+    挨拶（hello）が来ない・hello でない（Hub ではない、または挨拶の無い古い Hub）、
+    または register_ack の hub_proof が合わない（Hub ファイルの token を知らない
+    相手）。相手には何も頼んでいない。
+    """
 
 
 class RequestError(AutomationClientError):
@@ -252,12 +274,18 @@ class AutomationClient:
         request_timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
         register_timeout: float = DEFAULT_REGISTER_TIMEOUT_SECONDS,
         connect_timeout: float = DEFAULT_CONNECT_TIMEOUT_SECONDS,
+        token: str | None = None,
+        hub_file: str | os.PathLike[str] | None = None,
     ) -> None:
         """
         Args:
             role: Hub に自己申告する role。McpGateway は `Role.MCP_GATEWAY` を、
                 pytest / その他の直接呼び出しは既定の `Role.AUTOMATION_CLIENT`
                 を使う（ADR-0001 §12.7 caller_role 伝達）。
+            token: 挨拶に使う token。省略時は Hub ファイルから読む
+            hub_file: token を読む Hub ファイル。省略時は ``QPUPPETEER_HUB_FILE``、
+                それも無ければ既定の場所（``qgis_puppeteer.hub_file``）。
+                ``connect()`` のたびに読む（Hub が起き直すと token が変わる）
         """
         if role == Role.WORKER:
             raise ValueError("AutomationClient cannot register as WORKER role")
@@ -267,6 +295,10 @@ class AutomationClient:
         self._request_timeout = request_timeout
         self._register_timeout = register_timeout
         self._connect_timeout = connect_timeout
+        self._token = token
+        self._hub_file = hub_file
+        # register_ack で分かる Hub の版
+        self._hub_package_version: str | None = None
 
         self._ws: ClientConnection | None = None
         self._reader_task: asyncio.Task[None] | None = None
@@ -282,6 +314,11 @@ class AutomationClient:
     # ライフサイクル
     # ------------------------------------------------------------
 
+    @property
+    def hub_package_version(self) -> str | None:
+        """つないでいる Hub のライブラリの版（connect 前は None）。"""
+        return self._hub_package_version
+
     async def __aenter__(self) -> AutomationClient:
         await self.connect()
         return self
@@ -290,7 +327,7 @@ class AutomationClient:
         await self.close()
 
     async def connect(self) -> None:
-        """Hub に接続して register_ack まで完了させる。
+        """Hub に接続し、挨拶して register_ack まで完了させる。
 
         接続全体に `connect_timeout` を課す。ローカル前提なので短時間で
         成否を確定させたい（特に Windows では TCP SYN の OS retry が長く、
@@ -298,6 +335,14 @@ class AutomationClient:
 
         タイムアウト時は `ConnectionRefusedError` を投げる（呼び出し側は
         接続不能を単一のエラー型で扱えるようにするため）。
+
+        Raises:
+            ConnectionRefusedError / OSError: つながらない
+            HubFileError: token を引数で渡さず、Hub ファイルが無い・読めない
+                （``OSError`` の子）
+            HubAuthError: 相手を Hub として信用できない
+            RegisterError: Hub が登録を断った（``unauthorized`` /
+                ``protocol_version_mismatch`` など）
         """
         if self._ws is not None:
             if not self._lost:
@@ -320,11 +365,15 @@ class AutomationClient:
                 f"Hub connection timed out after {self._connect_timeout}s at {self._url}"
             ) from e
 
-        # reader タスクを起動してから register を送る
-        self._reader_task = asyncio.create_task(self._reader_loop(), name="AutomationClient.reader")
-
         try:
-            await self._register()
+            # 挨拶の 1 通目は reader を起こす前に自分で受ける
+            hello = await self._receive_hello()
+            token = self._resolve_token()
+            # reader タスクを起動してから register を送る
+            self._reader_task = asyncio.create_task(
+                self._reader_loop(), name="AutomationClient.reader"
+            )
+            await self._register(hello, token)
         except BaseException:
             # 登録失敗時は掃除して再送できる状態にする
             await self._hard_close()
@@ -362,10 +411,50 @@ class AutomationClient:
     # register
     # ------------------------------------------------------------
 
-    async def _register(self) -> None:
+    async def _receive_hello(self) -> Hello:
+        """Hub の挨拶（hello）を待つ。来ない・hello でなければ HubAuthError。"""
+        assert self._ws is not None
+        try:
+            raw = await asyncio.wait_for(self._ws.recv(), timeout=self._register_timeout)
+        except (TimeoutError, asyncio.TimeoutError) as e:
+            raise HubAuthError(
+                f"{self._url} sent no hello within {self._register_timeout}s: it is not a "
+                "qgis-puppeteer Hub, or a Hub too old to greet (protocol 1)"
+            ) from e
+        except websockets.exceptions.ConnectionClosed as e:
+            raise NotConnectedError(f"the Hub closed the connection before its hello: {e}") from e
+        msg: Message | None = None
+        if isinstance(raw, str):
+            with contextlib.suppress(ProtocolDecodeError):
+                msg = decode_message(raw)
+        if not isinstance(msg, Hello):
+            raise HubAuthError(
+                f"{self._url} did not greet with hello: it is not a qgis-puppeteer Hub, "
+                "or a Hub too old to greet (protocol 1)"
+            )
+        return msg
+
+    def _resolve_token(self) -> str:
+        """挨拶に使う token：引数か、Hub ファイル（毎回読む）。"""
+        if self._token is not None:
+            return self._token
+        return read_hub_file(resolve_hub_file_path(self._hub_file)).token
+
+    async def _register(self, hello: Hello, token: str) -> None:
         req_id = self._new_id()
+        nonce = generate_nonce()
         fut = self._make_future(req_id)
-        await self._send(RegisterRequest(id=req_id, role=self._role))
+        await self._send(
+            RegisterRequest(
+                id=req_id,
+                role=self._role,
+                protocol_version=choose_protocol_version(hello.protocol),
+                protocol=SUPPORTED_PROTOCOL,
+                package_version=__version__,
+                nonce=nonce,
+                proof=client_proof(token, hello.nonce, nonce),
+            )
+        )
         try:
             msg = await asyncio.wait_for(fut, timeout=self._register_timeout)
         except asyncio.TimeoutError as e:
@@ -379,8 +468,14 @@ class AutomationClient:
                     message=f"unexpected reply type: {msg.type.value}",
                 )
             )
+        if not ack_is_trusted(msg, token=token, client_nonce=nonce, hub_nonce=hello.nonce):
+            raise HubAuthError(
+                f"{self._url} answered register without a valid Hub proof: it does not "
+                "know the token in the Hub file"
+            )
         if not msg.ok:
             raise RegisterError(msg.error)
+        self._hub_package_version = msg.package_version
 
     # ------------------------------------------------------------
     # 外部 API

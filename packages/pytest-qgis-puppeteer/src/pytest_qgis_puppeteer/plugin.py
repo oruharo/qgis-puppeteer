@@ -26,9 +26,9 @@ CLI 引数 > 環境変数 > pyproject.toml の `[tool.pytest.ini_options]`
 ## fixture 依存順
 
 ```
-hub_port → hub_process → automation_client → qgis_process → hub_ready
-                                                               │
-                                                            function: qgis
+hub_port, hub_file → hub_process → automation_client → qgis_process → hub_ready
+                                                                         │
+                                                                      function: qgis
 ```
 
 `automation_client` は Client 接続として Hub に残り続け、Hub の idle shutdown
@@ -1283,6 +1283,20 @@ def hub_port() -> int:
 
 
 @pytest.fixture(scope="session")
+def hub_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Hub が接続の token を書く Hub ファイル（``qgis_puppeteer.hub_file``）。
+
+    pytest が起こす Hub は session の一時フォルダに書く（ほかの Hub と取り合わない）。
+    dev モードは起動中の Hub のもの（``QPUPPETEER_HUB_FILE``、無ければ既定の場所）。
+    """
+    from qgis_puppeteer.hub_file import resolve_hub_file_path
+
+    if _is_dev_mode():
+        return resolve_hub_file_path()
+    return tmp_path_factory.mktemp("hub") / "hub.json"
+
+
+@pytest.fixture(scope="session")
 def hub_url(hub_port: int) -> str:
     if _is_dev_mode():
         return _dev_hub_url()
@@ -1331,7 +1345,7 @@ def _resolve_hub_qgis_python(config: pytest.Config, active_env: EnvironmentSpec 
 
 @pytest.fixture(scope="session")
 def hub_process(
-    pytestconfig: pytest.Config, hub_port: int
+    pytestconfig: pytest.Config, hub_port: int, hub_file: Path
 ) -> Iterator[subprocess.Popen[bytes] | None]:
     """Hub を QGIS 付属 Python launcher 経由で spawn し、listen 確認後に yield。
 
@@ -1361,6 +1375,8 @@ def hub_process(
         "--port",
         str(hub_port),
         "--no-pid-file",
+        "--hub-file",
+        str(hub_file),
     ]
     logger.info("Spawning Hub: %s", " ".join(cmd))
     proc = subprocess.Popen(
@@ -1520,10 +1536,11 @@ def _parse_listening_pid(netstat_output: str, port: int) -> int | None:
 def automation_client(
     hub_process: subprocess.Popen[bytes] | None,
     hub_url: str,
+    hub_file: Path,
     action_recorder: ActionRecorder,
 ) -> Iterator[E2EAutomationClient]:
     del hub_process
-    client = E2EAutomationClient(url=hub_url)
+    client = E2EAutomationClient(url=hub_url, hub_file=hub_file)
     client.connect()
     # ADR-0002 §13 / B5a: 各 ``call(...)`` を timeline に記録し、test 失敗時の
     # diagnostic bundle に ``actions.jsonl`` として吐き出す。test 単位の clear は

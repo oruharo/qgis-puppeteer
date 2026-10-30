@@ -34,6 +34,18 @@ def _get_free_port() -> int:
         return s.getsockname()[1]
 
 
+def _hub_command(port: int, tmp_path: Path) -> list[str]:
+    """既定のコマンドに、pid ファイル無しと一時の Hub ファイルを足す。
+
+    ``--hub-file`` を渡さないと、使う人の既定の Hub ファイルを書き換えてしまう。
+    """
+    return default_hub_command(port=port) + [
+        "--no-pid-file",
+        "--hub-file",
+        str(tmp_path / "hub.json"),
+    ]
+
+
 class TestHubSpawnIntegration:
     def test_try_spawn_launches_real_hub(self, tmp_path: Path) -> None:
         """デフォルトコマンドで実 Hub を spawn して listen を確認。"""
@@ -52,13 +64,15 @@ class TestHubSpawnIntegration:
                 lock_path=lock_path,
                 host="127.0.0.1",
                 port=port,
-                command=default_hub_command(port=port) + ["--no-pid-file"],
+                command=_hub_command(port, tmp_path),
                 popen=tracking_popen,
                 startup_deadline=10.0,
                 poll_interval=0.1,
             )
             assert outcome == SpawnOutcome.SPAWNED
             assert tcp_probe("127.0.0.1", port, timeout=1.0) is True
+            # Hub は listen してから Hub ファイルを書く
+            assert (tmp_path / "hub.json").is_file()
         finally:
             for proc in spawned_procs:
                 if proc.poll() is None:
@@ -87,7 +101,7 @@ class TestHubSpawnIntegration:
                 lock_path=lock_path,
                 host="127.0.0.1",
                 port=port,
-                command=default_hub_command(port=port) + ["--no-pid-file"],
+                command=_hub_command(port, tmp_path),
                 popen=tracking_popen,
                 startup_deadline=10.0,
                 poll_interval=0.1,
@@ -102,7 +116,7 @@ class TestHubSpawnIntegration:
                 lock_path=lock_path,
                 host="127.0.0.1",
                 port=port,
-                command=default_hub_command(port=port) + ["--no-pid-file"],
+                command=_hub_command(port, tmp_path),
                 popen=tracking_popen,
                 startup_deadline=10.0,
                 poll_interval=0.1,

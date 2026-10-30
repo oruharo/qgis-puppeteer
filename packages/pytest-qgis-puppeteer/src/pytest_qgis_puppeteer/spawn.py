@@ -51,6 +51,7 @@ _ENV_DEV_MODE = "QPUPPETEER_E2E_USE_RUNNING_QGIS"
 # QGIS subprocess に渡す env 変数（plugin._qgis_spawn_env と同じセマンティクス）
 _ENV_HUB_PORT = "QPUPPETEER_HUB_PORT"
 _ENV_HUB_HOST = "QPUPPETEER_HUB_HOST"
+_ENV_HUB_FILE = "QPUPPETEER_HUB_FILE"
 _ENV_TRUSTED_MODE = "QPUPPETEER_TRUSTED_MODE"
 _ENV_ALLOW_TEST_HANDLERS = "QPUPPETEER_ALLOW_TEST_HANDLERS"
 
@@ -200,7 +201,12 @@ def spawn_qgis(
     # ADR-0005 D6: launch_token を発番・注入して決定的に相関する（pid diff の
     # heuristic を廃止。pid 再利用 / 並列 spawn race に強い）。
     launch_token = generate_launch_token()
-    spawn_env = _build_env(base=os.environ, hub_port=hub_port, user_env=env)
+    spawn_env = _build_env(
+        base=os.environ,
+        hub_port=hub_port,
+        hub_file=automation_client.hub_file,
+        user_env=env,
+    )
     spawn_env = inject_launch_token(spawn_env, launch_token, label=label)
     # Hub が断るラベルなら、QGIS を起こす前に知らせる（#13）。起こしてから
     # 断られると、待ったあとに「登録されなかった」としか分からない
@@ -333,13 +339,15 @@ def _build_env(
     *,
     base: Mapping[str, str],
     hub_port: int,
+    hub_file: str | os.PathLike[str],
     user_env: Mapping[str, str] | None,
 ) -> dict[str, str]:
     """spawn 用 env を組み立てる。
 
     plugin._qgis_spawn_env と同じ意味の自動注入をしつつ、ユーザー指定 env を
-    上に merge する。``QPUPPETEER_HUB_PORT`` だけは helper が常に勝つ（ユーザーが
-    間違えた port を渡すと register 出来ないため）。
+    上に merge する。``QPUPPETEER_HUB_PORT`` と ``QPUPPETEER_HUB_FILE`` は
+    helper が常に勝つ（ユーザーが違う port や Hub ファイルを渡すと register
+    出来ないため）。Hub ファイルは ``automation_client`` が挨拶に使うものと同じ。
     """
     env = dict(base)
     if user_env:
@@ -349,6 +357,7 @@ def _build_env(
     # helper による上書き（ユーザー指定よりも後に書くことで helper を勝たせる）
     env[_ENV_HUB_PORT] = str(hub_port)
     env[_ENV_HUB_HOST] = "127.0.0.1"
+    env[_ENV_HUB_FILE] = os.fspath(hub_file)
     env.setdefault(_ENV_TRUSTED_MODE, "1")
     env.setdefault(_ENV_ALLOW_TEST_HANDLERS, "1")
     return env

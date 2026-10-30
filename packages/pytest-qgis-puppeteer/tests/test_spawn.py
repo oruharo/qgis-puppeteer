@@ -74,6 +74,7 @@ class _FakeAutomationClient:
         self._scripted: list[list[_FakeInstance]] = []
         self.execute_python_calls: list[dict[str, Any]] = []
         self._popens: list[Any] | None = None
+        self.hub_file = "/run/qgis_puppeteer/hub.json"
 
     def feed(self, *snapshots: list[_FakeInstance]) -> None:
         self._scripted.extend(snapshots)
@@ -270,9 +271,10 @@ class TestBuildEnv:
     """env 合成: helper の自動注入とユーザー指定の merge ルール。"""
 
     def test_minimal_injects_required_vars(self) -> None:
-        env = _build_env(base={}, hub_port=9876, user_env=None)
+        env = _build_env(base={}, hub_port=9876, hub_file="/run/hub.json", user_env=None)
         assert env["QPUPPETEER_HUB_PORT"] == "9876"
         assert env["QPUPPETEER_HUB_HOST"] == "127.0.0.1"
+        assert env["QPUPPETEER_HUB_FILE"] == "/run/hub.json"
         assert env["QPUPPETEER_TRUSTED_MODE"] == "1"
         assert env["QPUPPETEER_ALLOW_TEST_HANDLERS"] == "1"
 
@@ -280,6 +282,7 @@ class TestBuildEnv:
         env = _build_env(
             base={"PATH": "/usr/bin", "LANG": "ja_JP.UTF-8"},
             hub_port=9876,
+            hub_file="/run/hub.json",
             user_env=None,
         )
         assert env["PATH"] == "/usr/bin"
@@ -289,6 +292,7 @@ class TestBuildEnv:
         env = _build_env(
             base={},
             hub_port=9876,
+            hub_file="/run/hub.json",
             user_env={"MYAPP_FEATURE": "auth"},
         )
         assert env["MYAPP_FEATURE"] == "auth"
@@ -298,15 +302,27 @@ class TestBuildEnv:
         env = _build_env(
             base={},
             hub_port=9876,
+            hub_file="/run/hub.json",
             user_env={"QPUPPETEER_HUB_PORT": "1234"},
         )
         assert env["QPUPPETEER_HUB_PORT"] == "9876"
+
+    def test_helper_wins_for_hub_file(self) -> None:
+        """Hub ファイルも helper が勝つ（違う token では register できない）。"""
+        env = _build_env(
+            base={"QPUPPETEER_HUB_FILE": "/shell/hub.json"},
+            hub_port=9876,
+            hub_file="/run/hub.json",
+            user_env={"QPUPPETEER_HUB_FILE": "/user/hub.json"},
+        )
+        assert env["QPUPPETEER_HUB_FILE"] == "/run/hub.json"
 
     def test_user_env_can_override_trusted_mode(self) -> None:
         """``TRUSTED_MODE`` は setdefault なのでユーザーが先に指定すれば勝てる。"""
         env = _build_env(
             base={},
             hub_port=9876,
+            hub_file="/run/hub.json",
             user_env={"QPUPPETEER_TRUSTED_MODE": "0"},
         )
         assert env["QPUPPETEER_TRUSTED_MODE"] == "0"

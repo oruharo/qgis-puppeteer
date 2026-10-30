@@ -33,7 +33,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from qgis_puppeteer._version import __version__
 from qgis_puppeteer.protocol import (
+    PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL,
     Bye,
     Error,
     ErrorCode,
@@ -251,14 +254,27 @@ class WorkerState:
     # メッセージ構築・処理
     # ------------------------------------------------------------
 
-    def build_register(self, msg_id: str) -> RegisterRequest:
+    def build_register(
+        self,
+        msg_id: str,
+        *,
+        nonce: str | None = None,
+        proof: str | None = None,
+        protocol_version: int = PROTOCOL_VERSION,
+    ) -> RegisterRequest:
         """Hub に送る register メッセージを組み立てる。
 
         `previous_instance_id` がセットされていれば resume 要求として送られる。
+        ``nonce`` / ``proof`` / ``protocol_version`` は挨拶（hello への答え）で決まる。
         """
         return RegisterRequest(
             id=msg_id,
             role=Role.WORKER,
+            protocol_version=protocol_version,
+            protocol=SUPPORTED_PROTOCOL,
+            package_version=__version__,
+            nonce=nonce,
+            proof=proof,
             pid=self.config.pid,
             label=self.config.label,
             project=self.config.project,
@@ -416,10 +432,18 @@ def register_failure_reason(error: Error | None) -> str:
     """``register_failed`` に載せる理由。``details["reason"]`` があれば添える。
 
     例: ``label_conflict`` / ``label_conflict: too_long`` / ``launch_abandoned``（#16）。
+    版が合わなければ、Hub の版を添えて「版を合わせて」と言う。
     """
     if error is None:
         return "unknown"
     code = error_code_value(error.code)
+    if code == ErrorCode.PROTOCOL_VERSION_MISMATCH.value:
+        details = error.details if isinstance(error.details, dict) else {}
+        hub_version = details.get("hub_package_version")
+        return (
+            f"{code}: the Hub runs qgis-puppeteer {hub_version or '(unknown)'} and this "
+            f"plugin is {__version__}; install the same version"
+        )
     detail = error.details.get("reason") if isinstance(error.details, dict) else None
     return f"{code}: {detail}" if detail else code
 

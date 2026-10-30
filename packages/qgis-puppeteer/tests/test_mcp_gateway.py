@@ -19,13 +19,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import pytest
 from qgis_puppeteer.client import AutomationClient, RegisterError
+from qgis_puppeteer.hub_file import ENV_HUB_FILE
 
 # skip するのは mcp extra が入っていない環境だけ。gateway 側の import 失敗
 # （mcp のメジャー不一致など）まで skip に巻き込むと、テストが 1 本も
@@ -395,7 +398,7 @@ class TestMcpGatewayListInstances:
                     finally:
                         await ctx.reset_client()
 
-                async def reject(self: AutomationClient) -> None:
+                async def reject(self: AutomationClient, *_args: Any) -> None:
                     raise RegisterError(None)
 
                 monkeypatch.setattr(AutomationClient, "_register", reject)
@@ -408,6 +411,31 @@ class TestMcpGatewayListInstances:
         payload = _run(run())
         assert payload["error"]["code"] == "hub_unreachable"
         assert payload["error"]["details"]["type"] == "RegisterError"
+
+    def test_a_missing_hub_file_is_hub_unreachable(self) -> None:
+        """Hub ファイルが無い（token を読めない）ときも、構造化エラーで返る。"""
+
+        async def run() -> dict[str, Any]:
+            async with fake_hub_server() as (_, hub_url):
+                Path(os.environ[ENV_HUB_FILE]).unlink()
+                ctx = GatewayContext(url=hub_url, origin=DEFAULT_ORIGIN)
+
+                @asynccontextmanager
+                async def _lifespan(_server: Any) -> AsyncIterator[GatewayContext]:
+                    try:
+                        yield ctx
+                    finally:
+                        await ctx.reset_client()
+
+                gateway = build_gateway(lifespan=_lifespan)
+                async with Client(gateway, raise_exceptions=True) as client:
+                    result = await client.call_tool("qgis_list_instances", {})
+                    assert result.is_error
+                    return json.loads(_extract_text(result))
+
+        payload = _run(run())
+        assert payload["error"]["code"] == "hub_unreachable"
+        assert payload["error"]["details"]["type"] == "HubFileError"
 
     def test_wait_ready_keeps_waiting_while_the_hub_is_not_listening(self) -> None:
         """起動直後（Hub がまだ listen していない）に呼んでも即落ちしない。

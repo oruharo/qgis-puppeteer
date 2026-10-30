@@ -20,13 +20,15 @@ Qt ループを抜けて assert に移る。
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager, suppress
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -35,8 +37,26 @@ import pytest
 pytest.importorskip("PyQt5.QtWebSockets")
 
 from PyQt5.QtCore import QCoreApplication  # noqa: E402
+from qgis_puppeteer._version import __version__  # noqa: E402
 from qgis_puppeteer.client import AutomationClient  # noqa: E402
+from qgis_puppeteer.handshake import (  # noqa: E402
+    client_proof,
+    generate_nonce,
+    generate_token,
+    hub_proof,
+)
+from qgis_puppeteer.hub_file import HubFileInfo, write_hub_file  # noqa: E402
+from qgis_puppeteer.protocol import (  # noqa: E402
+    SUPPORTED_PROTOCOL,
+    Error,
+    ErrorCode,
+    Hello,
+    RegisterAck,
+    encode_message,
+)
 from qgis_puppeteer.worker import Worker  # noqa: E402
+
+from tests._handshake_helpers import hub_file_env  # noqa: E402
 
 pytestmark = pytest.mark.integration
 
@@ -67,15 +87,34 @@ def _wait_port_open(port: int, timeout: float = 10.0) -> None:
 
 @contextmanager
 def _hub_subprocess(port: int) -> Iterator[subprocess.Popen[bytes]]:
+    """Hub プロセスを起動し、終了時に確実に停止させる。
+
+    Hub ファイルは一時フォルダに書かせ、その間 ``QPUPPETEER_HUB_FILE`` で
+    同じ場所を指す（このプロセスの Worker と ``AutomationClient`` がそこから
+    token を読む）。
+    """
+    with hub_file_env() as hub_file, _hub_process(port, hub_file) as proc:
+        yield proc
+
+
+def hub_command(port: int, hub_file: Path) -> list[str]:
+    """Hub を起こすコマンド（Worker の ``hub_spawn_command`` にも使う）。"""
+    return [
+        sys.executable,
+        "-m",
+        "qgis_puppeteer.hub",
+        "--port",
+        str(port),
+        "--no-pid-file",
+        "--hub-file",
+        str(hub_file),
+    ]
+
+
+@contextmanager
+def _hub_process(port: int, hub_file: Path) -> Iterator[subprocess.Popen[bytes]]:
     proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "qgis_puppeteer.hub",
-            "--port",
-            str(port),
-            "--no-pid-file",
-        ],
+        hub_command(port, hub_file),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -149,6 +188,72 @@ def _asyncio_in_thread(
 
     t = threading.Thread(target=_target, daemon=True)
     t.start()
+    return t
+
+
+# ============================================================
+# 偽の Hub（挨拶だけ本物と同じにして、ack を好きに返す）
+# ============================================================
+
+
+def _write_fake_hub_file(port: int) -> str:
+    """``hub_file_env()`` の場所に偽の Hub の Hub ファイルを書き、token を返す。"""
+    import os
+
+    from qgis_puppeteer.hub_file import ENV_HUB_FILE
+
+    token = generate_token()
+    write_hub_file(
+        os.environ[ENV_HUB_FILE],
+        HubFileInfo(addresses=(f"127.0.0.1:{port}",), token=token),
+    )
+    return token
+
+
+async def _greet(ws: Any) -> tuple[str, dict[str, Any]]:
+    """hello を送り、返ってきた register を (hub_nonce, register) で返す。"""
+    hub_nonce = generate_nonce()
+    hello = Hello(hub_version=__version__, protocol=SUPPORTED_PROTOCOL, nonce=hub_nonce)
+    await ws.send(encode_message(hello))
+    reg = json.loads(await asyncio.wait_for(ws.recv(), 5.0))
+    assert reg["type"] == "register", reg
+    return hub_nonce, reg
+
+
+async def _wait_closed(ws: Any) -> bool:
+    """相手が切るのを待つ。切られたら True、5 秒待っても切られなければ False。"""
+    try:
+        await asyncio.wait_for(ws.wait_closed(), 5.0)
+    except asyncio.TimeoutError:
+        return False
+    return True
+
+
+def _run_fake_hub(
+    port: int, handler: Callable[[Any], Awaitable[None]], holder: list[Any]
+) -> threading.Thread:
+    """1 本目の接続を ``handler`` で扱う偽の Hub を別スレッドで起こす。"""
+    from websockets.asyncio.server import serve
+
+    server_ready = threading.Event()
+
+    async def fake_hub() -> None:
+        done = asyncio.Event()
+
+        async def on_connection(ws: Any) -> None:
+            if done.is_set():
+                return
+            try:
+                await handler(ws)
+            finally:
+                done.set()
+
+        async with serve(on_connection, "127.0.0.1", port):
+            server_ready.set()
+            await asyncio.wait_for(done.wait(), 10.0)
+
+    t = _asyncio_in_thread(fake_hub, holder)
+    assert server_ready.wait(5.0)
     return t
 
 
@@ -358,46 +463,164 @@ class TestWorkerIntegration:
 
     def test_worker_answers_an_unknown_message_type(self) -> None:
         """新しい Hub から知らない type が来ても、id があれば unsupported_message で答える。"""
-        import json
-
-        from websockets.asyncio.server import serve
-
         port = _get_free_port()
         replies: list[Any] = []
-        server_ready = threading.Event()
-
-        async def fake_hub() -> None:
-            done = asyncio.Event()
+        holder: list[Any] = []
+        with hub_file_env():
+            token = _write_fake_hub_file(port)
 
             async def handler(ws: Any) -> None:
-                reg = json.loads(await ws.recv())
-                await ws.send(
-                    json.dumps(
-                        {"type": "register_ack", "id": reg["id"], "ok": True, "instance_id": "w-x"}
-                    )
+                hub_nonce, reg = await _greet(ws)
+                assert reg["proof"] == client_proof(token, hub_nonce, reg["nonce"])
+                ack = RegisterAck(
+                    id=reg["id"],
+                    ok=True,
+                    instance_id="w-x",
+                    protocol_version=reg["protocol_version"],
+                    package_version=__version__,
+                    hub_proof=hub_proof(token, reg["nonce"], hub_nonce),
                 )
+                await ws.send(encode_message(ack))
                 await ws.send(json.dumps({"type": "added_later", "id": "h-1"}))
                 replies.append(json.loads(await asyncio.wait_for(ws.recv(), 5.0)))
-                done.set()
 
-            async with serve(handler, "127.0.0.1", port):
-                server_ready.set()
-                await asyncio.wait_for(done.wait(), 10.0)
-
-        holder: list[Any] = []
-        t = _asyncio_in_thread(fake_hub, holder)
-        assert server_ready.wait(5.0)
-        app = _qapp()
-        worker = Worker(hub_url=f"ws://127.0.0.1:{port}", pid=9005, label="e2e-new-hub")
-        try:
-            worker.connect_to_hub()
-            _spin_while_thread(app, t)
-        finally:
-            worker.disconnect_from_hub()
-            _spin_until(app, lambda: not worker.is_registered, timeout=3.0)
+            t = _run_fake_hub(port, handler, holder)
+            app = _qapp()
+            worker = Worker(hub_url=f"ws://127.0.0.1:{port}", pid=9005, label="e2e-new-hub")
+            try:
+                worker.connect_to_hub()
+                _spin_while_thread(app, t)
+            finally:
+                worker.disconnect_from_hub()
+                _spin_until(app, lambda: not worker.is_registered, timeout=3.0)
 
         assert holder == [("ok", None)], holder
         [reply] = replies
         assert (reply["type"], reply["id"], reply["ok"]) == ("response", "h-1", False)
         assert reply["error"]["code"] == "unsupported_message"
         assert reply["error"]["details"] == {"type": "added_later"}
+
+
+class TestWorkerHandshake:
+    """Worker の側の挨拶：Hub ファイルの token で proof を作り、Hub の proof を確かめる。"""
+
+    def _run(
+        self,
+        handler: Callable[[Any, str], Awaitable[None]],
+        *,
+        write_file: bool = True,
+        label: str = "e2e-handshake",
+    ) -> tuple[Worker, list[str], list[str]]:
+        """偽の Hub に Worker をつなぎ、(worker, registered, register_failed) を返す。"""
+        port = _get_free_port()
+        holder: list[Any] = []
+        registered: list[str] = []
+        failed: list[str] = []
+        with hub_file_env():
+            token = _write_fake_hub_file(port) if write_file else ""
+
+            async def bound(ws: Any) -> None:
+                await handler(ws, token)
+
+            t = _run_fake_hub(port, bound, holder)
+            app = _qapp()
+            worker = Worker(
+                hub_url=f"ws://127.0.0.1:{port}",
+                pid=9007,
+                label=label,
+                auto_reconnect=False,
+            )
+            worker.registered.connect(registered.append)
+            worker.register_failed.connect(failed.append)
+            try:
+                worker.connect_to_hub()
+                _spin_while_thread(app, t)
+            finally:
+                worker.disconnect_from_hub()
+                _spin_until(app, lambda: not worker.is_registered, timeout=3.0)
+        assert holder == [("ok", None)], holder
+        return worker, registered, failed
+
+    def test_an_ack_with_a_wrong_hub_proof_is_not_trusted(self) -> None:
+        """token を知らない相手の ok=True を信じない：登録せず、切り、QGIS も閉じない。"""
+        closed: list[bool] = []
+
+        async def handler(ws: Any, _token: str) -> None:
+            _hub_nonce, reg = await _greet(ws)
+            ack = RegisterAck(
+                id=reg["id"],
+                ok=True,
+                instance_id="w-fake",
+                protocol_version=reg["protocol_version"],
+                package_version=__version__,
+                hub_proof="0" * 64,
+            )
+            await ws.send(encode_message(ack))
+            closed.append(await _wait_closed(ws))
+
+        worker, registered, failed = self._run(handler)
+        assert closed == [True], "the Worker must hang up on an untrusted Hub"
+        assert registered == []
+        assert failed == [], "an untrusted ack must not stop the Worker (close QGIS)"
+        assert worker.instance_id is None
+
+    def test_a_launch_abandoned_without_a_hub_proof_is_ignored(self) -> None:
+        """偽の Hub に QGIS を閉じさせない：proof の無い launch_abandoned は無視する。"""
+        closed: list[bool] = []
+
+        async def handler(ws: Any, _token: str) -> None:
+            _hub_nonce, reg = await _greet(ws)
+            ack = RegisterAck(
+                id=reg["id"],
+                ok=False,
+                error=Error(code=ErrorCode.LAUNCH_ABANDONED, message="abandoned"),
+            )
+            await ws.send(encode_message(ack))
+            closed.append(await _wait_closed(ws))
+
+        _worker, registered, failed = self._run(handler)
+        assert closed == [True]
+        assert registered == []
+        assert failed == []
+
+    def test_a_version_mismatch_asks_to_install_the_same_version(self) -> None:
+        """版が合わなければ register_failed で「同じ版を入れて」と言う（proof は無くてよい）。"""
+
+        async def handler(ws: Any, _token: str) -> None:
+            _hub_nonce, reg = await _greet(ws)
+            ack = RegisterAck(
+                id=reg["id"],
+                ok=False,
+                package_version="9.9.9",
+                error=Error(
+                    code=ErrorCode.PROTOCOL_VERSION_MISMATCH,
+                    message="protocol version mismatch",
+                    details={"hub_package_version": "9.9.9"},
+                ),
+            )
+            await ws.send(encode_message(ack))
+            await _wait_closed(ws)
+
+        _worker, registered, [reason] = self._run(handler)
+        assert registered == []
+        assert reason.startswith("protocol_version_mismatch")
+        assert "9.9.9" in reason
+        assert __version__ in reason
+        assert "install the same version" in reason
+
+    def test_no_hub_file_means_no_register(self) -> None:
+        """Hub ファイルが読めなければ register を送らずに切る（再接続に任せる）。"""
+        got: list[Any] = []
+
+        async def handler(ws: Any, _token: str) -> None:
+            hello = Hello(hub_version=__version__, protocol=SUPPORTED_PROTOCOL, nonce="n")
+            await ws.send(encode_message(hello))
+            try:
+                got.append(await asyncio.wait_for(ws.recv(), 5.0))
+            except Exception as e:  # noqa: BLE001 - 切られたことだけ確かめる
+                got.append(type(e).__name__)
+
+        _worker, registered, failed = self._run(handler, write_file=False)
+        assert got == ["ConnectionClosedOK"], got
+        assert registered == []
+        assert failed == []

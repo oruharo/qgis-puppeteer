@@ -21,6 +21,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from qgis_puppeteer._version import __version__
+from qgis_puppeteer.hub_file import (
+    ENV_HUB_FILE,
+    HubFileError,
+    HubFileInfo,
+    default_hub_file_path,
+    read_hub_file,
+    resolve_hub_file_path,
+)
 from qgis_puppeteer.hub_spawn import (
     DEFAULT_HUB_HOST,
     DEFAULT_HUB_PORT,
@@ -46,14 +55,17 @@ from qgis_puppeteer.hub_state import (
 )
 from qgis_puppeteer.protocol import (
     PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL,
     AbandonLaunch,
     Error,
     ErrorCode,
+    Hello,
     InstanceInfo,
     ListInstancesRequest,
     ListInstancesResponse,
     Message,
     MessageType,
+    ProtocolRange,
     RegisterAck,
     RegisterRequest,
     RejectedRegistration,
@@ -76,6 +88,7 @@ if TYPE_CHECKING:
     from qgis_puppeteer.client import (
         AutomationClient,
         AutomationClientError,
+        HubAuthError,
         NotConnectedError,
         RegisterError,
         RegistrationRejectedError,
@@ -88,6 +101,7 @@ _CLIENT_EXPORTS = frozenset(
     {
         "AutomationClient",
         "AutomationClientError",
+        "HubAuthError",
         "NotConnectedError",
         "RegisterError",
         "RegistrationRejectedError",
@@ -153,14 +167,23 @@ def _shadowed_message() -> str:
 # 出るため、トップレベル __init__.py からは export しない）。
 
 __all__ = [
+    "__version__",
     # client（AutomationClient）
     "AutomationClient",
     "AutomationClientError",
+    "HubAuthError",
     "NotConnectedError",
     "RegisterError",
     "RegistrationRejectedError",
     "RequestError",
     "RequestNotSentError",
+    # hub_file（Hub の接続情報）
+    "ENV_HUB_FILE",
+    "HubFileError",
+    "HubFileInfo",
+    "default_hub_file_path",
+    "read_hub_file",
+    "resolve_hub_file_path",
     # hub_spawn（Hub 起動競合回避）
     "DEFAULT_HUB_HOST",
     "DEFAULT_HUB_PORT",
@@ -176,6 +199,7 @@ __all__ = [
     "HubState",
     "IDLE_SHUTDOWN_DELAY_SECONDS",
     "PROTOCOL_VERSION",
+    "SUPPORTED_PROTOCOL",
     "RegisterOutcome",
     "ResolveOutcome",
     "WorkerEntry",
@@ -189,12 +213,14 @@ __all__ = [
     "AbandonLaunch",
     "Error",
     "ErrorCode",
+    "Hello",
     "InstanceInfo",
     "ListInstancesRequest",
     "ListInstancesResponse",
     "Message",
     "RejectedRegistration",
     "MessageType",
+    "ProtocolRange",
     "RegisterAck",
     "RegisterRequest",
     "Request",

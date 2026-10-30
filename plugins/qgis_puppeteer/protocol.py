@@ -18,13 +18,34 @@ from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
 from typing import Any
 
-# プロトコル互換性管理（ADR-0001 Open Questions 参照）
-PROTOCOL_VERSION: int = 1
+# プロトコルの版。挨拶（hello / register）で確かめ合い、範囲が重ならなければ
+# Hub が protocol_version_mismatch で断る（ADR-0001 §3）。
+# 2：挨拶（hello と proof）が必須になった。1 とは互換が無い
+PROTOCOL_VERSION: int = 2
 
 # request に timeout_ms が無いときに Hub が使う待ち時間（ミリ秒）
 DEFAULT_REQUEST_TIMEOUT_MS: int = 30_000
 # timeout_ms の上限。Hub は QTimer で待つので、その int の範囲に収める
 MAX_REQUEST_TIMEOUT_MS: int = 2**31 - 1
+
+
+@dataclass(frozen=True)
+class ProtocolRange:
+    """話せるプロトコルの版の範囲（両端を含む）。"""
+
+    min: int
+    max: int
+
+    def __contains__(self, version: object) -> bool:
+        return (
+            isinstance(version, int)
+            and not isinstance(version, bool)
+            and self.min <= version <= self.max
+        )
+
+
+# この版が話せる範囲
+SUPPORTED_PROTOCOL: ProtocolRange = ProtocolRange(min=PROTOCOL_VERSION, max=PROTOCOL_VERSION)
 
 
 # ============================================================
@@ -42,6 +63,9 @@ class Role(str, Enum):
 
 class MessageType(str, Enum):
     """メッセージ種別（`type` フィールドの値）。"""
+
+    # 挨拶：接続するとすぐ Hub が送る（ADR-0001 §3 "挨拶"）
+    HELLO = "hello"
 
     # 登録系
     REGISTER = "register"
@@ -92,6 +116,9 @@ class ErrorCode(str, Enum):
     UNSUPPORTED_MESSAGE = "unsupported_message"
     # 起こした側がもう待っていない launch_token の Worker の登録を断った（#16）
     LAUNCH_ABANDONED = "launch_abandoned"
+    # 挨拶の proof が無い・合わない（Hub ファイルの token を知らない）。
+    # 登録の前にほかのメッセージを送ったときも、これで断って切る
+    UNAUTHORIZED = "unauthorized"
 
 
 def error_code_value(code: ErrorCode | str) -> str:
@@ -139,6 +166,8 @@ class InstanceInfo:
     grace_expires_in: float | None = None
     # #17: その QGIS のプラグインのライブラリの指紋。旧プラグイン・旧 Hub では None
     source_fingerprint: str | None = None
+    # その QGIS のプラグインの版（``qgis_puppeteer.__version__``）
+    package_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -185,17 +214,45 @@ class Error:
 
 
 @dataclass(frozen=True)
+class Hello:
+    """Hub → 接続してきた相手：最初の挨拶。
+
+    接続するとすぐ Hub が送る。相手はこれを受けてから ``register`` を送る。
+    ``nonce`` は proof の計算に使う（``qgis_puppeteer.handshake``）。応答を
+    待つメッセージではないので id は無い。
+    """
+
+    hub_version: str
+    protocol: ProtocolRange
+    nonce: str
+
+    @property
+    def type(self) -> MessageType:
+        return MessageType.HELLO
+
+
+@dataclass(frozen=True)
 class RegisterRequest:
     """Hub への初回 register メッセージ。
 
     Worker の場合は pid/label/project を必須とし、再接続時は
     previous_instance_id を付けて instance_id 引き継ぎを要求する
     (ADR-0001 §4 "Worker 再接続時の instance_id 引き継ぎ")。
+
+    ``hello`` を受けてから送り、``nonce`` と ``proof`` で Hub ファイルの token を
+    知っていることを示す（``qgis_puppeteer.handshake``）。
     """
 
     id: str
     role: Role
+    # 送り主が選んだ版（Hub の範囲と自分の範囲の重なりの最大）
     protocol_version: int = PROTOCOL_VERSION
+    # 送り主の話せる範囲と、ライブラリの版（断られたときに理由を示すため）
+    protocol: ProtocolRange | None = None
+    package_version: str | None = None
+    # 挨拶：送り主の nonce と proof（HMAC）
+    nonce: str | None = None
+    proof: str | None = None
     # Worker 専用フィールド（role が WORKER 以外では None）
     pid: int | None = None
     label: str | None = None
@@ -233,6 +290,12 @@ class RegisterAck:
     # 新規登録した場合 True（U1 連続再起動の正常系）。
     superseded: bool = False
     error: Error | None = None
+    # Hub が使う版（ok=True のとき）と、Hub のライブラリの版
+    protocol_version: int | None = None
+    package_version: str | None = None
+    # 挨拶：Hub も token を知っていることを示す HMAC。proof が通らなかった
+    # （unauthorized）・版が合わなかった（protocol_version_mismatch）ときは無い
+    hub_proof: str | None = None
 
     @property
     def type(self) -> MessageType:
@@ -372,7 +435,8 @@ class AbandonLaunch:
 
 # Union 型：プロトコルで流通する全メッセージ型
 Message = (
-    RegisterRequest
+    Hello
+    | RegisterRequest
     | RegisterAck
     | Request
     | Response
@@ -585,11 +649,25 @@ def reply_to_undecodable(error: ProtocolDecodeError, *, receiver: str) -> Respon
 
 def _build_message(msg_type: MessageType, payload: dict[str, Any]) -> Message:
     """type に応じた dataclass を構築する。"""
+    if msg_type is MessageType.HELLO:
+        protocol = parse_protocol_range(payload["protocol"])
+        if protocol is None:
+            raise ValueError("hello.protocol must be {'min': int, 'max': int}")
+        return Hello(
+            hub_version=str(payload.get("hub_version", "")),
+            protocol=protocol,
+            nonce=str(payload["nonce"]),
+        )
+
     if msg_type is MessageType.REGISTER:
         return RegisterRequest(
             id=payload["id"],
             role=Role(payload["role"]),
             protocol_version=payload.get("protocol_version", PROTOCOL_VERSION),
+            protocol=parse_protocol_range(payload.get("protocol")),
+            package_version=payload.get("package_version"),
+            nonce=payload.get("nonce"),
+            proof=payload.get("proof"),
             pid=payload.get("pid"),
             label=payload.get("label"),
             project=payload.get("project"),
@@ -608,6 +686,9 @@ def _build_message(msg_type: MessageType, payload: dict[str, Any]) -> Message:
             resumed=bool(payload.get("resumed", False)),
             superseded=bool(payload.get("superseded", False)),
             error=_build_error(payload.get("error")),
+            protocol_version=payload.get("protocol_version"),
+            package_version=payload.get("package_version"),
+            hub_proof=payload.get("hub_proof"),
         )
 
     if msg_type is MessageType.REQUEST:
@@ -654,6 +735,7 @@ def _build_message(msg_type: MessageType, payload: dict[str, Any]) -> Message:
                 last_seen_ago=item.get("last_seen_ago"),
                 grace_expires_in=item.get("grace_expires_in"),
                 source_fingerprint=item.get("source_fingerprint"),
+                package_version=item.get("package_version"),
             )
             for item in raw_instances
         ]
@@ -685,6 +767,16 @@ def _build_message(msg_type: MessageType, payload: dict[str, Any]) -> Message:
 
     # MessageType 列挙を網羅的に扱っているが、将来の追加に備えて保険
     raise ProtocolDecodeError(f"unhandled message type: {msg_type}")
+
+
+def parse_protocol_range(raw: object) -> ProtocolRange | None:
+    """``{"min": int, "max": int}`` を ``ProtocolRange`` にする。形が違えば None。"""
+    if not isinstance(raw, dict):
+        return None
+    low, high = raw.get("min"), raw.get("max")
+    if not all(isinstance(v, int) and not isinstance(v, bool) for v in (low, high)):
+        return None
+    return ProtocolRange(min=low, max=high)  # type: ignore[arg-type]
 
 
 def _build_error(raw: dict[str, Any] | None) -> Error | None:

@@ -14,15 +14,18 @@ from qgis_puppeteer.protocol import (
     DEFAULT_REQUEST_TIMEOUT_MS,
     MAX_REQUEST_TIMEOUT_MS,
     PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL,
     AbandonLaunch,
     Bye,
     Error,
     ErrorCode,
+    Hello,
     InstanceInfo,
     ListInstancesRequest,
     ListInstancesResponse,
     MessageType,
     ProtocolDecodeError,
+    ProtocolRange,
     RegisterAck,
     RegisterRequest,
     RejectedRegistration,
@@ -258,6 +261,57 @@ class TestRoundTrip:
         msg = Bye(id="uuid-14", instance_id="worker-a-1234")
         assert decode_message(encode_message(msg)) == msg
 
+    def test_hello_round_trip_has_no_id(self) -> None:
+        """hello は応答を待たないので id を持たない。"""
+        msg = Hello(hub_version="0.1.0", protocol=ProtocolRange(2, 3), nonce="hn")
+        wire = json.loads(encode_message(msg))
+        assert wire == {
+            "type": "hello",
+            "hub_version": "0.1.0",
+            "protocol": {"min": 2, "max": 3},
+            "nonce": "hn",
+        }
+        assert decode_message(encode_message(msg)) == msg
+
+    @pytest.mark.parametrize(
+        "protocol", [None, {"min": 2}, {"min": "2", "max": 2}, {"min": True, "max": 2}]
+    )
+    def test_hello_needs_a_protocol_range(self, protocol: object) -> None:
+        raw = json.dumps({"type": "hello", "hub_version": "x", "protocol": protocol, "nonce": "n"})
+        with pytest.raises(ProtocolDecodeError):
+            decode_message(raw)
+
+    def test_register_request_carries_the_handshake(self) -> None:
+        msg = RegisterRequest(
+            id="uuid-15",
+            role=Role.WORKER,
+            pid=1,
+            protocol_version=2,
+            protocol=ProtocolRange(2, 2),
+            package_version="0.1.0",
+            nonce="cn",
+            proof="p",
+        )
+        assert decode_message(encode_message(msg)) == msg
+
+    def test_register_ack_carries_the_hub_proof_and_versions(self) -> None:
+        msg = RegisterAck(
+            id="uuid-16",
+            ok=True,
+            instance_id="w",
+            protocol_version=2,
+            package_version="0.1.0",
+            hub_proof="hp",
+        )
+        assert decode_message(encode_message(msg)) == msg
+
+    def test_instance_info_carries_the_package_version(self) -> None:
+        resp = ListInstancesResponse(
+            id="l",
+            instances=[InstanceInfo(instance_id="w", label="A", pid=1, package_version="0.1.0")],
+        )
+        assert decode_message(encode_message(resp)) == resp
+
 
 # ============================================================
 # JSON 形式の検証（仕様準拠）
@@ -291,9 +345,11 @@ class TestWireFormat:
         encoded = json.loads(encode_message(msg))
         assert encoded["error"]["code"] == "instance_not_found"
 
-    def test_protocol_version_is_integer_one(self) -> None:
-        """protocol_version は整数 1 固定。"""
-        assert PROTOCOL_VERSION == 1
+    def test_protocol_version_is_two(self) -> None:
+        """版 2 で挨拶（hello と proof）が要るようになった。版 1 とは互換を取らない。"""
+        assert PROTOCOL_VERSION == 2
+        assert PROTOCOL_VERSION in SUPPORTED_PROTOCOL
+        assert 1 not in SUPPORTED_PROTOCOL
 
     def test_encoded_japanese_label_survives_roundtrip(self) -> None:
         """日本語ラベルが UTF-8 で保持されること（ensure_ascii=False 効果）。"""

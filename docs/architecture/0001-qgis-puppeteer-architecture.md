@@ -186,15 +186,43 @@ plugins/qgis_puppet_test_helpers/      ← Tier 3 Test 用 extension plugin
 - ペイロードは JSON
 - 全メッセージ共通フィールド：`type`, `id`（UUID 文字列、リクエスト／レスポンス対応用）
 
+#### 挨拶（hello と proof）
+
+> **2026-10-30 追記（プロトコル 2）**: Hub につなぐには、Hub ファイル（§9.3）の token を知っていることを示す。版 1 とは互換を取らない（版 1 の相手には `protocol_version_mismatch` を返す）。
+
+1. 接続するとすぐ、Hub が `hello` を送る。応答を待つメッセージではないので `id` は無い：
+
+   ```json
+   {"type": "hello", "hub_version": "0.1.0", "protocol": {"min": 2, "max": 2}, "nonce": "<hub の nonce>"}
+   ```
+
+2. 相手（Worker・MCP gateway・AutomationClient）は Hub ファイルを**そのとき**読み（Hub は起き直すたびに token を作り直す）、自分の nonce と proof を載せた `register` を送る。`protocol_version` は Hub の範囲と自分の範囲の重なりの最大（重ならなければ自分の最大をそのまま送り、Hub に断らせる）：
+
+   ```
+   proof     = HMAC-SHA256(key=token, "qgis-puppeteer/client\n" + hub_nonce + "\n" + client_nonce)
+   hub_proof = HMAC-SHA256(key=token, "qgis-puppeteer/hub\n" + client_nonce + "\n" + hub_nonce)
+   ```
+
+   2 つはラベルと nonce の順が違うので、相手の proof を写し返しても hub_proof にならない。比較は `hmac.compare_digest`。
+
+3. Hub は**先に版**を見る（範囲外なら `protocol_version_mismatch`。`details` に両方の範囲と `package_version`）。版 1 の古い相手は hello を待たずに proof 無しの register を送ってくるので、proof を先に見ると「版を合わせればよい」ことが伝わらない。**次に proof** を見る（無い・合わない → `unauthorized`）。どちらでも `register_ack`（ok=false）を返して切る。
+4. 通れば、Hub は今までどおり登録し、`register_ack` に `protocol_version`・`package_version`・`hub_proof` を載せる。相手は `hub_proof` を確かめ、合わなければ信用しない（Worker は警告して切り、再接続に任せる。`register_failed` は出さない＝QGIS を閉じない。AutomationClient は `HubAuthError`）。ただし `unauthorized` と `protocol_version_mismatch` の失敗は、Hub がまだ相手を確かめていないので proof 無しで受ける。`launch_abandoned` は QGIS を閉じさせるので、必ず proof を求める。
+
+挨拶の済んでいない接続から register 以外が来たら、`id` が読めればその `id` で `unauthorized` の `response` を返して切る。接続から 10 秒（`--register-timeout-ms`、テスト用の隠し引数）以内に挨拶が済まなければ切る。
+
 #### メッセージ種別
 
-##### Worker → Hub（dial out 直後）
+##### Worker → Hub（hello を受けた後）
 
 ```json
 {
   "type": "register",
   "id": "uuid-1",
-  "protocol_version": 1,
+  "protocol_version": 2,
+  "protocol": {"min": 2, "max": 2},
+  "package_version": "0.1.0",
+  "nonce": "<client の nonce>",
+  "proof": "<proof>",
   "role": "worker",
   "pid": 1234,
   "label": "A",
@@ -206,7 +234,8 @@ plugins/qgis_puppet_test_helpers/      ← Tier 3 Test 用 extension plugin
 Hub は label の重複検証後、登録成立を返す：
 
 ```json
-{"type": "register_ack", "id": "uuid-1", "ok": true, "instance_id": "worker-a-1234"}
+{"type": "register_ack", "id": "uuid-1", "ok": true, "instance_id": "worker-a-1234",
+ "protocol_version": 2, "package_version": "0.1.0", "hub_proof": "<hub_proof>"}
 ```
 
 label が空の場合は `{project_basename}-{pid 下4桁}` を自動採番。
@@ -217,7 +246,11 @@ label が空の場合は `{project_basename}-{pid 下4桁}` を自動採番。
 {
   "type": "register",
   "id": "uuid-2",
-  "protocol_version": 1,
+  "protocol_version": 2,
+  "protocol": {"min": 2, "max": 2},
+  "package_version": "0.1.0",
+  "nonce": "<client の nonce>",
+  "proof": "<proof>",
   "role": "mcp_gateway"
 }
 ```
@@ -301,7 +334,8 @@ label が空の場合は `{project_basename}-{pid 下4桁}` を自動採番。
 - `instance_ambiguous`: 複数マッチ（instance 未指定で 2 台以上）
 - `instance_timeout`: Worker が `timeout_ms` 以内に応答しなかった（Hub が返す。§3「時間切れ」）
 - `request_expired`: Worker が読んだ時点で request の `deadline` が過ぎていたので実行しなかった（Worker が返す。送り主には通常届かない）
-- `protocol_version_mismatch`: プロトコルバージョン不整合
+- `protocol_version_mismatch`: プロトコルバージョン不整合（`details` に Hub と相手の版の範囲と `package_version`）
+- `unauthorized`: 挨拶が済んでいない（proof が無い・合わない、または register の前に別のメッセージを送った）
 - `invalid_command`: 未知のコマンド
 - `worker_execution_error`: Worker 側で例外発生（stack trace を `error.details` に）
 - `unsupported_message`: 受け手の知らない `type` のメッセージだった（`details.type`）。元のメッセージの `id` で返す
@@ -462,7 +496,7 @@ Hub クラッシュ → 再 spawn → Worker 再接続のシナリオで、**MCP
 {
   "type": "register",
   "id": "uuid-N",
-  "protocol_version": 1,
+  "protocol_version": 2,
   "role": "worker",
   "pid": 1234,
   "label": "A",
@@ -766,6 +800,17 @@ def on_origin_auth(authenticator: QWebSocketCorsAuthenticator):
     hostname = urlparse(origin).hostname
     authenticator.setAllowed(hostname in _ALLOWED_HOSTS)
 ```
+
+#### 9.3 Hub ファイルと token（2026-10-30 追記）
+
+Origin 検証はブラウザしか防がない。同じ機械のほかのプロセス（ほかの OS ユーザーのものを含む）は Hub のポートにつなげ、QGIS に何でも（`execute_python` も）頼めた。また、先にそのポートで待ち受けたプロセスは Hub になりすませた。そこで、Hub につなぐには Hub ファイルの token を知っていることを示す（§3「挨拶」）。
+
+- Hub は listen できたら（bind に負けた Hub は書かない）、アドレス・token（起きるたびに `secrets.token_urlsafe(32)` で作る）・pid・`package_version`・版の範囲・起動時刻を Hub ファイルに書く。一時ファイルに書いて fsync し、`os.replace` で一度に置き換える（Windows で読み手がいて `PermissionError` になれば少し待ってやり直す）。書けなければ listen をやめて終わる（誰もつなげないので）
+- 置き場所（`resolve_hub_file_path`）：明示（Hub の `--hub-file`、`AutomationClient(hub_file=...)`）→ 環境変数 `QPUPPETEER_HUB_FILE` → 既定。既定は Windows が `%LOCALAPPDATA%\qgis_puppeteer\hub.json`（既定の ACL で本人・SYSTEM・Administrators だけが読める）、POSIX が `$XDG_RUNTIME_DIR/qgis_puppeteer/hub.json`、無ければ `~/.local/state/qgis_puppeteer/hub.json`（フォルダ 0700・ファイル 0600）。Hub・Worker・クライアントの全員が同じ規則で決めるので、プラグインが起こした Hub とその QGIS の Worker は同じファイルを見る
+- 止まるときは、中の token が自分のものなときだけ消す（あとから起きた別の Hub のファイルは残す）
+- token は通信に載せない（載せるのは nonce と HMAC だけ）。平文の WebSocket を覗かれても token は漏れない
+- 読めない（無い・壊れた・書式の版が違う・token が無い）ときは `HubFileError`（`OSError` の子）。MCP gateway は `hub_unreachable` として返す
+- pytest プラグインが起こす Hub は session の一時フォルダの Hub ファイルを使い、`spawn_qgis` が起こす QGIS には `QPUPPETEER_HUB_FILE` でそれを教える
 
 ### 10. 将来検討事項
 
@@ -1191,7 +1236,7 @@ MCP / LLM レイヤのオーバーヘッド：
 
 - バインドアドレス指定の解放（`0.0.0.0` / 任意 IP）
 - TLS（`wss://`）の終端を Hub または前段 reverse proxy で
-- トークン認証（`register` メッセージに bearer token、起動時に env または config から渡す）
+- トークン認証：同じ機械の中では済んだ（§3「挨拶」、§9.3）。別のマシンへは Hub ファイルの token をどう渡すかを決める
 - `Origin` 検証ホワイトリストの設定化
 
 プロトコル本体は現行のまま流用可能。接続層と register payload の拡張で済む。

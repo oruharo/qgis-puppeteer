@@ -37,6 +37,7 @@ QT_TEST_FILES = [
     "packages/qgis-puppeteer/tests/test_worker_integration.py",
     "packages/qgis-puppeteer/tests/test_integration_hub_client.py",
     "packages/qgis-puppeteer/tests/test_hub_spawn_integration.py",
+    "packages/qgis-puppeteer/tests/test_hub_file_integration.py",
     "packages/qgis-puppeteer/tests/test_worker_liveness_integration.py",
     "packages/qgis-puppeteer/tests/test_ui_tools_snapshot.py",
     "packages/qgis-puppeteer/tests/test_ui_tools_secret.py",

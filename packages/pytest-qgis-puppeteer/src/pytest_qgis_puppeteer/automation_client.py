@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 import warnings
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from qgis_puppeteer.client import (
@@ -40,6 +42,7 @@ from qgis_puppeteer.client import (
     WorkerCodeError,
     find_rejection,
 )
+from qgis_puppeteer.hub_file import resolve_hub_file_path
 from qgis_puppeteer.hub_state import select_by_selector
 from qgis_puppeteer.protocol import ErrorCode, RejectedRegistration, Role
 from qgis_puppeteer.selector_match import find_in_snapshot as _find_in_snapshot
@@ -215,9 +218,18 @@ class E2EAutomationClient:
     切らずに複数テスト間で再利用できる）。
     """
 
-    def __init__(self, url: str, *, origin: str = "http://localhost") -> None:
+    def __init__(
+        self,
+        url: str,
+        *,
+        origin: str = "http://localhost",
+        hub_file: str | os.PathLike[str] | None = None,
+    ) -> None:
         self._url = url
         self._origin = origin
+        # 挨拶の token を読む Hub ファイル。省略時は QPUPPETEER_HUB_FILE、
+        # それも無ければ既定の場所（qgis_puppeteer.hub_file）
+        self._hub_file = hub_file
         self._loop: asyncio.AbstractEventLoop | None = None
         self._client: AutomationClient | None = None
         # use_instance() で sticky に設定するデフォルト instance。``call(...)`` の
@@ -250,9 +262,18 @@ class E2EAutomationClient:
             url=self._url,
             origin=self._origin,
             role=Role.AUTOMATION_CLIENT,
+            hub_file=self._hub_file,
         )
         self._loop.run_until_complete(self._client.connect())
         logger.info("E2EAutomationClient connected to %s", self._url)
+
+    @property
+    def hub_file(self) -> Path:
+        """挨拶の token を読む Hub ファイル（省略時に実際に使うパス）。
+
+        起こす QGIS にも同じファイルを渡す（``spawn_qgis``）。
+        """
+        return resolve_hub_file_path(self._hub_file)
 
     def close(self) -> None:
         """Hub への接続と event loop を閉じる。二重 close は安全。"""
