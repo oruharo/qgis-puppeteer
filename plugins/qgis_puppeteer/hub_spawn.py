@@ -1,40 +1,49 @@
-"""Hub プロセスの起動競合回避ロジック（Qt 非依存）。
+"""Hub が無ければ起こす（Qt 非依存）。
 
 ADR-0001 §4 "Hub の起動競合回避（親主導の spawn 確認モデル）" を実装する。
-Windows は `pass_fds=` が使えないため、親が排他ロックを保持したまま Hub を
-`subprocess.Popen` で DETACHED 起動 → TCP probe で listen 成功を確認 →
-ロック解放、というモデルに従う。
+「Hub がいるか」は Hub ファイルで決める（``qgis_puppeteer.hub_probe.find_live_hub``：
+ファイルがある・pid が生きている・挨拶が通る）。
+
+1. 生きた Hub がいれば何もしない
+2. いなければ、Hub ファイルの隣の lock を取って、もう一度確かめてから Hub を起こし、
+   Hub ファイルが現れて挨拶が通るまで待つ
+3. lock を別のプロセスが持っていれば（そちらが起こしている）、生きた Hub が現れるまで待つ
+
+Hub は port 0（OS が選ぶ）で待ち受けるので、ポートはぶつからない。同じ Hub ファイルを
+使う Hub が 2 つ起きないようにするのは lock と、Hub 自身の起動時の確かめ
+（生きた Hub がいれば ``HUB_EXIT_ALREADY_RUNNING`` で降りる）。
 
 ## 公開 API
 
-- `tcp_probe(host, port, timeout)` — listen しているかだけ確認
-- `ensure_hub_reachable(...)` — probe 失敗時はロック獲得して spawn、
-  他プロセスが spawn 中ならバックオフで待つ
-- `try_spawn_hub(...)` — ロック → Popen → probe → 解放の 1 サイクル
-- `default_hub_command(port, python)` — `python -m qgis_puppeteer.hub`
-- `HubStartupError` — 最終的に到達できなかった場合に送出
-- `SpawnOutcome` / `EnsureOutcome` — 結果分類 Enum
+- ``ensure_hub(...)`` — 生きた Hub を返す。いなければ起こす
+- ``try_spawn_hub(...)`` — lock → 確かめ → 起こす → 待つ の 1 回
+- ``default_hub_command(hub_file=..., python=...)`` — ``python -m qgis_puppeteer.hub``
+- ``hub_lock_path`` / ``hub_log_path`` / ``hub_spawn_log_path`` — Hub ファイルの隣のパス
+- ``HubStartupError`` — 最後まで生きた Hub が見つからなかった
 
 ## 設計原則
 
 - Qt に依存しない（pytest から直接呼べる）
-- 副作用（Popen 呼び出し・sleep）は注入可能（ユニットテストでモック可）
-- Windows / POSIX 両対応（`msvcrt.locking` / `fcntl.flock`）
-- 同一プロセスでの再帰ロック挙動は OS 依存なので、排他確認は別プロセス経由で検証
+- 副作用（Popen・Hub の確かめ・sleep・子を止める）は注入できる（ユニットテスト用）
+- Windows / POSIX 両対応（``msvcrt.locking`` / ``fcntl.flock``）
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import socket
+import signal
 import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+
+from qgis_puppeteer.hub_file import HubFileInfo
+from qgis_puppeteer.hub_probe import find_live_hub
 
 logger = logging.getLogger("qgis_puppeteer.hub_spawn")
 
@@ -42,8 +51,12 @@ logger = logging.getLogger("qgis_puppeteer.hub_spawn")
 # 定数
 # ============================================================
 
-DEFAULT_HUB_HOST: str = "127.0.0.1"
-DEFAULT_HUB_PORT: int = 9876
+# Hub の終了コード（``python -m qgis_puppeteer.hub``）
+HUB_EXIT_OK: int = 0
+HUB_EXIT_BIND_FAILED: int = 1
+HUB_EXIT_HUB_FILE_FAILED: int = 2
+# 同じ Hub ファイルで、生きた Hub がもういる（上書きせずに降りた）
+HUB_EXIT_ALREADY_RUNNING: int = 3
 
 DEFAULT_CONNECT_BACKOFF: tuple[float, ...] = (
     0.3,
@@ -57,8 +70,10 @@ DEFAULT_CONNECT_BACKOFF: tuple[float, ...] = (
     8.0,
     10.0,
 )
-DEFAULT_PROBE_TIMEOUT: float = 0.2
-DEFAULT_SPAWN_DEADLINE: float = 5.0
+# Hub の確かめ 1 回（接続・挨拶）にかける時間
+DEFAULT_PROBE_TIMEOUT: float = 1.0
+# 起こしてから生きた Hub になるまで待つ時間（QGIS の Python の起動を含む）
+DEFAULT_SPAWN_DEADLINE: float = 15.0
 DEFAULT_POLL_INTERVAL: float = 0.1
 
 
@@ -68,52 +83,74 @@ DEFAULT_POLL_INTERVAL: float = 0.1
 
 
 class HubStartupError(Exception):
-    """Hub の起動または到達に最終的に失敗した。"""
+    """Hub を起こせなかった、または生きた Hub が現れなかった。"""
 
 
 class SpawnOutcome(Enum):
     """try_spawn_hub の結果。"""
 
     SPAWNED = "spawned"
-    """この呼び出しで Hub を起動し、listen を確認した。"""
+    """この呼び出しで Hub を起こし、生きた Hub になった。"""
 
-    ALREADY_LISTENING = "already_listening"
-    """ロック獲得後の再 probe で、既に Hub が listen していた。"""
+    ALREADY_RUNNING = "already_running"
+    """lock を取ってから確かめると、もう生きた Hub がいた。"""
 
     ANOTHER_PROCESS_OWNS_LOCK = "another_process_owns_lock"
-    """別プロセスがロックを保持していたため、何もせず戻った。"""
+    """別のプロセスが lock を持っていた（何もしていない）。"""
 
 
 class EnsureOutcome(Enum):
-    """ensure_hub_reachable の結果。"""
+    """ensure_hub の結果。"""
 
-    ALREADY_LISTENING = "already_listening"
-    """最初の probe で既に Hub が応答した。"""
+    ALREADY_RUNNING = "already_running"
+    """最初の確かめで、もう生きた Hub がいた。"""
 
     SPAWNED_BY_US = "spawned_by_us"
-    """このプロセスが Hub を起動して listen させた。"""
+    """このプロセスが Hub を起こした（lock の後で生きた Hub が見つかった場合も含む）。"""
 
     SPAWNED_BY_OTHER = "spawned_by_other"
-    """別プロセスが起動中だったので待機した結果、到達できるようになった。"""
+    """別のプロセスが起こしている間待って、生きた Hub が現れた。"""
+
+
+@dataclass(frozen=True)
+class HubReady:
+    """ensure_hub の結果：どうやって見つけたかと、その Hub の Hub ファイルの中身。"""
+
+    outcome: EnsureOutcome
+    info: HubFileInfo
+
+
+# Hub を確かめる関数（``find_live_hub`` と同じ形）
+FindHub = Callable[..., "HubFileInfo | None"]
+# Popen factory の型（subprocess.Popen 互換）
+PopenFactory = Callable[..., "subprocess.Popen[bytes]"]
 
 
 # ============================================================
-# TCP probe
+# Hub ファイルの隣のパス
 # ============================================================
 
 
-def tcp_probe(host: str, port: int, *, timeout: float = DEFAULT_PROBE_TIMEOUT) -> bool:
-    """指定アドレスに TCP connect が通れば True。
+def hub_lock_path(hub_file: str | os.PathLike[str]) -> Path:
+    """Hub を起こすときの lock（``hub.json`` なら ``hub.json.lock``）。
 
-    WebSocket ハンドシェイクは確認しない（ADR-0001 §4 の補足参照：
-    `QWebSocketServer.listen()` 成功後の accept は可能なので、
-    一瞬のハンドシェイク未準備窓は Worker の接続バックオフで吸収する前提）。
+    Hub ファイルごとに 1 つなので、ユーザーごと・pytest の session ごとに分かれる。
     """
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except (TimeoutError, ConnectionRefusedError, OSError):
-        return False
+    path = Path(hub_file)
+    return path.with_name(path.name + ".lock")
+
+
+def hub_log_path(hub_file: str | os.PathLike[str]) -> Path:
+    """Hub のログ（``hub.json`` なら ``hub.log``）。Hub ごとに分かれる。"""
+    return Path(hub_file).with_suffix(".log")
+
+
+def hub_spawn_log_path(hub_file: str | os.PathLike[str]) -> Path:
+    """起こした Hub の標準出力・標準エラーの受け皿（``hub.spawn.log``）。
+
+    Hub のログ（``hub_log_path``）が回り始める前の失敗（import の失敗など）を拾う。
+    """
+    return Path(hub_file).with_suffix(".spawn.log")
 
 
 # ============================================================
@@ -128,8 +165,8 @@ def _exclusive_nonblocking_lock(path: Path) -> Iterator[bool]:
     取得できれば True、他プロセスが保持中なら False を yield する。
     スコープ退出時に、取得していた場合のみロックを解放する。
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_CREAT | os.O_RDWR)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
     locked = _try_acquire(fd)
     try:
         yield locked
@@ -179,19 +216,17 @@ def _release(fd: int) -> None:
 # ============================================================
 
 
-def default_hub_command(*, port: int = DEFAULT_HUB_PORT, python: str | None = None) -> list[str]:
-    """`python -m qgis_puppeteer.hub --port <port>` を起動するコマンド。"""
+def default_hub_command(
+    *, hub_file: str | os.PathLike[str], python: str | None = None
+) -> list[str]:
+    """``python -m qgis_puppeteer.hub --hub-file <hub_file>`` を起こすコマンド。"""
     return [
         python or sys.executable,
         "-m",
         "qgis_puppeteer.hub",
-        "--port",
-        str(port),
+        "--hub-file",
+        os.fspath(hub_file),
     ]
-
-
-# Popen factory の型（subprocess.Popen 互換）
-PopenFactory = Callable[..., "subprocess.Popen[bytes]"]
 
 
 # 親プロセス終了まで Popen への参照を保持するストア。
@@ -262,8 +297,36 @@ def _build_popen_kwargs(
         # CREATE_NEW_PROCESS_GROUP: Ctrl+C が親経由で飛ばないように分離。
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
+        # 自分のプロセスグループで起こす（時間切れのとき、グループごと止める）
         kwargs["start_new_session"] = True
     return kwargs
+
+
+def kill_process_tree(proc: subprocess.Popen[bytes]) -> None:
+    """起こした Hub をプロセスの木ごと止める。
+
+    Windows の既定の起こし方は ``python-qgis-ltr.bat`` なので、``proc`` は
+    ``cmd.exe`` で、Hub の python はその子（孫）になる。``proc.kill()`` では
+    ``cmd.exe`` しか止まらない。
+
+    - Windows：``taskkill /T /F`` で木ごと
+    - POSIX：Hub は自分のプロセスグループで起こしてあるので、グループごと
+    """
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                check=False,
+                capture_output=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            logger.debug("taskkill failed (pid=%s)", proc.pid, exc_info=True)
+    else:
+        with suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+    with suppress(OSError):
+        proc.kill()
 
 
 # ============================================================
@@ -273,9 +336,7 @@ def _build_popen_kwargs(
 
 def try_spawn_hub(
     *,
-    lock_path: Path,
-    host: str = DEFAULT_HUB_HOST,
-    port: int = DEFAULT_HUB_PORT,
+    hub_file: str | os.PathLike[str],
     command: Sequence[str] | None = None,
     log_file: Path | None = None,
     env: dict[str, str] | None = None,
@@ -283,70 +344,78 @@ def try_spawn_hub(
     probe_timeout: float = DEFAULT_PROBE_TIMEOUT,
     poll_interval: float = DEFAULT_POLL_INTERVAL,
     popen: PopenFactory | None = None,
-) -> SpawnOutcome:
-    """ロック獲得 → Hub spawn → listen 確認 → ロック解放の 1 サイクル。
+    find_hub: FindHub = find_live_hub,
+    kill_tree: Callable[[subprocess.Popen[bytes]], None] = kill_process_tree,
+) -> tuple[SpawnOutcome, HubFileInfo | None]:
+    """lock → 確かめ → Hub を起こす → 生きた Hub になるまで待つ の 1 回。
 
-    - ロックが他プロセスに取られていれば `ANOTHER_PROCESS_OWNS_LOCK` を返して即 return。
-    - ロック獲得後に再 probe して既に listen していれば `ALREADY_LISTENING`。
-    - spawn 後 `startup_deadline` 秒以内に listen が始まれば `SPAWNED`。
-    - 子プロセスが即死したら `HubStartupError`。
-    - 期限までに listen しなければ子を kill して `HubStartupError`。
+    - lock を別のプロセスが持っていれば ``(ANOTHER_PROCESS_OWNS_LOCK, None)``。
+    - lock を取ってから確かめて生きた Hub がいれば ``(ALREADY_RUNNING, info)``。
+    - 起こして ``startup_deadline`` 秒以内に生きた Hub になれば ``(SPAWNED, info)``。
+    - 子が生きた Hub にならずに終わったら ``HubStartupError``。
+    - 期限までに生きた Hub にならなければ、子を木ごと止めて ``HubStartupError``。
 
-    `env` を指定すると subprocess に渡す（QGIS プラグインから PYTHONPATH 等を
+    `env` を指定すると subprocess に渡す（QGIS プラグインから sys.path 等を
     注入するために使う）。`None` なら親プロセスの環境を継承。
     """
-    cmd = list(command) if command is not None else default_hub_command(port=port)
+    path = Path(hub_file)
+    cmd = list(command) if command is not None else default_hub_command(hub_file=path)
     popen_fn = popen if popen is not None else subprocess.Popen
+    lock_path = hub_lock_path(path)
 
     with _exclusive_nonblocking_lock(lock_path) as locked:
         if not locked:
             logger.debug("Hub spawn: lock %s held by another process; skipping", lock_path)
-            return SpawnOutcome.ANOTHER_PROCESS_OWNS_LOCK
+            return SpawnOutcome.ANOTHER_PROCESS_OWNS_LOCK, None
 
-        if tcp_probe(host, port, timeout=probe_timeout):
-            logger.info(
-                "Hub spawn: %s:%d is already listening after lock acquisition",
-                host,
-                port,
-            )
-            return SpawnOutcome.ALREADY_LISTENING
+        info = find_hub(path, timeout=probe_timeout)
+        if info is not None:
+            logger.info("Hub spawn: a live Hub appeared at %s after taking the lock", path)
+            return SpawnOutcome.ALREADY_RUNNING, info
 
         popen_kwargs = _build_popen_kwargs(log_file, env)
         logger.info("Hub spawn: launching %s", " ".join(cmd))
         proc = popen_fn(cmd, **popen_kwargs)
         # 親側で OS fd を閉じる（子は独自に継承済み）。ResourceWarning 回避。
         _close_inherited_log_handle(popen_kwargs)
+        # GC で Popen.__del__ が running 警告を出さないよう参照を保持。
+        _retain_child(proc)
 
         deadline = time.monotonic() + startup_deadline
-        while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                raise HubStartupError(f"Hub exited immediately with code {proc.returncode}")
-            if tcp_probe(host, port, timeout=probe_timeout):
-                logger.info("Hub is listening on %s:%d", host, port)
-                # GC で Popen.__del__ が running 警告を出さないよう参照を保持。
-                _retain_child(proc)
-                return SpawnOutcome.SPAWNED
+        while True:
+            info = find_hub(path, timeout=probe_timeout)
+            if info is not None:
+                logger.info("Hub is running: %s", ", ".join(info.addresses))
+                return SpawnOutcome.SPAWNED, info
+            code = proc.poll()
+            if code is not None:
+                # 終わる直前に Hub ファイルを書き終えたかもしれない。もう一度だけ確かめる
+                info = find_hub(path, timeout=probe_timeout)
+                if info is not None:
+                    return SpawnOutcome.SPAWNED, info
+                raise HubStartupError(
+                    f"Hub exited with code {code} before it was running "
+                    f"(see {log_file or hub_log_path(path)})"
+                )
+            if time.monotonic() >= deadline:
+                break
             time.sleep(poll_interval)
 
-        try:
-            proc.kill()
-        except OSError:
-            logger.debug("Failed to kill hub child after startup timeout", exc_info=True)
-        # kill 後も wait されるまでは __del__ 警告が出る可能性があるので保持。
-        _retain_child(proc)
-        raise HubStartupError(f"Hub did not start listening within {startup_deadline}s")
+        kill_tree(proc)
+        raise HubStartupError(
+            f"Hub did not start within {startup_deadline}s (no live Hub at {path}; "
+            f"see {log_file or hub_log_path(path)})"
+        )
 
 
 # ============================================================
-# ensure_hub_reachable
+# ensure_hub
 # ============================================================
 
 
-def ensure_hub_reachable(
+def ensure_hub(
     *,
-    lock_path: Path,
-    host: str = DEFAULT_HUB_HOST,
-    port: int = DEFAULT_HUB_PORT,
+    hub_file: str | os.PathLike[str],
     command: Sequence[str] | None = None,
     log_file: Path | None = None,
     env: dict[str, str] | None = None,
@@ -355,27 +424,26 @@ def ensure_hub_reachable(
     startup_deadline: float = DEFAULT_SPAWN_DEADLINE,
     poll_interval: float = DEFAULT_POLL_INTERVAL,
     popen: PopenFactory | None = None,
+    find_hub: FindHub = find_live_hub,
     sleep: Callable[[float], None] = time.sleep,
-) -> EnsureOutcome:
-    """Hub に TCP connect できる状態を保証する。
+    kill_tree: Callable[[subprocess.Popen[bytes]], None] = kill_process_tree,
+) -> HubReady:
+    """``hub_file`` の生きた Hub を返す。いなければ起こす。
 
-    1. 先に probe。通れば `ALREADY_LISTENING`。
-    2. probe 失敗なら `try_spawn_hub`。
-       - SPAWNED / ALREADY_LISTENING → `SPAWNED_BY_US`
-       - ANOTHER_PROCESS_OWNS_LOCK → バックオフで再 probe
-    3. バックオフ中に listen 開始を検知すれば `SPAWNED_BY_OTHER`。
-    4. 全バックオフ消化で繋がらなければ `HubStartupError`。
-
-    `env` を指定すると `try_spawn_hub` 経由で subprocess に渡す。QGIS
-    プラグインから PYTHONPATH を伝えるのに使う。
+    1. 確かめて生きた Hub がいれば ``ALREADY_RUNNING``。
+    2. いなければ ``try_spawn_hub``。
+       - SPAWNED / ALREADY_RUNNING → ``SPAWNED_BY_US``
+       - ANOTHER_PROCESS_OWNS_LOCK → 間を空けて確かめ直す
+    3. 待つ間に生きた Hub が現れれば ``SPAWNED_BY_OTHER``。
+    4. 待ちきっても現れなければ ``HubStartupError``。
     """
-    if tcp_probe(host, port, timeout=probe_timeout):
-        return EnsureOutcome.ALREADY_LISTENING
+    path = Path(hub_file)
+    info = find_hub(path, timeout=probe_timeout)
+    if info is not None:
+        return HubReady(EnsureOutcome.ALREADY_RUNNING, info)
 
-    outcome = try_spawn_hub(
-        lock_path=lock_path,
-        host=host,
-        port=port,
+    outcome, info = try_spawn_hub(
+        hub_file=path,
         command=command,
         log_file=log_file,
         env=env,
@@ -383,15 +451,20 @@ def ensure_hub_reachable(
         probe_timeout=probe_timeout,
         poll_interval=poll_interval,
         popen=popen,
+        find_hub=find_hub,
+        kill_tree=kill_tree,
     )
-    if outcome in (SpawnOutcome.SPAWNED, SpawnOutcome.ALREADY_LISTENING):
-        return EnsureOutcome.SPAWNED_BY_US
+    if info is not None:
+        return HubReady(EnsureOutcome.SPAWNED_BY_US, info)
 
-    # ANOTHER_PROCESS_OWNS_LOCK: 他プロセスが spawn 中なのでバックオフで待つ
+    # ANOTHER_PROCESS_OWNS_LOCK: 他プロセスが起こしているので待つ
+    del outcome
     for delay in connect_backoff:
         sleep(delay)
-        if tcp_probe(host, port, timeout=probe_timeout):
-            return EnsureOutcome.SPAWNED_BY_OTHER
+        info = find_hub(path, timeout=probe_timeout)
+        if info is not None:
+            return HubReady(EnsureOutcome.SPAWNED_BY_OTHER, info)
     raise HubStartupError(
-        f"Hub did not become reachable at {host}:{port} after {len(connect_backoff)} attempts"
+        f"No live Hub appeared at {path} after {len(connect_backoff)} attempts "
+        "(another process was starting it)"
     )

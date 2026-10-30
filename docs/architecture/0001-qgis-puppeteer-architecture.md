@@ -81,6 +81,7 @@ Claude Desktop から QGIS を操作するため、以下の構成で MCP 連携
 
 3. **単一ポートで全員喋る**
    - McpGateway ⇄ Hub ⇄ Worker / AutomationClient ⇄ Hub すべて 9876
+   - **2026-10-30 改訂**：ポートは固定しない。Hub は port 0（OS が選ぶ）で待ち受け、実際のアドレスを Hub ファイル（§9.3）に書く。つなぐ側は全員そこを読む。全員が 1 つのポートで喋ることは変わらない
    - remote 対応時は Hub の外向きポートだけ開ければ済む
 
 4. **プロトコルは WebSocket**
@@ -352,6 +353,16 @@ label が空の場合は `{project_basename}-{pid 下4桁}` を自動採番。
 
 #### Hub の起動競合回避（親主導の spawn 確認モデル）
 
+> **2026-10-30 改訂（Hub ファイルで決める）**: 「親がロックを持ったまま、Hub が使えるようになったのを確かめてから放す」モデルはそのままに、次のように変えた。この節の以下のコード（port 別のロック / pid ファイル、TCP probe、`bind` 失敗で降りる敗者）は当初案として残す。実装は `qgis_puppeteer.hub_spawn`・`qgis_puppeteer.hub_probe`。
+>
+> - **「生きた Hub」は Hub ファイルで決める**（`find_live_hub`）：Hub ファイルがある・その `pid` が生きている・ファイルのアドレスで挨拶（§3）が通る。TCP probe はポートを開いた別のプロセスと Hub を見分けられないので使わない。Hub は listen してから Hub ファイルを書くので、ファイルが現れるまでの窓も挨拶で塞がる。
+> - Hub は port 0 で待ち受けるので、ポートはぶつからない。ロックは Hub ファイルの隣（`hub.json` なら `hub.json.lock`）で、Hub ファイルごとに分かれる。pid ファイルは廃止（pid は Hub ファイルに書く）。
+> - 手順（`ensure_hub`）：生きた Hub がいれば使う。いなければロックを取り、もう一度確かめてから Hub を起こし、生きた Hub が現れるまで待つ。ロックを別のプロセスが持っていれば、生きた Hub が現れるまで待つ。起こした Hub が先に終われば、その終了コードを `HubStartupError` に書く。
+> - Hub も起動時に確かめる：同じ Hub ファイルに生きた Hub がもういれば、ファイルを上書きせずに降りる。
+> - Hub の終了コード：`0` ふつうに止まった（idle 自動終了・シグナル）、`1` listen できなかった、`2` Hub ファイルを書けなかった、`3` 同じ Hub ファイルで生きた Hub がもういる。
+> - ログは Hub ファイルの隣：Hub 自身のログ `hub.log`（ローテート）、起こした Hub の標準出力・標準エラー `hub.spawn.log`（`QPUPPETEER_HUB_LOG_FILE` で変えられる）。
+> - Windows で `.bat` の launcher（`python-qgis-ltr.bat` など）を通して起こした Hub は、待ちが切れたときにプロセスの木ごと止める（`taskkill /T`）。`cmd.exe` だけを止めると Hub が残る。
+
 Windows の `subprocess.Popen` は `pass_fds=` を受け付けない（POSIX 専用）ため、ロック fd を子プロセスに継承する設計は不可。**親プロセスがロックを保持したまま Hub の listen 成功を確認し、確認後にロックを解放する**モデルを採る。
 
 **ロック / pid ファイルのパスは port 番号サフィックスで分離**する。xdist 並列実行や複数 port での Hub 同時起動（ADR-0002 の E2E 構成）で固定パスが共有されロック競合する事態を避ける:
@@ -456,7 +467,7 @@ def main():
 - **`active_worker_connections` の定義**：`WorkerEntry.disconnected_at is None` のものだけ。grace 中の Worker は「居ない」として扱う
 - **`len(active_worker_connections) == 0` かつ `len(client_connections) == 0`** になった時点で 30 秒タイマー開始
 - **grace 60 秒 vs idle 自動終了 30 秒の関係**：全 Worker が同時切断すると、Hub は grace 終了（60 秒）を待たずに idle 自動終了（30 秒）する。これは意図通りで、再接続したい Worker は新規 Hub を spawn して再接続する（新 `instance_id` が発行され、sticky は再設定が必要）。grace は単一 Worker の一時切断 + 他 Worker 健在時の引き継ぎ用途に限定される
-- タイマー満了時に両方 0 のままなら、`QCoreApplication.quit()` → `pid_file` を削除して終了
+- タイマー満了時に両方 0 のままなら、`QCoreApplication.quit()` → Hub ファイルを削除して終了（2026-10-30 改訂：pid ファイルは廃止。Hub ファイルは中の token が自分のものなときだけ消す。§9.3）
 - **タイマーキャンセル条件：TCP accept 発生時点で即キャンセル**（`QWebSocketServer.newConnection` シグナル接続時、register 受信を待たない）。register 到達前に満了して Hub が quit する窓を塞ぐ
 - ADR-0002 の E2E 構成では pytest session fixture が `automation_client` として persistent 接続を保持する（`client_connections >= 1`）ため、Worker 未接続期間でも idle shutdown は発火しない
 
@@ -677,6 +688,18 @@ Worker 側の label 自動採番（`{project_basename}-{pid 下4桁}`）は文�
 
 #### 接続先と Hub CLI 引数
 
+> **2026-10-30 改訂（Hub ファイル）**: 接続先は環境変数ではなく Hub ファイル（§9.3）で決める。`QPUPPETEER_HUB_URL` / `QPUPPETEER_HUB_HOST` / `QPUPPETEER_HUB_PORT` / `QPUPPETEER_HUB_ORIGIN`（と pytest の `QPUPPETEER_E2E_HUB_URL`、ロックの `QPUPPETEER_HUB_LOCK_PATH`）は廃止した。この項の以下の表とコマンドは当初案として残す。いまは次のとおり：
+>
+> | 環境変数 | 既定値 | 用途 |
+> |---|---|---|
+> | `QPUPPETEER_HUB_FILE` | §9.3 の既定の場所 | Hub ファイルの場所。Hub はここに書き、Worker・McpGateway・AutomationClient・pytest はつなぐたびにここからアドレスと token を読む |
+> | `QPUPPETEER_HUB_LOG_FILE` | Hub ファイルの隣の `hub.spawn.log` | Worker が起こした Hub の標準出力・標準エラー |
+> | `QPUPPETEER_WORKER_LABEL` | — | Worker の自己申告 label（未指定時は Hub が自動採番） |
+>
+> Hub の CLI 引数は `--hub-file`（無ければ `QPUPPETEER_HUB_FILE`、それも無ければ既定）と `--port`（既定 0。テスト用）。待ち受けは 127.0.0.1 だけ（§9.1）。Origin ヘッダは固定（`http://localhost`）。
+>
+> `AutomationClient` は `address="host:port"`・`token=`・`hub_file=` を取る（`url=` は廃止）。`address` と `token` の両方があれば Hub ファイルを読まない。`address` だけなら token を Hub ファイルから読む。どちらも無ければ Hub ファイルの `addresses` を順に試す。
+
 Hub / Worker / Client の接続先は以下の環境変数で差し替え可能：
 
 | 環境変数 | 既定値 | 用途 |
@@ -715,6 +738,8 @@ subprocess.Popen(
 - ログは `%APPDATA%\qgis_puppeteer\hub.log` にローテート
 
 #### 外部所有者モード（Hub spawn 抑制）
+
+> **2026-10-30 改訂**: 判定は `QPUPPETEER_HUB_FILE` が立っているかだけになった。立っていれば Worker は Hub を起こさず、そのファイルを書く Hub につなぐだけ（現れるまで再接続し続ける）。立っていなければ既定の Hub ファイルを使い、生きた Hub が無ければ起こす（§4）。pytest は自分の Hub に session の一時フォルダの Hub ファイルを渡し、起こす QGIS の env から `QPUPPETEER_HUB_*` を全部消してから `QPUPPETEER_HUB_FILE` を入れる。`QPUPPETEER_HUB_FILE` をユーザーの環境に常に立てておくと、ふつうに起こした QGIS も Hub を起こさなくなる。以下の判定ロジックは当初案。
 
 `QPUPPETEER_HUB_URL` / `QPUPPETEER_HUB_HOST` / `QPUPPETEER_HUB_PORT` の **いずれかが設定されている場合**、Worker は **Hub の spawn を行わず、接続のみ試行**する。接続失敗時もバックオフ再試行のみで、spawn は一切しない。
 
@@ -774,7 +799,7 @@ WebSocket は HTTP ハンドシェイクなので、localhost 運用であって
 Hub は **`127.0.0.1` 固定で listen**（`QHostAddress.LocalHost`）。`0.0.0.0` やマシンの LAN IP へのバインドは remote 対応 + 認証実装が入るまで禁止（`## Roadmap` 参照）。
 
 ```python
-server.listen(QHostAddress.LocalHost, 9876)
+server.listen(QHostAddress.LocalHost, 0)  # 2026-10-30 改訂：ポートは OS が選び、Hub ファイルに書く（当初は 9876 固定）
 ```
 
 #### 9.2 Origin ヘッダ検証（DNS rebinding 防止）

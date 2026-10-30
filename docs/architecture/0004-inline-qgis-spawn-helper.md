@@ -74,6 +74,8 @@ def test_clean_canvas_clears_layers(hub_port, automation_client):
 
 ## Detailed Design
 
+> **2026-10-30 改訂（Hub ファイル。ADR-0001 §9.3、ADR-0002 §3）**: `spawn_qgis()` の `hub_port` 引数と pytest の `hub_port` fixture は廃止した。QGIS は `automation_client.hub_file` の Hub に、`QPUPPETEER_HUB_FILE` で向けられる。helper が足す env は `QPUPPETEER_HUB_FILE`（常に helper が勝つ）・`QPUPPETEER_TRUSTED_MODE=1`・`QPUPPETEER_ALLOW_TEST_HANDLERS=1` で、受け継いだ env の `QPUPPETEER_HUB_*` は先に全部消す（ユーザーが `env=` で渡したものは残す）。xdist の worker ごとの隔離は Hub ファイルが worker ごとに分かれることで保たれる。以下の `hub_port` / `QPUPPETEER_HUB_PORT` の記述は当初案として残す。
+
 ### API
 
 ```python

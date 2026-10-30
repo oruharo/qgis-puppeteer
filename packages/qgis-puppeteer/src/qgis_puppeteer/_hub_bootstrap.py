@@ -26,7 +26,7 @@ spawn 側 (`plugin_helpers._build_hub_spawn_env`) は親プロセスの
 
 配置：`packages/qgis-puppeteer/src/qgis_puppeteer/_hub_bootstrap.py`
 呼び出し例：
-    python-qgis-ltr.bat <path>/qgis_puppeteer/_hub_bootstrap.py --port 9876
+    python-qgis-ltr.bat <path>/qgis_puppeteer/_hub_bootstrap.py --hub-file <path>/hub.json
 """
 
 from __future__ import annotations
@@ -59,6 +59,6 @@ sys.path.insert(0, _PARENT)
 from qgis_puppeteer.hub import main  # noqa: E402
 
 if __name__ == "__main__":
-    # argv には bootstrap ファイル名が sys.argv[0]、残りが --port 等。
+    # argv には bootstrap ファイル名が sys.argv[0]、残りが --hub-file 等。
     # main() は None を渡すと sys.argv[1:] を使う想定。
     raise SystemExit(main())

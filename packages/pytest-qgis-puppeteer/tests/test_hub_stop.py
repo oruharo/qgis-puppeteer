@@ -103,6 +103,20 @@ class TestStopHub:
         assert sent == [(4242, signal.SIGTERM)]
 
 
+def test_a_hub_stopped_before_it_was_up_skips_the_port_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``hub_port=None``（Hub ファイルを書く前に止める）ならポートは確かめない。"""
+
+    def _no_port_check(port: int, timeout_s: float) -> bool:
+        raise AssertionError("the port must not be checked")
+
+    monkeypatch.setattr(plugin.subprocess, "run", lambda cmd, **kwargs: None)
+    monkeypatch.setattr(plugin.os, "killpg", lambda pid, sig: None, raising=False)
+    monkeypatch.setattr(plugin, "_wait_port_closed", _no_port_check)
+    plugin._stop_hub(_Proc(), hub_port=None)  # type: ignore[arg-type]
+
+
 def test_wait_port_closed_on_a_free_port() -> None:
     import socket
 

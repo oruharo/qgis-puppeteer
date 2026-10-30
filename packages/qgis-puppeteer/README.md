@@ -88,12 +88,14 @@ For a description of each tool, see the [MCP tool list](https://github.com/oruha
 ```
 [your client]
      ↓ WebSocket
-[Hub] ← single port (default 9876, 127.0.0.1)
+[Hub] ← one port on 127.0.0.1, picked by the OS and written to the Hub file
      ↓ WebSocket (reverse-connect)
 [QGIS + QGIS Puppeteer plugin]
 ```
 
 - The Hub spawns automatically when QGIS starts; clients connect to it
+- The Hub writes its address, token and pid to the **Hub file**; QGIS and
+  clients read that file each time they connect
 - Multiple QGIS instances share the same Hub
 - Hub idle-shutdowns 30s after last client disconnects
 
@@ -103,10 +105,8 @@ See [docs/architecture/0001-qgis-puppeteer-architecture.md](https://github.com/o
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `QPUPPETEER_HUB_HOST` | `127.0.0.1` | Hub bind / connect host |
-| `QPUPPETEER_HUB_PORT` | `9876` | Hub listen / connect port |
-| `QPUPPETEER_HUB_URL` | — | Override host:port via `ws://...` |
-| `QPUPPETEER_HUB_ORIGIN` | `http://localhost` | Origin header for register |
+| `QPUPPETEER_HUB_FILE` | `%LOCALAPPDATA%\qgis_puppeteer\hub.json` (Windows), `$XDG_RUNTIME_DIR/qgis_puppeteer/hub.json` or `~/.local/state/qgis_puppeteer/hub.json` (POSIX) | The Hub file: where the Hub writes its address and token, and where QGIS and clients read them. When set, the QGIS plugin does not start a Hub itself — it waits for the Hub that writes this file |
+| `QPUPPETEER_HUB_LOG_FILE` | `hub.spawn.log` next to the Hub file | Where the output of a Hub the QGIS plugin starts goes |
 | `QPUPPETEER_WORKER_LABEL` | — | Self-reported label (auto-assigned if empty) |
 | `QPUPPETEER_TRUSTED_MODE` | unset | If `1`, bypass `execute_python` confirm step (CI / E2E) |
 | `QPUPPETEER_LOG_LEVEL` | `INFO` | Log level of the MCP gateway (`DEBUG` / `INFO` / `WARNING` / ...), for both its stderr and `gateway.log`. It does not change the Hub's or QGIS's logs |

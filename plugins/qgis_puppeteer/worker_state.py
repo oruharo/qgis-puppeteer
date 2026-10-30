@@ -87,8 +87,8 @@ def _allow_test_handlers() -> bool:
 def next_reconnect_delay_ms(failures: int, base_ms: int, *, cap_ms: int = 30_000) -> int:
     """再接続の待ち時間。連続失敗ごとに倍にし、cap で頭打ち。
 
-    Hub が居ない間は再接続のたびに `ensure_hub_reachable`（TCP probe →
-    spawn 試行、最長 5 秒）が GUI スレッドで走る。1 秒間隔で回すと QGIS が
+    Hub が居ない間は再接続のたびに `ensure_hub`（Hub の確かめ →
+    起こす、最長 15 秒）が GUI スレッドで走る。1 秒間隔で回すと QGIS が
     ずっと引っかかるので、失敗が続くほど間を空ける。成功したら 0 に戻す。
     """
     if failures <= 0:

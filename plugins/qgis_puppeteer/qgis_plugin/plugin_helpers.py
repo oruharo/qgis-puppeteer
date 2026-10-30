@@ -1,7 +1,7 @@
 """plugin.py の PyQt5 非依存ヘルパ群。
 
 QGIS / PyQt5 を import せずに単体テストできるよう、`plugin.py` から分離した。
-Python interpreter の解決、Hub subprocess 用 command/env の構築、URL parse などを
+Python interpreter の解決、Hub subprocess 用 command/env の構築などを
 ここに集約する。
 
 ## 分離の理由
@@ -18,12 +18,12 @@ import importlib
 import logging
 import os
 import sys
-import tempfile
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
+from qgis_puppeteer.hub_file import ENV_HUB_FILE
+from qgis_puppeteer.hub_spawn import hub_spawn_log_path
 from qgis_puppeteer.qgis_env import find_qgis_python_launcher
 
 logger = logging.getLogger(__name__)
@@ -52,23 +52,8 @@ ENV_HUB_LOG_FILE = "QPUPPETEER_HUB_LOG_FILE"
 # が `SET PYTHONPATH=` で消去するため、それを回避するための独自 env。
 # `_hub_bootstrap.py` がこの env を読んで自身の sys.path に prepend する。
 ENV_HUB_EXTRA_SYSPATH = "QPUPPETEER_HUB_EXTRA_SYSPATH"
-DEFAULT_HUB_PORT = 9876
-
-# Hub の接続先を決めるユーザ指定用 ENV。plugin.py の _is_external_owner_mode や
-# _resolve_hub_url で参照される。ADR-0001 §6「外部所有者モード」の判定キーと
-# 兼務しているため、ここに単一定義源として集約する（plugin.py は re-export）。
-ENV_HUB_URL = "QPUPPETEER_HUB_URL"
-ENV_HUB_HOST = "QPUPPETEER_HUB_HOST"
-ENV_HUB_PORT = "QPUPPETEER_HUB_PORT"
 # 1 なら、テストの QGIS で OS のダイアログの代わりに Qt のダイアログを使う（#22）
 ENV_QT_DIALOGS = "QPUPPETEER_QT_DIALOGS"
-DEFAULT_HUB_HOST = "127.0.0.1"
-
-# subprocess の stdout/stderr を受ける既定ファイル名。
-# `hub.py` 側の運用ログ（`%APPDATA%\qgis_puppeteer\hub.log`）とは別レイヤ：
-# こちらは Python logger 以前の出力（import エラー、Qt の fatal、
-# 未捕捉例外の traceback）を拾うためのもの。
-DEFAULT_SPAWN_LOG_FILENAME = "qgis_puppeteer.spawn.log"
 
 # QGIS 同梱の Python launcher (`python-qgis-ltr.bat` / `python-qgis.bat`) 探索ロジックは
 # `qgis_puppeteer.find_qgis_python_launcher()` に集約済み（OSS 公開 API）。
@@ -175,8 +160,8 @@ def _resolve_hub_python() -> Path | None:
 _HUB_BOOTSTRAP = _QGIS_PUPPETEER_ROOT / "_hub_bootstrap.py"
 
 
-def _build_hub_spawn_command(python: Path, port: int) -> list[str]:
-    """Hub subprocess 起動コマンドを構築する。
+def _build_hub_spawn_command(python: Path, hub_file: Path) -> list[str]:
+    """Hub subprocess 起動コマンドを構築する（``--hub-file`` に書かせる。ポートは OS が選ぶ）。
 
     `python -m qgis_puppeteer.hub` ではなく bootstrap スクリプトをフルパスで
     渡す：`python-qgis-ltr.bat` 配下の `etc/ini/python3.bat` が
@@ -185,7 +170,7 @@ def _build_hub_spawn_command(python: Path, port: int) -> list[str]:
     即死する。bootstrap が自分自身の位置から sys.path を組み立て直し、
     さらに `QPUPPETEER_HUB_EXTRA_SYSPATH` env から追加パスを引き継ぐ。
     """
-    return [str(python), str(_HUB_BOOTSTRAP), "--port", str(port)]
+    return [str(python), str(_HUB_BOOTSTRAP), "--hub-file", str(hub_file)]
 
 
 def _build_hub_spawn_env() -> dict[str, str]:
@@ -216,34 +201,14 @@ def _build_hub_spawn_env() -> dict[str, str]:
     return env
 
 
-def _extract_port(hub_url: str, default: int = DEFAULT_HUB_PORT) -> int:
-    """`ws://host:port/...` から port を取り出す。未指定ならデフォルト。"""
-    try:
-        parsed = urlparse(hub_url)
-        if parsed.port is not None:
-            return parsed.port
-    except ValueError:
-        pass
-    return default
+def _is_external_hub(env: Mapping[str, str]) -> bool:
+    """Hub を起こさずに、誰かが起こした Hub につなぐか（ADR-0001 §6 外部所有者モード）。
 
-
-def _resolve_hub_url() -> str:
-    """Hub の WS URL を決定する。
-
-    優先順:
-        1. `QPUPPETEER_HUB_URL` が明示指定されていればそれを使用
-        2. `QPUPPETEER_HUB_HOST` / `QPUPPETEER_HUB_PORT` があれば URL を合成
-        3. デフォルト `ws://127.0.0.1:9876`
-
-    PyQt5 非依存なので plugin_helpers に置く（plugin.py の PyQt5 初期化より
-    先に呼べる、pytest からも直接テストできる）。
+    ``QPUPPETEER_HUB_FILE`` があれば、その Hub ファイルの Hub は持ち主
+    （pytest、人が常駐させた Hub など）が起こす。プラグインは起こさない。
+    無ければ既定の Hub ファイルを使い、生きた Hub がいなければ起こす。
     """
-    override = os.environ.get(ENV_HUB_URL)
-    if override:
-        return override
-    host = os.environ.get(ENV_HUB_HOST, DEFAULT_HUB_HOST)
-    port = os.environ.get(ENV_HUB_PORT, str(DEFAULT_HUB_PORT))
-    return f"ws://{host}:{port}"
+    return bool(env.get(ENV_HUB_FILE))
 
 
 # ==============================================================
@@ -251,10 +216,10 @@ def _resolve_hub_url() -> str:
 # ==============================================================
 
 
-def _resolve_hub_log_file() -> Path:
+def _resolve_hub_log_file(hub_file: Path) -> Path:
     """Hub subprocess の stdout/stderr を受けるファイルパスを決定する。
 
-    Hub 側には Python logger で `%APPDATA%\\qgis_puppeteer\\hub.log` に書く経路
+    Hub 側には Python logger で Hub ファイルの隣の ``hub.log`` に書く経路
     （`hub._setup_logging()`）があるが、これは Python が正常に起動して
     `logging.getLogger(...)` が動いた後にしか使えない。
 
@@ -268,12 +233,12 @@ def _resolve_hub_log_file() -> Path:
 
     優先順：
         1. `QPUPPETEER_HUB_LOG_FILE` 環境変数（ユーザ明示指定）
-        2. `<TEMP>/qgis_puppeteer.spawn.log` （既定）
+        2. Hub ファイルの隣の ``hub.spawn.log``（既定。``hub_spawn_log_path``）
     """
     override = os.environ.get(ENV_HUB_LOG_FILE)
     if override:
         return Path(override)
-    return Path(tempfile.gettempdir()) / DEFAULT_SPAWN_LOG_FILENAME
+    return hub_spawn_log_path(hub_file)
 
 
 # ==============================================================

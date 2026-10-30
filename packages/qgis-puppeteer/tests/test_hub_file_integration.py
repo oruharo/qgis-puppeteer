@@ -50,7 +50,7 @@ class TestHubFileLifecycle:
     def test_start_writes_the_hub_file_and_stop_removes_it(self, tmp_path: Path) -> None:
         hub_file = tmp_path / "hub.json"
         port = _get_free_port()
-        hub = Hub(port=port, pid_file=None, hub_file=hub_file)
+        hub = Hub(port=port, hub_file=hub_file)
         hub.start()
         try:
             info = read_hub_file(hub_file)
@@ -64,10 +64,24 @@ class TestHubFileLifecycle:
             hub.stop()
         assert not hub_file.exists()
 
+    def test_port_zero_writes_the_port_the_os_chose(self, tmp_path: Path) -> None:
+        """既定の port 0 では OS が選んだポートを Hub ファイルに書き、そこで待つ。"""
+        hub_file = tmp_path / "hub.json"
+        hub = Hub(hub_file=hub_file)
+        hub.start()
+        try:
+            (address,) = read_hub_file(hub_file).addresses
+            host, _, port = address.rpartition(":")
+            assert host == "127.0.0.1"
+            assert int(port) != 0
+            assert _accepts(int(port))
+        finally:
+            hub.stop()
+
     def test_each_hub_gets_a_new_token(self, tmp_path: Path) -> None:
         tokens = []
         for _ in range(2):
-            hub = Hub(port=_get_free_port(), pid_file=None, hub_file=tmp_path / "hub.json")
+            hub = Hub(port=_get_free_port(), hub_file=tmp_path / "hub.json")
             hub.start()
             tokens.append(read_hub_file(tmp_path / "hub.json").token)
             hub.stop()
@@ -76,7 +90,7 @@ class TestHubFileLifecycle:
     def test_stop_leaves_another_hubs_file(self, tmp_path: Path) -> None:
         """あとから別の Hub が書いたファイルは、先の Hub が止まっても消さない。"""
         hub_file = tmp_path / "hub.json"
-        hub = Hub(port=_get_free_port(), pid_file=None, hub_file=hub_file)
+        hub = Hub(port=_get_free_port(), hub_file=hub_file)
         hub.start()
         other = HubFileInfo(addresses=("127.0.0.1:1",), token="someone-else")
         write_hub_file(hub_file, other)
@@ -88,7 +102,7 @@ class TestHubFileLifecycle:
         blocker = tmp_path / "a-file"
         blocker.write_text("not a folder")
         port = _get_free_port()
-        hub = Hub(port=port, pid_file=None, hub_file=blocker / "hub.json")
+        hub = Hub(port=port, hub_file=blocker / "hub.json")
         with pytest.raises(HubFileWriteError):
             hub.start()
         try:

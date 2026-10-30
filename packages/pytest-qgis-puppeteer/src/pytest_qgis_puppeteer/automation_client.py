@@ -220,15 +220,13 @@ class E2EAutomationClient:
 
     def __init__(
         self,
-        url: str,
         *,
-        origin: str = "http://localhost",
         hub_file: str | os.PathLike[str] | None = None,
+        origin: str = "http://localhost",
     ) -> None:
-        self._url = url
         self._origin = origin
-        # 挨拶の token を読む Hub ファイル。省略時は QPUPPETEER_HUB_FILE、
-        # それも無ければ既定の場所（qgis_puppeteer.hub_file）
+        # Hub のアドレスと挨拶の token を読む Hub ファイル。省略時は
+        # QPUPPETEER_HUB_FILE、それも無ければ既定の場所（qgis_puppeteer.hub_file）
         self._hub_file = hub_file
         self._loop: asyncio.AbstractEventLoop | None = None
         self._client: AutomationClient | None = None
@@ -259,13 +257,22 @@ class E2EAutomationClient:
             return
         self._loop = asyncio.new_event_loop()
         self._client = AutomationClient(
-            url=self._url,
             origin=self._origin,
             role=Role.AUTOMATION_CLIENT,
             hub_file=self._hub_file,
         )
         self._loop.run_until_complete(self._client.connect())
-        logger.info("E2EAutomationClient connected to %s", self._url)
+        logger.info(
+            "E2EAutomationClient connected to %s (Hub qgis-puppeteer %s)",
+            self._client.address,
+            self._client.hub_package_version or "?",
+        )
+
+    def _hub_location(self) -> str:
+        """エラーに出す Hub の場所：つないだアドレス、まだなら Hub ファイル。"""
+        if self._client is not None and self._client.address is not None:
+            return f"{self._client.address} ({self.hub_file})"
+        return str(self.hub_file)
 
     @property
     def hub_file(self) -> Path:
@@ -274,6 +281,11 @@ class E2EAutomationClient:
         起こす QGIS にも同じファイルを渡す（``spawn_qgis``）。
         """
         return resolve_hub_file_path(self._hub_file)
+
+    @property
+    def hub_package_version(self) -> str | None:
+        """つないでいる Hub のライブラリの版（connect 前・旧 Hub は None）。"""
+        return self._client.hub_package_version if self._client is not None else None
 
     def close(self) -> None:
         """Hub への接続と event loop を閉じる。二重 close は安全。"""
@@ -543,7 +555,7 @@ class E2EAutomationClient:
                 last_count = 0
             time.sleep(poll_interval_s)
         raise TimeoutError(
-            f"No QGIS Worker registered to Hub within {timeout_s}s (url={self._url})"
+            f"No QGIS Worker registered to Hub within {timeout_s}s (hub={self._hub_location()})"
         )
 
     # ------------------------------------------------------------
@@ -649,7 +661,7 @@ class E2EAutomationClient:
             time.sleep(poll_interval_s)
 
         raise TimeoutError(
-            f"No QGIS Worker became usable within {timeout_s}s (url={self._url}"
+            f"No QGIS Worker became usable within {timeout_s}s (hub={self._hub_location()}"
             + (f", selector={selector!r}" if selector is not None else "")
             + (", require_project=True" if require_project else "")
             + "); last seen: "

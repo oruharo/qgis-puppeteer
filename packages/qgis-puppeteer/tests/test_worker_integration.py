@@ -46,6 +46,7 @@ from qgis_puppeteer.handshake import (  # noqa: E402
     hub_proof,
 )
 from qgis_puppeteer.hub_file import HubFileInfo, write_hub_file  # noqa: E402
+from qgis_puppeteer.hub_probe import find_live_hub  # noqa: E402
 from qgis_puppeteer.protocol import (  # noqa: E402
     SUPPORTED_PROTOCOL,
     Error,
@@ -72,17 +73,14 @@ def _get_free_port() -> int:
         return s.getsockname()[1]
 
 
-def _wait_port_open(port: int, timeout: float = 10.0) -> None:
+def _wait_hub_live(hub_file: Path, timeout: float = 10.0) -> None:
+    """Hub が Hub ファイルを書き、挨拶が通るまで待つ（つなぐ側はファイルを読む）。"""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(0.2)
-            try:
-                s.connect(("127.0.0.1", port))
-                return
-            except OSError:
-                time.sleep(0.1)
-    raise TimeoutError(f"Hub did not start within {timeout}s on port {port}")
+        if find_live_hub(hub_file) is not None:
+            return
+        time.sleep(0.1)
+    raise TimeoutError(f"Hub did not become live within {timeout}s at {hub_file}")
 
 
 @contextmanager
@@ -91,7 +89,7 @@ def _hub_subprocess(port: int) -> Iterator[subprocess.Popen[bytes]]:
 
     Hub ファイルは一時フォルダに書かせ、その間 ``QPUPPETEER_HUB_FILE`` で
     同じ場所を指す（このプロセスの Worker と ``AutomationClient`` がそこから
-    token を読む）。
+    アドレスと token を読む）。
     """
     with hub_file_env() as hub_file, _hub_process(port, hub_file) as proc:
         yield proc
@@ -105,7 +103,6 @@ def hub_command(port: int, hub_file: Path) -> list[str]:
         "qgis_puppeteer.hub",
         "--port",
         str(port),
-        "--no-pid-file",
         "--hub-file",
         str(hub_file),
     ]
@@ -119,7 +116,7 @@ def _hub_process(port: int, hub_file: Path) -> Iterator[subprocess.Popen[bytes]]
         stderr=subprocess.PIPE,
     )
     try:
-        _wait_port_open(port)
+        _wait_hub_live(hub_file)
         yield proc
     finally:
         if proc.poll() is None:
@@ -268,7 +265,6 @@ class TestWorkerIntegration:
         with _hub_subprocess(port):
             app = _qapp()
             worker = Worker(
-                hub_url=f"ws://127.0.0.1:{port}",
                 pid=9001,
                 label="e2e-reg",
             )
@@ -289,7 +285,6 @@ class TestWorkerIntegration:
         with _hub_subprocess(port):
             app = _qapp()
             worker = Worker(
-                hub_url=f"ws://127.0.0.1:{port}",
                 pid=9002,
                 label="e2e-req",
             )
@@ -302,7 +297,7 @@ class TestWorkerIntegration:
                 result_holder: list[Any] = []
 
                 async def client_call() -> Any:
-                    async with AutomationClient(url=f"ws://127.0.0.1:{port}") as client:
+                    async with AutomationClient() as client:
                         return await client.call("echo", {"v": 123}, timeout_ms=5_000)
 
                 t = _asyncio_in_thread(client_call, result_holder)
@@ -321,7 +316,6 @@ class TestWorkerIntegration:
         with _hub_subprocess(port):
             app = _qapp()
             worker = Worker(
-                hub_url=f"ws://127.0.0.1:{port}",
                 pid=9003,
                 label="e2e-unknown",
             )
@@ -336,7 +330,7 @@ class TestWorkerIntegration:
                 result_holder: list[Any] = []
 
                 async def client_call() -> Any:
-                    async with AutomationClient(url=f"ws://127.0.0.1:{port}") as client:
+                    async with AutomationClient() as client:
                         try:
                             await client.call("no-such-command")
                         except RequestError as e:
@@ -354,52 +348,37 @@ class TestWorkerIntegration:
                 worker.disconnect_from_hub()
                 _spin_until(app, lambda: not worker.is_registered, timeout=3.0)
 
-    def test_worker_uses_existing_hub_when_lock_path_given(self) -> None:
-        """hub_lock_path 指定時でも、既に Hub が listen していれば
-        spawn は呼ばれず接続する。"""
-        import tempfile
-        from pathlib import Path
-
+    def test_worker_uses_existing_hub_when_spawn_command_given(self) -> None:
+        """auto-spawn でも、Hub ファイルの Hub が生きていれば spawn せずに接続する。"""
         port = _get_free_port()
         with _hub_subprocess(port):
             app = _qapp()
-            with tempfile.TemporaryDirectory() as td:
-                lock_path = Path(td) / "hub.lock"
-                worker = Worker(
-                    hub_url=f"ws://127.0.0.1:{port}",
-                    pid=9005,
-                    label="e2e-existing",
-                    hub_lock_path=lock_path,
-                    # spawn されたら分かるように、即死する spawn command を渡す
-                    hub_spawn_command=[
-                        sys.executable,
-                        "-c",
-                        "import sys; sys.exit(1)",
-                    ],
-                )
-                try:
-                    worker.connect_to_hub()
-                    ok = _spin_until(app, lambda: worker.is_registered, timeout=5.0)
-                    assert ok, "Worker should register against existing Hub"
-                finally:
-                    worker.disconnect_from_hub()
-                    _spin_until(app, lambda: not worker.is_registered, timeout=3.0)
+            worker = Worker(
+                pid=9005,
+                label="e2e-existing",
+                # spawn されたら分かるように、即死する spawn command を渡す
+                hub_spawn_command=[
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.exit(1)",
+                ],
+            )
+            try:
+                worker.connect_to_hub()
+                ok = _spin_until(app, lambda: worker.is_registered, timeout=5.0)
+                assert ok, "Worker should register against existing Hub"
+            finally:
+                worker.disconnect_from_hub()
+                _spin_until(app, lambda: not worker.is_registered, timeout=3.0)
 
     def test_worker_auto_spawn_failure_emits_signal(self) -> None:
         """起動に失敗する spawn_command で hub_startup_failed が発火する。"""
-        import tempfile
-        from pathlib import Path
-
-        # Hub は明示的に起動しない。probe は失敗、spawn で即死 → HubStartupError
-        port = _get_free_port()
+        # Hub は明示的に起動しない。Hub ファイルが無く、spawn で即死 → HubStartupError
         app = _qapp()
-        with tempfile.TemporaryDirectory() as td:
-            lock_path = Path(td) / "hub.lock"
+        with hub_file_env():
             worker = Worker(
-                hub_url=f"ws://127.0.0.1:{port}",
                 pid=9006,
                 label="e2e-fail",
-                hub_lock_path=lock_path,
                 hub_spawn_command=[
                     sys.executable,
                     "-c",
@@ -420,7 +399,6 @@ class TestWorkerIntegration:
         with _hub_subprocess(port):
             app = _qapp()
             worker = Worker(
-                hub_url=f"ws://127.0.0.1:{port}",
                 pid=9004,
                 label="e2e-boom",
             )
@@ -440,7 +418,7 @@ class TestWorkerIntegration:
                 result_holder: list[Any] = []
 
                 async def client_call() -> Any:
-                    async with AutomationClient(url=f"ws://127.0.0.1:{port}") as client:
+                    async with AutomationClient() as client:
                         try:
                             await client.call("boom")
                         except RequestError as e:
@@ -486,7 +464,7 @@ class TestWorkerIntegration:
 
             t = _run_fake_hub(port, handler, holder)
             app = _qapp()
-            worker = Worker(hub_url=f"ws://127.0.0.1:{port}", pid=9005, label="e2e-new-hub")
+            worker = Worker(pid=9005, label="e2e-new-hub")
             try:
                 worker.connect_to_hub()
                 _spin_while_thread(app, t)
@@ -508,7 +486,6 @@ class TestWorkerHandshake:
         self,
         handler: Callable[[Any, str], Awaitable[None]],
         *,
-        write_file: bool = True,
         label: str = "e2e-handshake",
     ) -> tuple[Worker, list[str], list[str]]:
         """偽の Hub に Worker をつなぎ、(worker, registered, register_failed) を返す。"""
@@ -517,7 +494,7 @@ class TestWorkerHandshake:
         registered: list[str] = []
         failed: list[str] = []
         with hub_file_env():
-            token = _write_fake_hub_file(port) if write_file else ""
+            token = _write_fake_hub_file(port)
 
             async def bound(ws: Any) -> None:
                 await handler(ws, token)
@@ -525,7 +502,6 @@ class TestWorkerHandshake:
             t = _run_fake_hub(port, bound, holder)
             app = _qapp()
             worker = Worker(
-                hub_url=f"ws://127.0.0.1:{port}",
                 pid=9007,
                 label=label,
                 auto_reconnect=False,
@@ -608,19 +584,25 @@ class TestWorkerHandshake:
         assert __version__ in reason
         assert "install the same version" in reason
 
-    def test_no_hub_file_means_no_register(self) -> None:
-        """Hub ファイルが読めなければ register を送らずに切る（再接続に任せる）。"""
-        got: list[Any] = []
-
-        async def handler(ws: Any, _token: str) -> None:
-            hello = Hello(hub_version=__version__, protocol=SUPPORTED_PROTOCOL, nonce="n")
-            await ws.send(encode_message(hello))
+    def test_no_hub_file_means_no_connection(self) -> None:
+        """Hub ファイルが読めなければ、どこにもつながない（再接続で読み直す）。"""
+        app = _qapp()
+        registered: list[str] = []
+        failed: list[str] = []
+        with hub_file_env() as hub_file:
+            worker = Worker(pid=9008, label="e2e-no-file", reconnect_delay_ms=100)
+            worker.registered.connect(registered.append)
+            worker.register_failed.connect(failed.append)
             try:
-                got.append(await asyncio.wait_for(ws.recv(), 5.0))
-            except Exception as e:  # noqa: BLE001 - 切られたことだけ確かめる
-                got.append(type(e).__name__)
+                worker.connect_to_hub()
+                _spin_until(app, lambda: False, timeout=0.5)
+                assert not worker.is_registered
+                assert registered == []
+                assert failed == []
 
-        _worker, registered, failed = self._run(handler, write_file=False)
-        assert got == ["ConnectionClosedOK"], got
-        assert registered == []
-        assert failed == []
+                # Hub が現れれば、再接続で Hub ファイルを読み直してつながる
+                with _hub_process(_get_free_port(), hub_file):
+                    assert _spin_until(app, lambda: worker.is_registered, timeout=10.0)
+            finally:
+                worker.disconnect_from_hub()
+                _spin_until(app, lambda: not worker.is_registered, timeout=3.0)

@@ -5,8 +5,10 @@ ADR-0001 §4 "Worker 側" に基づき、`QWebSocket` で Hub に逆向き接続
 
 ## 責務
 
-- Hub に dial out（`QWebSocket.open`）し、Hub の hello を受けたら Hub ファイルの
-  token で proof を作って register を送る（`qgis_puppeteer.handshake`）
+- つなぐたびに Hub ファイルを読み（auto-spawn なら ``ensure_hub`` で生きた Hub を
+  確かめ、いなければ起こす）、そのアドレスに dial out（`QWebSocket.open`）する
+- Hub の hello を受けたら、同じ Hub ファイルの token で proof を作って register を
+  送る（`qgis_puppeteer.handshake`）
 - register_ack の hub_proof を確かめ、instance_id を受理（`registered` シグナル発火）
 - request を handler に dispatch して response を返送
 - 切断時に auto-reconnect（`QTimer` で遅延再試行）
@@ -45,11 +47,13 @@ from qgis_puppeteer.handshake import (
     client_proof,
     generate_nonce,
 )
-from qgis_puppeteer.hub_file import HubFileError, read_hub_file, resolve_hub_file_path
-from qgis_puppeteer.hub_spawn import (
-    HubStartupError,
-    ensure_hub_reachable,
+from qgis_puppeteer.hub_file import (
+    HubFileError,
+    HubFileInfo,
+    read_hub_file,
+    resolve_hub_file_path,
 )
+from qgis_puppeteer.hub_spawn import HubStartupError, ensure_hub
 from qgis_puppeteer.protocol import (
     Error,
     ErrorCode,
@@ -73,7 +77,6 @@ from qgis_puppeteer.worker_state import (
 
 logger = logging.getLogger("qgis_puppeteer.worker")
 
-DEFAULT_HUB_URL: str = "ws://127.0.0.1:9876"
 DEFAULT_ORIGIN: str = "http://localhost"
 DEFAULT_RECONNECT_DELAY_MS: int = 1_000
 
@@ -90,7 +93,7 @@ class Worker(QObject):
         registered(str): register_ack 成功時に instance_id を載せて発火
         unregistered(): 切断時（grace 期間への移行）
         register_failed(str): register_ack が ok=False の場合（非復帰）
-        hub_startup_failed(str): auto_spawn 有効時に Hub 起動が失敗した場合
+        hub_startup_failed(str): auto-spawn 有効時に、初回の接続で Hub を起こせなかった場合
     """
 
     registered = pyqtSignal(str)
@@ -101,7 +104,7 @@ class Worker(QObject):
     def __init__(
         self,
         *,
-        hub_url: str = DEFAULT_HUB_URL,
+        hub_file: str | os.PathLike[str] | None = None,
         origin: str = DEFAULT_ORIGIN,
         pid: int | None = None,
         label: str | None = None,
@@ -110,27 +113,30 @@ class Worker(QObject):
         conflict_policy: str | None = None,
         auto_reconnect: bool = True,
         reconnect_delay_ms: int = DEFAULT_RECONNECT_DELAY_MS,
-        hub_lock_path: Path | None = None,
         hub_spawn_command: Sequence[str] | None = None,
         hub_spawn_env: dict[str, str] | None = None,
         hub_log_file: Path | None = None,
-        hub_file: str | os.PathLike[str] | None = None,
         parent: QObject | None = None,
     ) -> None:
         """
         Args:
-            hub_file: token を読む Hub ファイル。None なら ``QPUPPETEER_HUB_FILE``、
-                それも無ければ既定の場所（``qgis_puppeteer.hub_file``）
+            hub_file: アドレスと token を読む Hub ファイル。None なら
+                ``QPUPPETEER_HUB_FILE``、それも無ければ既定の場所（``qgis_puppeteer.hub_file``）
+            hub_spawn_command: Hub を起こすコマンド。指定すると auto-spawn：つなぐたびに
+                生きた Hub を確かめ、いなければ起こす（``qgis_puppeteer.hub_spawn.ensure_hub``）。
+                None なら Hub ファイルを読むだけ（Hub は誰かが起こしている）
+            hub_spawn_env: 起こす Hub に渡す環境変数。None なら親の環境を継承
+            hub_log_file: 起こす Hub の標準出力・標準エラーの受け皿
         """
         super().__init__(parent)
-        self._hub_url = QUrl(hub_url)
-        self._hub_file = hub_file
+        self._hub_file = resolve_hub_file_path(hub_file)
+        # 今つないでいる（つなごうとしている）Hub の token。つなぐたびに Hub ファイルから
+        self._token: str | None = None
         # 挨拶の途中：(token, hub の nonce, 自分の nonce)。register_ack で使う
         self._handshake: tuple[str, str, str] | None = None
         self._origin = origin
         self._auto_reconnect = auto_reconnect
         self._reconnect_delay_ms = reconnect_delay_ms
-        self._hub_lock_path = hub_lock_path
         self._hub_spawn_command = (
             tuple(hub_spawn_command) if hub_spawn_command is not None else None
         )
@@ -230,56 +236,70 @@ class Worker(QObject):
         except Exception:  # pragma: no cover - 送信失敗は次の register で追いつく
             logger.debug("Failed to send update_info", exc_info=True)
 
+    @property
+    def hub_file(self) -> Path:
+        """アドレスと token を読む Hub ファイル。"""
+        return self._hub_file
+
     def connect_to_hub(self) -> None:
         """Hub への接続を開始する（非同期、`registered` シグナルで完了通知）。
 
-        `hub_lock_path` が指定されている場合、WebSocket 接続前に
-        `ensure_hub_reachable` を同期実行して Hub の listen を確認する
-        （必要なら Hub プロセスを spawn）。Hub 起動に失敗した場合は
-        `hub_startup_failed` シグナルを発火して WebSocket 接続はしない。
+        auto-spawn（``hub_spawn_command`` を指定）なら、WebSocket 接続前に
+        ``ensure_hub`` を同期実行して生きた Hub を確かめる（いなければ起こす）。
+        起こせなければ `hub_startup_failed` を発火して接続しない。
+        auto-spawn でなければ Hub ファイルを読み、読めなければ再接続を予約する。
         """
         self._closing = False
         self._reconnect_failures = 0
-        if self._hub_lock_path is not None and not self._try_ensure_hub_ready():
+        self._connect(give_up=True)
+
+    def _connect(self, *, give_up: bool) -> None:
+        """Hub ファイルからアドレスと token を取ってつなぐ。取れなければ再接続を予約する。"""
+        info = self._find_hub(give_up=give_up)
+        if info is None:
+            if not self._closing:
+                self._reconnect_failures += 1
+                self._schedule_reconnect()
             return
-        self._open_socket()
+        self._open_socket(info)
 
-    def _try_ensure_hub_ready(self, *, give_up: bool = True) -> bool:
-        """ensure_hub_reachable を呼び出し、失敗なら False を返す。
+    def _find_hub(self, *, give_up: bool) -> HubFileInfo | None:
+        """今の Hub の Hub ファイルの中身。取れなければ None。
 
-        ``give_up=True``（初回接続）: 失敗したら `hub_startup_failed` を発火して
+        auto-spawn なら ``ensure_hub``（生きた Hub を確かめ、いなければ起こす）。
+        ``give_up=True``（初回接続）で起こせなければ `hub_startup_failed` を発火して
         auto-reconnect も止める（プラグインがメッセージバーで知らせる）。
-        ``give_up=False``（再接続）: ログだけ出して呼び出し側の再試行に任せる。
+        ``give_up=False``（再接続）ならログだけ出して再試行に任せる。
         Hub が一時的に消えただけで Worker が永久に諦めるのは困る。
+
+        auto-spawn でなければ Hub ファイルを読むだけ（Hub は誰かが起こしている）。
         """
-        assert self._hub_lock_path is not None
-        host = self._hub_url.host() or "127.0.0.1"
-        port = self._hub_url.port() if self._hub_url.port() != -1 else 9876
+        if self._hub_spawn_command is None:
+            try:
+                return read_hub_file(self._hub_file)
+            except HubFileError as e:
+                logger.warning("Cannot read the Hub file; will retry: %s", e)
+                return None
         try:
-            ensure_hub_reachable(
-                lock_path=self._hub_lock_path,
-                host=host,
-                port=port,
-                command=(
-                    list(self._hub_spawn_command) if self._hub_spawn_command is not None else None
-                ),
+            return ensure_hub(
+                hub_file=self._hub_file,
+                command=list(self._hub_spawn_command),
                 log_file=self._hub_log_file,
                 env=(dict(self._hub_spawn_env) if self._hub_spawn_env is not None else None),
-            )
-            return True
+            ).info
         except HubStartupError as e:
             if not give_up:
                 logger.warning(
-                    "Hub not reachable and could not be (re)spawned (attempt %d): %s",
+                    "No live Hub and could not (re)start one (attempt %d): %s",
                     self._reconnect_failures + 1,
                     e,
                 )
-                return False
+                return None
             logger.warning("Hub startup failed: %s", e)
             self._closing = True
             self._reconnect_timer.stop()
             self.hub_startup_failed.emit(str(e))
-            return False
+            return None
 
     def disconnect_from_hub(self, *, send_bye: bool = True) -> None:
         """Hub から明示的に切断する。
@@ -305,8 +325,11 @@ class Worker(QObject):
     # 内部：接続制御
     # ------------------------------------------------------------
 
-    def _open_socket(self) -> None:
-        """WebSocket ハンドシェイクを開始する。"""
+    def _open_socket(self, info: HubFileInfo) -> None:
+        """Hub ファイルの最初のアドレスへ WebSocket ハンドシェイクを開始する。
+
+        Hub は同じ機械にいるので、最初のアドレス（127.0.0.1）でつなぐ。
+        """
         state = self._ws.state()
         if state not in (
             QAbstractSocket.UnconnectedState,
@@ -314,8 +337,15 @@ class Worker(QObject):
         ):
             logger.debug("Skipping open(): socket already in state %s", state)
             return
-        logger.info("Worker connecting to %s", self._hub_url.toString())
-        self._ws.open(self._hub_url)
+        if not info.addresses:
+            logger.warning("The Hub file %s has no address; will retry", self._hub_file)
+            self._reconnect_failures += 1
+            self._schedule_reconnect()
+            return
+        self._token = info.token
+        url = QUrl(f"ws://{info.addresses[0]}")
+        logger.info("Worker connecting to %s", url.toString())
+        self._ws.open(url)
 
     def _schedule_reconnect(self) -> None:
         if not self._auto_reconnect or self._closing:
@@ -327,20 +357,14 @@ class Worker(QObject):
         self._reconnect_timer.start(delay)
 
     def _reconnect(self) -> None:
-        """再接続タイマーの着火先。Hub が消えていれば立て直してから繋ぐ。
+        """再接続タイマーの着火先。Hub ファイルを読み直してから繋ぐ。
 
-        以前は `_open_socket` に直結していたので、Hub プロセスが死ぬと
-        「connect → 拒否 → タイマー → connect …」を永久に回るだけで、Hub を
-        作り直す経路（`ensure_hub_reachable`）は初回の `connect_to_hub` にしか
-        無かった。Hub が生きていれば TCP probe 1 回で済むので、毎回通して問題ない。
+        Hub が起き直すとポートも token も変わるので、毎回 Hub ファイルを読む。
+        auto-spawn なら Hub が消えていれば起こし直す（生きていれば挨拶 1 回で済む）。
         """
         if self._closing:
             return
-        if self._hub_lock_path is not None and not self._try_ensure_hub_ready(give_up=False):
-            self._reconnect_failures += 1
-            self._schedule_reconnect()
-            return
-        self._open_socket()
+        self._connect(give_up=False)
 
     # ------------------------------------------------------------
     # 内部：Qt シグナルハンドラ
@@ -390,15 +414,10 @@ class Worker(QObject):
     def _handle_hello(self, hello: Hello) -> None:
         """Hub の挨拶に、Hub ファイルの token で作った proof 付きの register で答える。
 
-        Hub ファイルはここで（毎回）読む。Hub はファイルを書いてから接続を受け付ける
-        ので、ここで読めば今の Hub の token が取れる（Hub が起き直すと token は変わる）。
-        読めなければ切って、再接続に任せる。
+        token は、つなぐときにアドレスと一緒に Hub ファイルから読んだもの。
         """
-        path = resolve_hub_file_path(self._hub_file)
-        try:
-            token = read_hub_file(path).token
-        except HubFileError as e:
-            logger.warning("Cannot read the Hub file; will reconnect: %s", e)
+        token = self._token
+        if token is None:  # pragma: no cover - _open_socket が必ず入れる
             self._ws.close()
             return
         nonce = generate_nonce()

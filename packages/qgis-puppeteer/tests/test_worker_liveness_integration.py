@@ -59,9 +59,9 @@ def _client_result(app: Any, coro_factory: Any) -> Any:
     return value
 
 
-def _list(port: int, *, include_disconnected: bool = False) -> Any:
+def _list(*, include_disconnected: bool = False) -> Any:
     async def inner() -> list[InstanceInfo]:
-        async with AutomationClient(url=f"ws://127.0.0.1:{port}") as client:
+        async with AutomationClient() as client:
             return await client.list_instances(include_disconnected=include_disconnected)
 
     return inner
@@ -71,7 +71,7 @@ def _spin_for(app: Any, seconds: float) -> None:
     _spin_until(app, lambda: False, timeout=seconds)
 
 
-def _wait_project(app: Any, port: int, expected: str | None, timeout: float = 5.0) -> None:
+def _wait_project(app: Any, expected: str | None, timeout: float = 5.0) -> None:
     """Hub 上の project が expected になるまで list_instances を繰り返す。
 
     update_info は Worker 側で QWebSocket に積まれ、Qt ループが回ったときに
@@ -80,7 +80,7 @@ def _wait_project(app: Any, port: int, expected: str | None, timeout: float = 5.
     deadline = time.monotonic() + timeout
     seen: Any = object()
     while time.monotonic() < deadline:
-        [info] = _client_result(app, _list(port))
+        [info] = _client_result(app, _list())
         seen = info.project
         if seen == expected:
             return
@@ -103,10 +103,8 @@ class TestHubRespawn:
         with hub_file_env() as hub_file, _hub_process(port, hub_file) as hub1:
             spawn_cmd = hub_command(port, hub_file)
             worker = Worker(
-                hub_url=f"ws://127.0.0.1:{port}",
                 pid=9101,
                 label="e2e-respawn",
-                hub_lock_path=tmp_path / "hub.lock",
                 hub_spawn_command=spawn_cmd,
                 reconnect_delay_ms=200,
             )
@@ -127,7 +125,7 @@ class TestHubRespawn:
                 # grace は死んだ Hub のメモリにあったので、instance_id は引き継がれない
                 assert worker.instance_id != first_id
 
-                infos = _client_result(app, _list(port))
+                infos = _client_result(app, _list())
                 assert [(i.label, i.state) for i in infos] == [("e2e-respawn", "active")]
                 assert len(hub_spawn._SPAWNED_CHILDREN) == spawned_before + 1
             finally:
@@ -148,15 +146,14 @@ class TestGuiStall:
         その間、別スレッドの client が list_instances を観測し続ける。
         """
         port = _get_free_port()
-        url = f"ws://127.0.0.1:{port}"
         with _hub_subprocess(port):
             app = _qapp()
-            worker = Worker(hub_url=url, pid=9102, label="e2e-stall")
+            worker = Worker(pid=9102, label="e2e-stall")
             observed: list[tuple[float, list[tuple[str, str]]]] = []
             stop = threading.Event()
 
             async def observe() -> None:
-                async with AutomationClient(url=url) as client:
+                async with AutomationClient() as client:
                     t0 = time.monotonic()
                     while not stop.is_set():
                         infos = await client.list_instances()
@@ -186,7 +183,7 @@ class TestGuiStall:
                 # 塞がっている間も一覧から消えない
                 assert all(len(infos) == 1 for _, infos in observed), observed
                 # 回復後は active
-                final = _client_result(app, _list(port))
+                final = _client_result(app, _list())
                 assert [(i.label, i.state) for i in final] == [("e2e-stall", "active")]
             finally:
                 stop.set()
@@ -198,27 +195,26 @@ class TestProjectAndDisconnect:
     def test_update_project_reaches_hub_and_project_selector_routes(self) -> None:
         """検証 1 #3: update_info で project が Hub に届き、basename で引ける。"""
         port = _get_free_port()
-        url = f"ws://127.0.0.1:{port}"
         with _hub_subprocess(port):
             app = _qapp()
-            worker = Worker(hub_url=url, pid=9103, label="e2e-proj", project=None)
+            worker = Worker(pid=9103, label="e2e-proj", project=None)
             worker.register_handler("echo", lambda params: {"who": "e2e-proj"})
             try:
                 worker.connect_to_hub()
                 assert _spin_until(app, lambda: worker.is_registered, timeout=5.0)
-                assert _client_result(app, _list(port))[0].project is None
+                assert _client_result(app, _list())[0].project is None
 
                 worker.update_project("D:/work/city.qgz")
-                _wait_project(app, port, "D:/work/city.qgz")
+                _wait_project(app, "D:/work/city.qgz")
 
                 async def route() -> Any:
-                    async with AutomationClient(url=url) as client:
+                    async with AutomationClient() as client:
                         return await client.call("echo", {}, instance="city.qgz", timeout_ms=5_000)
 
                 assert _client_result(app, route)["who"] == "e2e-proj"
 
                 worker.update_project(None)
-                _wait_project(app, port, None)
+                _wait_project(app, None)
             finally:
                 worker.disconnect_from_hub()
                 _spin_until(app, lambda: not worker.is_registered, timeout=3.0)
@@ -226,10 +222,9 @@ class TestProjectAndDisconnect:
     def test_dropped_worker_is_reported_disconnected_with_grace(self) -> None:
         """検証 1 #3: bye 無しで切れた Worker は not_found ではなく disconnected。"""
         port = _get_free_port()
-        url = f"ws://127.0.0.1:{port}"
         with _hub_subprocess(port):
             app = _qapp()
-            worker = Worker(hub_url=url, pid=9104, label="e2e-drop")
+            worker = Worker(pid=9104, label="e2e-drop")
             try:
                 worker.connect_to_hub()
                 assert _spin_until(app, lambda: worker.is_registered, timeout=5.0)
@@ -238,7 +233,7 @@ class TestProjectAndDisconnect:
                 assert _spin_until(app, lambda: not worker.is_registered, timeout=3.0)
 
                 async def probe() -> RequestError:
-                    async with AutomationClient(url=url) as client:
+                    async with AutomationClient() as client:
                         try:
                             await client.call("echo", {}, instance="e2e-drop", timeout_ms=3_000)
                         except RequestError as e:
@@ -251,8 +246,8 @@ class TestProjectAndDisconnect:
                 assert info["label"] == "e2e-drop"
                 assert 0 < info["grace_expires_in"] <= 60
 
-                full = _client_result(app, _list(port, include_disconnected=True))
+                full = _client_result(app, _list(include_disconnected=True))
                 assert [(i.label, i.state) for i in full] == [("e2e-drop", "disconnected")]
-                assert _client_result(app, _list(port)) == []
+                assert _client_result(app, _list()) == []
             finally:
                 worker.disconnect_from_hub()

@@ -33,6 +33,7 @@ from typing import Any
 import pytest
 from qgis_puppeteer.client import AutomationClient, RegistrationRejectedError, RequestError
 from qgis_puppeteer.hub_file import read_hub_file
+from qgis_puppeteer.hub_probe import find_live_hub
 from qgis_puppeteer.protocol import ErrorCode
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
@@ -63,18 +64,14 @@ def _get_free_port() -> int:
         return s.getsockname()[1]
 
 
-def _wait_port_open(port: int, timeout: float = 10.0) -> None:
-    """指定ポートに TCP 接続できるようになるまで待つ。"""
+def _wait_hub_live(hub_file: Path, timeout: float = 10.0) -> None:
+    """Hub が Hub ファイルを書き、挨拶が通るまで待つ（listen してから書くまで間がある）。"""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(0.2)
-            try:
-                s.connect(("127.0.0.1", port))
-                return
-            except OSError:
-                time.sleep(0.1)
-    raise TimeoutError(f"Hub did not start listening on port {port} within {timeout}s")
+        if find_live_hub(hub_file) is not None:
+            return
+        time.sleep(0.1)
+    raise TimeoutError(f"Hub did not become live within {timeout}s at {hub_file}")
 
 
 @contextmanager
@@ -97,7 +94,6 @@ def _hub_process(port: int, hub_file: Path, *extra_args: str) -> Iterator[subpro
             "qgis_puppeteer.hub",
             "--port",
             str(port),
-            "--no-pid-file",
             "--hub-file",
             str(hub_file),
             *extra_args,
@@ -106,7 +102,7 @@ def _hub_process(port: int, hub_file: Path, *extra_args: str) -> Iterator[subpro
         stderr=subprocess.PIPE,
     )
     try:
-        _wait_port_open(port)
+        _wait_hub_live(hub_file)
         yield proc
     finally:
         if proc.poll() is None:
@@ -208,8 +204,7 @@ class TestHubClientIntegration:
         with _hub_subprocess(port):
 
             async def inner() -> None:
-                url = f"ws://127.0.0.1:{port}"
-                async with AutomationClient(url=url) as client:
+                async with AutomationClient() as client:
                     instances = await client.list_instances()
                     assert instances == []
 
@@ -224,7 +219,7 @@ class TestHubClientIntegration:
                 worker = _AsyncFakeWorker(url, label="solo", pid=1111)
                 await worker.start()
                 try:
-                    async with AutomationClient(url=url) as client:
+                    async with AutomationClient() as client:
                         # 少し待って Hub 側の worker 登録を確定させる
                         await asyncio.sleep(0.05)
                         instances = await client.list_instances()
@@ -260,7 +255,7 @@ class TestHubClientIntegration:
                 await w1.start()
                 await w2.start()
                 try:
-                    async with AutomationClient(url=url) as client:
+                    async with AutomationClient() as client:
                         await asyncio.sleep(0.05)
                         r_a = await client.call("x", instance="alpha")
                         r_b = await client.call("x", instance="beta")
@@ -291,7 +286,7 @@ class TestHubClientIntegration:
                     assert ack["ok"] is False
                 finally:
                     await ws.close()
-                async with AutomationClient(url=url) as client:
+                async with AutomationClient() as client:
                     [rec] = await client.list_rejected()
                     assert (rec.launch_token, rec.pid) == ("lt-rejected", 4321)
                     assert "too_long" in rec.message
@@ -310,7 +305,7 @@ class TestHubClientIntegration:
 
             async def inner() -> None:
                 url = f"ws://127.0.0.1:{port}"
-                async with AutomationClient(url=url) as client:
+                async with AutomationClient() as client:
                     await client.abandon_launch("lt-gave-up")
                     await asyncio.sleep(0.2)  # 応答は無いので、Hub が処理するのを待つ
                     ws, ack = await register_raw(
@@ -408,7 +403,7 @@ class TestHubClientIntegration:
                 worker = _AsyncFakeWorker(url, label="busy", pid=2222, silent=True)
                 await worker.start()
                 try:
-                    async with AutomationClient(url=url) as client:
+                    async with AutomationClient() as client:
                         await asyncio.sleep(0.05)
                         started = time.monotonic()
                         with pytest.raises(RequestError) as excinfo:
@@ -430,8 +425,7 @@ class TestHubClientIntegration:
         with _hub_subprocess(port):
 
             async def inner() -> None:
-                url = f"ws://127.0.0.1:{port}"
-                async with AutomationClient(url=url) as client:
+                async with AutomationClient() as client:
                     with pytest.raises(RequestError) as exc_info:
                         await client.call("x", instance="nonexistent")
                     assert exc_info.value.code == ErrorCode.INSTANCE_NOT_FOUND
@@ -444,10 +438,8 @@ class TestHubClientIntegration:
         with _hub_subprocess(port):
 
             async def inner() -> None:
-                url = f"ws://127.0.0.1:{port}"
                 # localhost.evil.com は hostname 完全一致検査で reject される
                 client = AutomationClient(
-                    url=url,
                     origin="http://localhost.evil.com",
                     register_timeout=2.0,
                 )
@@ -508,7 +500,7 @@ class TestHandshakeIntegration:
                 finally:
                     await ws.close()
                 # 断った相手は Worker として数えない
-                async with AutomationClient(url=f"ws://127.0.0.1:{port}") as client:
+                async with AutomationClient() as client:
                     assert await client.list_instances() == []
 
             _run(inner())
@@ -583,8 +575,7 @@ class TestHandshakeIntegration:
         with _hub_subprocess(port):
 
             async def inner() -> None:
-                url = f"ws://127.0.0.1:{port}"
-                async with AutomationClient(url=url) as client:
+                async with AutomationClient() as client:
                     # ack_is_trusted を通ったので connect が終わっている
                     assert client.hub_package_version is not None
 
@@ -599,7 +590,7 @@ class TestHandshakeIntegration:
 
             async def inner() -> None:
                 client = AutomationClient(
-                    url=f"ws://127.0.0.1:{port}", token="from-an-old-hub", register_timeout=5.0
+                    address=f"127.0.0.1:{port}", token="from-an-old-hub", register_timeout=5.0
                 )
                 with pytest.raises(RegisterError) as exc_info:
                     await client.connect()
@@ -633,7 +624,7 @@ class TestCallerRoleIntegration:
                 worker = _AsyncFakeWorker(url, label="w1", pid=1111)
                 await worker.start()
                 try:
-                    async with AutomationClient(url=url, role=Role.MCP_GATEWAY) as c:
+                    async with AutomationClient(role=Role.MCP_GATEWAY) as c:
                         await asyncio.sleep(0.05)
                         result = await c.call("ping", instance="w1", timeout_ms=5_000)
                     assert result["caller_role"] == "mcp_gateway"
@@ -654,7 +645,7 @@ class TestCallerRoleIntegration:
                 worker = _AsyncFakeWorker(url, label="w2", pid=2222)
                 await worker.start()
                 try:
-                    async with AutomationClient(url=url, role=Role.AUTOMATION_CLIENT) as c:
+                    async with AutomationClient(role=Role.AUTOMATION_CLIENT) as c:
                         await asyncio.sleep(0.05)
                         result = await c.call("ping", instance="w2", timeout_ms=5_000)
                     assert result["caller_role"] == "automation_client"

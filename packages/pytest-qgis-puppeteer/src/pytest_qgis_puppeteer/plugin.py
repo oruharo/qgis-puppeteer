@@ -2,8 +2,8 @@
 
 ADR-0002 に従い、pytest session が **Hub subprocess を所有** し、QGIS を
 `qgis_bin` で指定された実行ファイル経由で spawn する構成。QGIS 内の
-QGIS Puppeteer プラグインが `QPUPPETEER_HUB_PORT` env を見て外部所有者モードに
-入るので、自前で Hub を spawn しない（ADR-0001 §6）。
+QGIS Puppeteer プラグインは `QPUPPETEER_HUB_FILE` env（pytest の Hub の Hub ファイル）
+を見て、自前で Hub を spawn せずその Hub につなぐ（ADR-0001 §6）。
 
 ## 設定の優先順位
 
@@ -26,9 +26,9 @@ CLI 引数 > 環境変数 > pyproject.toml の `[tool.pytest.ini_options]`
 ## fixture 依存順
 
 ```
-hub_port, hub_file → hub_process → automation_client → qgis_process → hub_ready
-                                                                         │
-                                                                      function: qgis
+hub_file → hub_process → automation_client → qgis_process → hub_ready
+                                                               │
+                                                            function: qgis
 ```
 
 `automation_client` は Client 接続として Hub に残り続け、Hub の idle shutdown
@@ -61,9 +61,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 import pytest
+from qgis_puppeteer.hub_file import HubFileInfo
 
 from pytest_qgis_puppeteer import _leftover, _message_check
 from pytest_qgis_puppeteer._action_recorder import ActionRecorder
@@ -100,8 +100,6 @@ DEFAULT_QGIS_GRACEFUL_SHUTDOWN_TIMEOUT_S = 15.0
 
 # dev モード関連
 ENV_DEV_MODE = "QPUPPETEER_E2E_USE_RUNNING_QGIS"
-ENV_DEV_HUB_URL = "QPUPPETEER_E2E_HUB_URL"
-DEFAULT_DEV_HUB_URL = "ws://127.0.0.1:9876"
 
 # QGIS spawn 関連
 ENV_QGIS_BIN = "QPUPPETEER_QGIS_BIN"
@@ -109,7 +107,7 @@ ENV_QGIS_PYTHON = "QPUPPETEER_QGIS_PYTHON"
 ENV_QGIS_ARGS = "QPUPPETEER_QGIS_ARGS"
 # `qgis_command` を指定すると `qgis_bin + qgis_args` の代わりに使われる。
 # ホストアプリ独自の launcher (ホスト固有の env や DB 接続情報を立てる .bat 等)
-# を介して QGIS を起動するシナリオで使う。`QPUPPETEER_HUB_PORT` 等の env は
+# を介して QGIS を起動するシナリオで使う。`QPUPPETEER_HUB_FILE` 等の env は
 # 引き続き子プロセスに継承される（launcher 側でそれを QGIS に渡す責任）。
 ENV_QGIS_COMMAND = "QPUPPETEER_QGIS_COMMAND"
 
@@ -1194,41 +1192,33 @@ def _is_dev_mode() -> bool:
     return os.environ.get(ENV_DEV_MODE) == "1"
 
 
-def _dev_hub_url() -> str:
-    return os.environ.get(ENV_DEV_HUB_URL, DEFAULT_DEV_HUB_URL)
-
-
-def _parse_port(url: str) -> int:
-    parsed = urlparse(url)
-    if parsed.port is None:
-        raise ValueError(
-            f"Hub URL {url!r} has no explicit port; set {ENV_DEV_HUB_URL} with explicit port"
-        )
-    return parsed.port
-
-
 # ==============================================================
 # ヘルパ
 # ==============================================================
 
 
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+def _wait_hub_ready(
+    proc: subprocess.Popen[bytes], hub_file: Path, *, timeout_s: float
+) -> HubFileInfo:
+    """起こした Hub が Hub ファイルを書き、挨拶が通るまで待つ。
 
+    Raises:
+        RuntimeError: Hub が先に終わった（終了コードを添える）
+        TimeoutError: ``timeout_s`` 秒たっても生きた Hub にならない
+    """
+    from qgis_puppeteer.hub_probe import find_live_hub
 
-def _wait_port_listen(port: int, timeout_s: float) -> None:
     deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(0.2)
-            try:
-                s.connect(("127.0.0.1", port))
-                return
-            except OSError:
-                time.sleep(0.1)
-    raise TimeoutError(f"Hub did not start listening on port {port} within {timeout_s}s")
+    while True:
+        info = find_live_hub(hub_file)
+        if info is not None:
+            return info
+        code = proc.poll()
+        if code is not None:
+            raise RuntimeError(f"Hub exited with code {code} before it became reachable")
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"Hub did not become reachable within {timeout_s}s")
+        time.sleep(0.1)
 
 
 def _hub_bootstrap_path() -> Path:
@@ -1272,17 +1262,6 @@ def _shutdown_registered_workers(client: E2EAutomationClient) -> None:
 
 
 @pytest.fixture(scope="session")
-def hub_port() -> int:
-    if _is_dev_mode():
-        port = _parse_port(_dev_hub_url())
-        logger.info("Dev mode: using existing Hub at port %d", port)
-        return port
-    port = _free_port()
-    logger.info("Hub will listen on free port %d", port)
-    return port
-
-
-@pytest.fixture(scope="session")
 def hub_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Hub が接続の token を書く Hub ファイル（``qgis_puppeteer.hub_file``）。
 
@@ -1294,13 +1273,6 @@ def hub_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
     if _is_dev_mode():
         return resolve_hub_file_path()
     return tmp_path_factory.mktemp("hub") / "hub.json"
-
-
-@pytest.fixture(scope="session")
-def hub_url(hub_port: int) -> str:
-    if _is_dev_mode():
-        return _dev_hub_url()
-    return f"ws://127.0.0.1:{hub_port}"
 
 
 def _resolve_hub_qgis_python(config: pytest.Config, active_env: EnvironmentSpec | None) -> str:
@@ -1345,26 +1317,30 @@ def _resolve_hub_qgis_python(config: pytest.Config, active_env: EnvironmentSpec 
 
 @pytest.fixture(scope="session")
 def hub_process(
-    pytestconfig: pytest.Config, hub_port: int, hub_file: Path
+    pytestconfig: pytest.Config, hub_file: Path
 ) -> Iterator[subprocess.Popen[bytes] | None]:
-    """Hub を QGIS 付属 Python launcher 経由で spawn し、listen 確認後に yield。
+    """Hub を QGIS 付属 Python launcher 経由で spawn し、つながるのを確かめてから yield。
 
     venv の python では PyQt5 が解決できないので、QGIS 付属の Python launcher
     （例: `python-qgis-ltr.bat`）で起こす。`qgis_python` ini /
     `QPUPPETEER_QGIS_PYTHON` env / `--qgis-python` CLI で指定するか、
     `qgis_bin` の隣から見つける（`_resolve_hub_qgis_python`）。
 
-    dev モードでは spawn せず、既存 Hub が listen 済みであることだけ確認。
+    Hub は空いているポートで待ち受け、`hub_file` にアドレスと token を書く。
+    つなぐ側（automation_client・QGIS の Worker）はそのファイルを読む。
+
+    dev モードでは spawn せず、`hub_file` の Hub が生きていることだけ確かめる。
     """
+    from qgis_puppeteer.hub_file import ENV_HUB_FILE
+    from qgis_puppeteer.hub_probe import describe_hub_file, find_live_hub, split_address
+
     if _is_dev_mode():
-        try:
-            _wait_port_listen(hub_port, timeout_s=2.0)
-        except TimeoutError as exc:
+        if find_live_hub(hub_file) is None:
             raise RuntimeError(
-                f"Dev mode: external Hub at port {hub_port} is not listening. "
-                f"Start the Hub-bearing QGIS first, or override {ENV_DEV_HUB_URL}."
-            ) from exc
-        logger.info("Dev mode: external Hub at port %d confirmed listening", hub_port)
+                f"Dev mode: no live Hub behind the Hub file {describe_hub_file(hub_file)}. "
+                f"Start the Hub-bearing QGIS first, or set {ENV_HUB_FILE} to its Hub file."
+            )
+        logger.info("Dev mode: using the live Hub of %s", describe_hub_file(hub_file))
         yield None
         return
 
@@ -1372,9 +1348,6 @@ def hub_process(
     cmd = [
         qgis_python,
         str(_hub_bootstrap_path()),
-        "--port",
-        str(hub_port),
-        "--no-pid-file",
         "--hub-file",
         str(hub_file),
     ]
@@ -1389,7 +1362,7 @@ def hub_process(
 
     # Hub の stderr/stdout を drain thread で吸い上げ session config に貯める。
     # 失敗時の diagnostic bundle に hub_stderr.log として書き出すため。
-    # `_wait_port_listen` で listening 確認が出来なかった場合の早期失敗パスでも
+    # Hub がつながる状態にならなかった場合の早期失敗パスでも
     # 既に少し溜まっていればそれが診断に役立つ。
     hub_stdout_buf: list[str] = []
     hub_stderr_buf: list[str] = []
@@ -1410,16 +1383,19 @@ def hub_process(
         drain_threads.append(t)
 
     try:
-        _wait_port_listen(hub_port, timeout_s=DEFAULT_HUB_LISTEN_TIMEOUT_S)
-    except TimeoutError:
-        _stop_hub(proc, hub_port=hub_port)
+        info = _wait_hub_ready(proc, hub_file, timeout_s=DEFAULT_HUB_LISTEN_TIMEOUT_S)
+    except (TimeoutError, RuntimeError) as exc:
+        _stop_hub(proc, hub_port=None)
         # drain thread が回収済みの stderr を使う（communicate は drain と競合する）
         for t in drain_threads:
             t.join(timeout=1.0)
         err_text = "\n".join(hub_stderr_buf) or "<no stderr captured>"
         raise RuntimeError(
-            f"Hub subprocess failed to start listening.\nstderr:\n{err_text}"
+            f"Hub subprocess did not become reachable through {hub_file}: {exc}\n"
+            f"stderr:\n{err_text}"
         ) from None
+    hub_port = split_address(info.addresses[0])[1]
+    logger.info("Hub is up: %s", describe_hub_file(hub_file))
     try:
         yield proc
     finally:
@@ -1428,7 +1404,7 @@ def hub_process(
             t.join(timeout=2.0)
 
 
-def _stop_hub(proc: subprocess.Popen[bytes], *, hub_port: int) -> None:
+def _stop_hub(proc: subprocess.Popen[bytes], *, hub_port: int | None) -> None:
     """pytest が起こした Hub を止める（#14）。
 
     Hub は ``qgis_python``（Windows の既定は ``python-qgis-ltr.bat``）で起こすので、
@@ -1440,6 +1416,7 @@ def _stop_hub(proc: subprocess.Popen[bytes], *, hub_port: int) -> None:
     - posix: Hub は自分のプロセスグループで起こしてあるので、グループごと止める
     - 最後に Hub のポートが閉じたかを確かめる。閉じなければ、Windows では
       そのポートで待ち受けているプロセスを止め、だめなら警告する
+      （``hub_port`` が None＝Hub がつながる前に止めるときは確かめない）
     """
     if proc.poll() is None:
         if sys.platform == "win32":
@@ -1461,6 +1438,8 @@ def _stop_hub(proc: subprocess.Popen[bytes], *, hub_port: int) -> None:
             proc.kill()
             with contextlib.suppress(subprocess.TimeoutExpired):
                 proc.wait(timeout=2)
+    if hub_port is None:
+        return
     if _wait_port_closed(hub_port, timeout_s=5.0):
         logger.info("Hub stopped (returncode=%s, port %d closed)", proc.returncode, hub_port)
         return
@@ -1535,12 +1514,11 @@ def _parse_listening_pid(netstat_output: str, port: int) -> int | None:
 @pytest.fixture(scope="session")
 def automation_client(
     hub_process: subprocess.Popen[bytes] | None,
-    hub_url: str,
     hub_file: Path,
     action_recorder: ActionRecorder,
 ) -> Iterator[E2EAutomationClient]:
     del hub_process
-    client = E2EAutomationClient(url=hub_url, hub_file=hub_file)
+    client = E2EAutomationClient(hub_file=hub_file)
     client.connect()
     # ADR-0002 §13 / B5a: 各 ``call(...)`` を timeline に記録し、test 失敗時の
     # diagnostic bundle に ``actions.jsonl`` として吐き出す。test 単位の clear は
@@ -1616,12 +1594,11 @@ def _per_test_action_recorder(
 def qgis_process(
     pytestconfig: pytest.Config,
     automation_client: E2EAutomationClient,
-    hub_port: int,
 ) -> Iterator[SessionQgis | None]:
     """session の QGIS を spawn し、`SessionQgis` を yield する。
 
-    QGIS 内の QGIS Puppeteer プラグインが `QPUPPETEER_HUB_PORT` env を見て
-    外部所有者モードに入り、自前で Hub を spawn しない。teardown では Hub に
+    QGIS 内の QGIS Puppeteer プラグインが `QPUPPETEER_HUB_FILE` env を見て
+    pytest の Hub につなぎ、自前で Hub を spawn しない。teardown では Hub に
     register された Worker を `_shutdown_registered_workers` で閉じる。
 
     ``qgis_auto_fresh_after_failure = session`` のときは、失敗の後にこの
@@ -1680,7 +1657,6 @@ def qgis_process(
         kind = "restart" if session.start_count > 0 else "session"
         kwargs, env = _with_spawn_extras(pytestconfig, kind, spawn_kwargs, user_env)
         return spawn_qgis(
-            hub_port=hub_port,
             automation_client=automation_client,
             env=env,
             register_timeout_s=register_timeout_s,
@@ -1854,21 +1830,41 @@ def hub_ready(
 
 
 class QgisPluginMismatchWarning(UserWarning):
-    """QGIS のプラグインと pytest 側の qgis-puppeteer の中身が食い違っている（#17）。
+    """QGIS のプラグインや Hub と、pytest 側の qgis-puppeteer が食い違っている（#17）。
 
     片側にしか入っていない修正は効かない。``-W error::pytest_qgis_puppeteer.
     QgisPluginMismatchWarning`` で失敗にもできる。
     """
 
 
+def _warn_mismatch(message: str) -> None:
+    logger.warning(message)
+    warnings.warn(message, QgisPluginMismatchWarning, stacklevel=3)
+
+
 def _check_plugin_fingerprint(client: E2EAutomationClient, instance_id: str) -> None:
-    """session の QGIS のプラグインと、pytest 側のライブラリの指紋を比べる（#17）。
+    """session の Hub・QGIS のプラグインと、pytest 側のライブラリを比べる（#17）。
 
     session の最初に 1 回。食い違っていれば `QgisPluginMismatchWarning` を出す
-    （失敗にはしない）。旧プラグインは指紋を送らないので「分からない」と知らせる。
+    （失敗にはしない）。
+
+    1. Hub の版（``package_version``）が pytest 側と違う（dev モードで、ほかの
+       QGIS が起こした Hub につないだときなど）
+    2. Worker（プラグイン）の版が違う
+    3. 版が同じで中身の指紋（``source_fingerprint``）が違う（dev のビルド同士）。
+       旧プラグインは指紋を送らないので「分からない」と知らせる
     """
+    import qgis_puppeteer
     from qgis_puppeteer._fingerprint import source_fingerprint
 
+    here = Path(qgis_puppeteer.__file__).resolve().parent
+    mine_version = qgis_puppeteer.__version__
+    hub_version = client.hub_package_version
+    if hub_version is not None and hub_version != mine_version:
+        _warn_mismatch(
+            f"The Hub runs qgis-puppeteer {hub_version}, but pytest's qgis-puppeteer is "
+            f"{mine_version} ({here}). Use the same version on both sides."
+        )
     try:
         info = next((i for i in client.list_instances() if i.instance_id == instance_id), None)
     except Exception:  # noqa: BLE001 - 確かめられなくてもテストは進める
@@ -1876,14 +1872,20 @@ def _check_plugin_fingerprint(client: E2EAutomationClient, instance_id: str) -> 
         return
     if info is None:
         return
+    worker_version = getattr(info, "package_version", None)
+    if worker_version is not None and worker_version != mine_version:
+        _warn_mismatch(
+            f"The QGIS Puppeteer plugin in QGIS is qgis-puppeteer {worker_version}, but "
+            f"pytest's qgis-puppeteer is {mine_version} ({here}). Fixes on one side only "
+            "do not take effect; install the plugin and pytest-qgis-puppeteer of the "
+            "same version."
+        )
+        return
     mine = source_fingerprint()
     theirs = getattr(info, "source_fingerprint", None)
     if theirs == mine:
         logger.info("QGIS Puppeteer plugin matches pytest's qgis-puppeteer (%s)", mine)
         return
-    import qgis_puppeteer
-
-    here = Path(qgis_puppeteer.__file__).resolve().parent
     if theirs is None:
         message = (
             "The QGIS Puppeteer plugin in QGIS is older than the version check, so it "
@@ -1896,8 +1898,7 @@ def _check_plugin_fingerprint(client: E2EAutomationClient, instance_id: str) -> 
             f"qgis-puppeteer ({mine}, {here}). Fixes on one side only do not take "
             "effect; install the plugin and pin pytest-qgis-puppeteer to the same commit."
         )
-    logger.warning(message)
-    warnings.warn(message, QgisPluginMismatchWarning, stacklevel=2)
+    _warn_mismatch(message)
 
 
 # ==============================================================
@@ -1960,7 +1961,6 @@ def qgis(
     pytestconfig: pytest.Config,
     automation_client: E2EAutomationClient,
     hub_ready: str,
-    hub_port: int,
     qgis_process: SessionQgis | None,
 ) -> Iterator[E2EAutomationClient]:
     """テスト用 AutomationClient を供給する function-scope fixture。
@@ -2038,7 +2038,6 @@ def qgis(
     )
     launch, env_vars = _with_spawn_extras(pytestconfig, "fresh", launch, env_vars)
     spawn_kwargs: dict[str, Any] = {
-        "hub_port": hub_port,
         "automation_client": automation_client,
         "env": env_vars,
         "register_timeout_s": register_timeout_s,

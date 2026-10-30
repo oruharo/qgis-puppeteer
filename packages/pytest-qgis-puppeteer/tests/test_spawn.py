@@ -3,7 +3,7 @@
 実 QGIS subprocess を起動するロジックは integration test に任せ、ここでは:
 
 - 引数の排他チェック（``ValueError``）
-- env 合成（``QPUPPETEER_HUB_PORT`` を helper が常に勝つ等）
+- env 合成（``QPUPPETEER_HUB_FILE`` を helper が常に勝つ、base の Hub の設定を消す等）
 - pid フィルタによる instance 解決
 - dev mode skip 動作
 - 排他 / 自動採番 / labels 等の単体ロジック
@@ -271,9 +271,7 @@ class TestBuildEnv:
     """env 合成: helper の自動注入とユーザー指定の merge ルール。"""
 
     def test_minimal_injects_required_vars(self) -> None:
-        env = _build_env(base={}, hub_port=9876, hub_file="/run/hub.json", user_env=None)
-        assert env["QPUPPETEER_HUB_PORT"] == "9876"
-        assert env["QPUPPETEER_HUB_HOST"] == "127.0.0.1"
+        env = _build_env(base={}, hub_file="/run/hub.json", user_env=None)
         assert env["QPUPPETEER_HUB_FILE"] == "/run/hub.json"
         assert env["QPUPPETEER_TRUSTED_MODE"] == "1"
         assert env["QPUPPETEER_ALLOW_TEST_HANDLERS"] == "1"
@@ -281,7 +279,6 @@ class TestBuildEnv:
     def test_inherits_base_env(self) -> None:
         env = _build_env(
             base={"PATH": "/usr/bin", "LANG": "ja_JP.UTF-8"},
-            hub_port=9876,
             hub_file="/run/hub.json",
             user_env=None,
         )
@@ -291,27 +288,42 @@ class TestBuildEnv:
     def test_user_env_added_on_top(self) -> None:
         env = _build_env(
             base={},
-            hub_port=9876,
             hub_file="/run/hub.json",
             user_env={"MYAPP_FEATURE": "auth"},
         )
         assert env["MYAPP_FEATURE"] == "auth"
 
-    def test_helper_wins_for_hub_port(self) -> None:
-        """ユーザーが ``QPUPPETEER_HUB_PORT`` を指定しても helper が常に勝つ。"""
+    def test_hub_settings_left_in_the_base_env_are_dropped(self) -> None:
+        """開発者の環境に残った ``QPUPPETEER_HUB_*`` は、起こす QGIS に持ち込まない。"""
+        env = _build_env(
+            base={
+                "QPUPPETEER_HUB_URL": "ws://127.0.0.1:9876",
+                "QPUPPETEER_HUB_LOG_FILE": "/shell/hub.log",
+                "qpuppeteer_hub_port": "9876",
+                "QPUPPETEER_TRUSTED_MODE": "0",
+            },
+            hub_file="/run/hub.json",
+            user_env=None,
+        )
+        assert "QPUPPETEER_HUB_URL" not in env
+        assert "QPUPPETEER_HUB_LOG_FILE" not in env
+        assert "qpuppeteer_hub_port" not in env
+        # Hub 以外の QPUPPETEER_* は残す
+        assert env["QPUPPETEER_TRUSTED_MODE"] == "0"
+
+    def test_hub_settings_given_in_user_env_are_kept(self) -> None:
+        """``env=`` で明示した ``QPUPPETEER_HUB_*`` は残す（HUB_FILE だけは helper が勝つ）。"""
         env = _build_env(
             base={},
-            hub_port=9876,
             hub_file="/run/hub.json",
-            user_env={"QPUPPETEER_HUB_PORT": "1234"},
+            user_env={"QPUPPETEER_HUB_LOG_FILE": "/user/hub.log"},
         )
-        assert env["QPUPPETEER_HUB_PORT"] == "9876"
+        assert env["QPUPPETEER_HUB_LOG_FILE"] == "/user/hub.log"
 
     def test_helper_wins_for_hub_file(self) -> None:
         """Hub ファイルも helper が勝つ（違う token では register できない）。"""
         env = _build_env(
             base={"QPUPPETEER_HUB_FILE": "/shell/hub.json"},
-            hub_port=9876,
             hub_file="/run/hub.json",
             user_env={"QPUPPETEER_HUB_FILE": "/user/hub.json"},
         )
@@ -321,7 +333,6 @@ class TestBuildEnv:
         """``TRUSTED_MODE`` は setdefault なのでユーザーが先に指定すれば勝てる。"""
         env = _build_env(
             base={},
-            hub_port=9876,
             hub_file="/run/hub.json",
             user_env={"QPUPPETEER_TRUSTED_MODE": "0"},
         )
@@ -635,7 +646,6 @@ class TestSpawnQgisContextManager:
         with (
             pytest.raises(pytest.skip.Exception),
             spawn_qgis(
-                hub_port=9876,
                 automation_client=client,  # type: ignore[arg-type]
                 qgis_bin="qgis-bin.exe",
             ),
@@ -650,7 +660,6 @@ class TestSpawnQgisContextManager:
         with (
             pytest.raises(ValueError, match="mutually exclusive"),
             spawn_qgis(
-                hub_port=9876,
                 automation_client=client,  # type: ignore[arg-type]
                 qgis_bin="qgis-bin.exe",
                 command=["launcher.bat"],
@@ -672,7 +681,6 @@ class TestSpawnQgisContextManager:
             [],  # teardown 時の dangling check
         )
         with spawn_qgis(
-            hub_port=9876,
             automation_client=client,  # type: ignore[arg-type]
             qgis_bin="qgis-bin.exe",
             args=["--clean-canvas"],
@@ -698,7 +706,6 @@ class TestSpawnQgisContextManager:
             [],
         )
         with spawn_qgis(
-            hub_port=9876,
             automation_client=client,  # type: ignore[arg-type]
             qgis_bin="qgis-bin.exe",
             label="clean_canvas_test",
@@ -719,7 +726,6 @@ class TestSpawnQgisContextManager:
         with (
             pytest.raises(WorkerRegisterTimeout),
             spawn_qgis(
-                hub_port=9876,
                 automation_client=client,  # type: ignore[arg-type]
                 qgis_bin="qgis-bin.exe",
                 register_timeout_s=0.2,
@@ -752,7 +758,6 @@ class TestSpawnQgisContextManager:
         with (
             pytest.raises(ValueError, match="would reject the worker label"),
             spawn_qgis(
-                hub_port=9876,
                 automation_client=client,  # type: ignore[arg-type]
                 qgis_bin="qgis-bin.exe",
                 label=label,
@@ -790,7 +795,6 @@ class TestSpawnQgisContextManager:
         with (
             pytest.raises(WorkerRegisterRejected, match="already in use") as excinfo,
             spawn_qgis(
-                hub_port=9876,
                 automation_client=client,  # type: ignore[arg-type]
                 command=["launcher.bat"],
                 register_timeout_s=30.0,
@@ -835,7 +839,6 @@ class TestSpawnQgisContextManager:
         with (
             pytest.raises(WorkerLaunchFailed, match="QGIS_PREFIX_PATH is not set") as excinfo,
             spawn_qgis(
-                hub_port=9876,
                 automation_client=client,  # type: ignore[arg-type]
                 command=["launcher.bat"],
                 register_timeout_s=30.0,
@@ -858,7 +861,6 @@ class TestSpawnQgisContextManager:
         with (
             pytest.raises(WorkerRegisterTimeout),
             spawn_qgis(
-                hub_port=9876,
                 automation_client=client,  # type: ignore[arg-type]
                 command=["launcher.bat"],
                 register_timeout_s=1.0,
@@ -988,7 +990,6 @@ class TestSpawnQgisContextManager:
         processes.alive.add(23456)
         client.on_execute_python = lambda code, instance: processes.alive.discard(23456)
         with spawn_qgis(
-            hub_port=9876,
             automation_client=client,  # type: ignore[arg-type]
             command=["launcher.bat"],
             register_timeout_s=2.0,
@@ -1021,7 +1022,6 @@ class TestSpawnQgisContextManager:
         )
         processes.alive.add(23456)
         with spawn_qgis(
-            hub_port=9876,
             automation_client=client,  # type: ignore[arg-type]
             command=["launcher.bat"],
             register_timeout_s=2.0,
@@ -1046,7 +1046,6 @@ class TestSpawnQgisContextManager:
             [_FakeInstance(instance_id="other", pid=999)],  # 自分はもう居ない
         )
         with spawn_qgis(
-            hub_port=9876,
             automation_client=client,  # type: ignore[arg-type]
             qgis_bin="qgis-bin.exe",
             register_timeout_s=2.0,
@@ -1082,7 +1081,6 @@ class TestSpawnQgisContextManager:
         )
         before = time.time()
         with spawn_qgis(
-            hub_port=9876,
             automation_client=client,  # type: ignore[arg-type]
             command=["launcher.bat"],
             register_timeout_s=2.0,
@@ -1117,7 +1115,6 @@ class TestSpawnQgisContextManager:
         processes.alive.add(23456)
         client.on_execute_python = lambda code, instance: processes.alive.discard(23456)
         with spawn_qgis(
-            hub_port=9876,
             automation_client=client,  # type: ignore[arg-type]
             command=["launcher.bat"],
             register_timeout_s=2.0,
@@ -1153,7 +1150,6 @@ class TestSpawnQgisContextManager:
         with (
             caplog.at_level(logging.WARNING, logger="pytest_qgis_puppeteer.spawn"),
             spawn_qgis(
-                hub_port=9876,
                 automation_client=client,  # type: ignore[arg-type]
                 qgis_bin="qgis-bin.exe",
                 register_timeout_s=2.0,
@@ -1296,7 +1292,7 @@ class TestSpawnQgisFixture:
         assert "spawn_qgis_fixture" in pytest_qgis_puppeteer.__all__
 
     def test_inner_fixture_signature(self) -> None:
-        """生成 fixture の inner function は ``hub_port`` / ``automation_client`` を要求する。
+        """生成 fixture の inner function は ``automation_client`` を要求する。
 
         pytest はこれを fixture name として解釈し、自動的に既存 plugin の同名
         fixture から injection する。
@@ -1308,7 +1304,7 @@ class TestSpawnQgisFixture:
         f = spawn_qgis_fixture(qgis_bin="x")
         inner = f._get_wrapped_function()
         params = inspect.signature(inner).parameters
-        assert set(params.keys()) == {"hub_port", "automation_client"}
+        assert set(params.keys()) == {"automation_client"}
 
 
 # ============================================================

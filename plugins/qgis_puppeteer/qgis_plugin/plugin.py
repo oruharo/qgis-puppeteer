@@ -10,16 +10,13 @@ Hub へ逆向き接続する。QGIS 終了時は `aboutToQuit` + close 待機で
 - PyQt5（QGIS 付属）
 
 ## 設定（環境変数、全て任意）
-- `QPUPPETEER_HUB_URL`     Hub の WS URL（デフォルト `ws://127.0.0.1:9876`）
-- `QPUPPETEER_HUB_HOST`    Hub ホスト（URL 未指定時に合成、デフォルト `127.0.0.1`）
-- `QPUPPETEER_HUB_PORT`    Hub ポート（URL 未指定時に合成、デフォルト `9876`）
-- `QPUPPETEER_HUB_ORIGIN`  register 時に送る Origin（デフォルト `http://localhost`）
+- `QPUPPETEER_HUB_FILE`     Hub ファイル（アドレスと token）。設定すると **外部所有者モード**
+  になり、Hub は起こさずにその Hub ファイルの Hub につなぐ（ADR-0001 §6）。
+  無ければ既定の Hub ファイルを使い、生きた Hub がいなければ起こす
 - `QPUPPETEER_WORKER_LABEL` Worker のラベル（未指定なら Hub が自動採番）
-- `QPUPPETEER_HUB_LOCK_PATH` Hub auto-spawn 用ロックファイル（デフォルト TEMP 配下）
-- `QPUPPETEER_HUB_LOG_FILE`  Hub プロセスの stdout/stderr 出力先
-
-上記 `HUB_URL` / `HUB_HOST` / `HUB_PORT` のいずれかが設定されていると **外部所有者モード**
-になり、Worker は Hub spawn を行わず接続のみ試行する（ADR-0001 §6）。
+- `QPUPPETEER_HUB_LOG_FILE`  起こした Hub の stdout/stderr 出力先
+  （デフォルト Hub ファイルの隣の `hub.spawn.log`）
+- `QPUPPETEER_HUB_PYTHON`   Hub を起こす Python（デフォルト QGIS 同梱の bat）
 """
 
 from __future__ import annotations
@@ -28,8 +25,6 @@ import contextlib
 import logging
 import os
 import sys
-import tempfile
-from pathlib import Path
 from typing import Any
 
 # `Worker` は PyQt5 依存のため top-level `qgis_puppeteer` からは export されない。
@@ -41,21 +36,18 @@ from PyQt5.QtCore import (  # type: ignore[import-not-found]
     QTimer,
 )
 
+from qgis_puppeteer.hub_file import resolve_hub_file_path
 from qgis_puppeteer.worker import Worker
 
 from .plugin_helpers import (
     CLOSE_UNWANTED_QGIS_EXIT_MS,
-    ENV_HUB_HOST,
-    ENV_HUB_PORT,
     ENV_HUB_PYTHON,
-    ENV_HUB_URL,
     ENV_QT_DIALOGS,
     _build_hub_spawn_command,
     _build_hub_spawn_env,
-    _extract_port,
+    _is_external_hub,
     _resolve_hub_log_file,
     _resolve_hub_python,
-    _resolve_hub_url,
     discover_extensions,
     should_close_after_register_failure,
     wants_qt_dialogs,
@@ -67,18 +59,13 @@ logger = logging.getLogger(__name__)
 # 環境変数キー
 # ==============================================================
 
-# ENV_HUB_URL / ENV_HUB_HOST / ENV_HUB_PORT は plugin_helpers 側に単一定義源。
-# ENV_HUB_LOG_FILE / ENV_HUB_PYTHON も plugin_helpers 側（PyQt5 非依存層）。
-ENV_HUB_ORIGIN = "QPUPPETEER_HUB_ORIGIN"
+# ENV_HUB_LOG_FILE / ENV_HUB_PYTHON は plugin_helpers 側（PyQt5 非依存層）。
 ENV_WORKER_LABEL = "QPUPPETEER_WORKER_LABEL"
 # ADR-0005 D6: 公式 launch helper が注入する相関トークン。
 ENV_LAUNCH_TOKEN = "QPUPPETEER_LAUNCH_TOKEN"
 # ADR-0005 D4: active 同 label 衝突ポリシーの env スイッチ。
 ENV_WORKER_TAKEOVER = "QPUPPETEER_WORKER_TAKEOVER"
 ENV_WORKER_LABEL_SUFFIX = "QPUPPETEER_WORKER_LABEL_SUFFIX"
-ENV_HUB_LOCK_PATH = "QPUPPETEER_HUB_LOCK_PATH"
-
-DEFAULT_LOCK_FILENAME_TEMPLATE = "qgis_puppeteer-hub-{port}.lock"
 
 
 def _resolve_conflict_policy() -> str | None:
@@ -97,19 +84,6 @@ def _resolve_conflict_policy() -> str | None:
     if _truthy(ENV_WORKER_LABEL_SUFFIX):
         return "suffix"
     return None
-
-
-def _is_external_owner_mode() -> bool:
-    """外部所有者モードか判定する。
-
-    `QPUPPETEER_HUB_URL` / `QPUPPETEER_HUB_HOST` / `QPUPPETEER_HUB_PORT` の
-    いずれかが設定されている場合、Hub の所有者は外部（pytest / remote 等）
-    にあり、Worker は spawn しない。ADR-0001 §6 参照。
-
-    `HUB_URL` もここに含めることで、ユーザが `ws://host:port` 形式で明示した
-    場合（host/port を個別指定せず URL まるごと上書き）も外部扱いになる。
-    """
-    return ENV_HUB_URL in os.environ or ENV_HUB_HOST in os.environ or ENV_HUB_PORT in os.environ
 
 
 # ==============================================================
@@ -142,9 +116,9 @@ class QgisPuppeteerPlugin:
         sys.executable が QGIS 本体バイナリだとそれを起動してしまうため（新しい
         QGIS プロセスが立ち上がる）、`_resolve_hub_python()` で明示的に検出する。
 
-        ADR-0001 §6 "外部所有者モード"：`QPUPPETEER_HUB_HOST` / `QPUPPETEER_HUB_PORT`
-        が設定されている場合は Hub 所有者が外部にあるので、auto-spawn を完全に
-        抑制して接続のみ試行する（E2E テスト / remote 運用）。
+        ADR-0001 §6 "外部所有者モード"：`QPUPPETEER_HUB_FILE` が設定されている場合は
+        Hub 所有者が外部にあるので、auto-spawn を完全に抑制して接続のみ試行する
+        （pytest が起こした QGIS など）。
         """
         if wants_qt_dialogs(os.environ):
             # ファイルダイアログなどを OS のものではなく Qt のものにする（#22）。
@@ -152,29 +126,22 @@ class QgisPuppeteerPlugin:
             QCoreApplication.setAttribute(Qt.AA_DontUseNativeDialogs, True)
             logger.info("%s is set: using Qt dialogs instead of native ones", ENV_QT_DIALOGS)
 
-        hub_url = _resolve_hub_url()
-        origin = os.environ.get(ENV_HUB_ORIGIN, "http://localhost")
+        hub_file = resolve_hub_file_path()
         label = os.environ.get(ENV_WORKER_LABEL) or None
         launch_token = os.environ.get(ENV_LAUNCH_TOKEN) or None
         conflict_policy = _resolve_conflict_policy()
-        external_owner = _is_external_owner_mode()
+        external_owner = _is_external_hub(os.environ)
 
         # subprocess の stdout/stderr を常にファイルに残す（DEVNULL にはしない）。
         # `hub.py` 側の Python logger が回り始める前のエラー（import 失敗、Qt fatal 等）は
-        # ここでしか拾えない。デフォルトは `<TEMP>\qgis_puppeteer.spawn.log`。
-        log_file = _resolve_hub_log_file()
-        logger.info("Hub subprocess log file: %s", log_file)
-
-        hub_port = _extract_port(hub_url)
+        # ここでしか拾えない。デフォルトは Hub ファイルの隣の `hub.spawn.log`。
+        log_file = _resolve_hub_log_file(hub_file)
+        logger.info("Hub file: %s", hub_file)
 
         if external_owner:
             # 外部所有者モード：Hub は pytest / 外部プロセスが所有しているため
             # Worker は spawn せず接続のみ試行する（ADR-0001 §6）。
-            logger.info(
-                "External owner mode (hub_url=%s); auto-spawn disabled",
-                hub_url,
-            )
-            lock_path = None
+            logger.info("External owner mode (Hub file %s); auto-spawn disabled", hub_file)
             hub_spawn_command = None
             hub_spawn_env = None
         else:
@@ -190,23 +157,19 @@ class QgisPuppeteerPlugin:
                     sys.executable,
                     ENV_HUB_PYTHON,
                 )
-                lock_path = None
                 hub_spawn_command = None
                 hub_spawn_env = None
             else:
-                logger.info("Hub auto-spawn python: %s", hub_python)
-                lock_path = self._resolve_lock_path(hub_port)
-                hub_spawn_command = _build_hub_spawn_command(hub_python, hub_port)
+                logger.info("Hub auto-spawn python: %s (log %s)", hub_python, log_file)
+                hub_spawn_command = _build_hub_spawn_command(hub_python, hub_file)
                 hub_spawn_env = _build_hub_spawn_env()
 
         self._worker = Worker(
-            hub_url=hub_url,
-            origin=origin,
+            hub_file=hub_file,
             label=label,
             launch_token=launch_token,
             conflict_policy=conflict_policy,
             project=self._current_project_path(),
-            hub_lock_path=lock_path,
             hub_spawn_command=hub_spawn_command,
             hub_spawn_env=hub_spawn_env,
             hub_log_file=log_file,
@@ -394,21 +357,6 @@ class QgisPuppeteerPlugin:
     # ------------------------------------------------------------
     # 内部：初期化ヘルパ
     # ------------------------------------------------------------
-
-    def _resolve_lock_path(self, port: int) -> Path:
-        """Hub auto-spawn 用のロックファイルパスを決定する。
-
-        環境変数優先、なければ OS の一時ディレクトリ配下。
-        プロセスをまたいで **同一 port なら同じパス** であることが重要
-        （別パスだと同じ port に複数 Hub を起動してしまう）。
-        port サフィックスにより、xdist 並列や外部所有者モードで別 port の
-        Hub を立てても lock ファイルが衝突しない（ADR-0001 §4）。
-        """
-        override = os.environ.get(ENV_HUB_LOCK_PATH)
-        if override:
-            return Path(override)
-        filename = DEFAULT_LOCK_FILENAME_TEMPLATE.format(port=port)
-        return Path(tempfile.gettempdir()) / filename
 
     def _hook_project_signal(self) -> None:
         """プロジェクトの読み込み・クリア・名前変更を Worker の project に反映する。

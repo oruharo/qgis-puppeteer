@@ -8,6 +8,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **pytest warns when the Hub or QGIS runs another qgis-puppeteer.** The
+  pytest plugin compared only the source fingerprint of the plugin in QGIS,
+  which says nothing when the versions differ. It now warns when the Hub's or
+  a QGIS's `package_version` is not its own `qgis_puppeteer.__version__`, and
+  compares the fingerprint only when the versions match.
+
+- **The Hub's exit code says why it stopped.** `python -m qgis_puppeteer.hub`
+  exits with `0` when it stops normally (idle shutdown, a signal), `1` when
+  it cannot listen, `2` when it cannot write the Hub file, and `3` when a
+  live Hub already uses the same Hub file (it leaves that file alone). The
+  QGIS plugin and the pytest plugin report the code when the Hub they start
+  exits early (`qgis_puppeteer.hub_spawn.HUB_EXIT_*`).
+
 - **The Hub file.** When the Hub listens it writes its address and a token,
   new each start, to a file only its user can read (`hub.json` under
   `%LOCALAPPDATA%\qgis_puppeteer` on Windows, `$XDG_RUNTIME_DIR/qgis_puppeteer`
@@ -600,6 +613,47 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed (breaking)
 
+- **The Hub listens on a port the OS picks, and everyone finds it through the
+  Hub file.** The Hub listened on 9876 unless told otherwise, so a second Hub
+  (pytest's, or one for another Hub file) needed a free port chosen in
+  advance and passed around in environment variables, and anything already
+  on 9876 stopped the Hub from starting. The Hub now listens on port 0 on
+  127.0.0.1 and writes the address it got to the Hub file; the QGIS plugin,
+  the MCP gateway, `AutomationClient` and the pytest plugin read the address
+  and the token from that file each time they connect. In detail:
+  - `AutomationClient(url=...)` is gone. It takes `address="host:port"`,
+    `token=` and `hub_file=`: with both `address` and `token` it does not
+    read the Hub file, with `address` alone it reads the token from it, and
+    with neither it tries the Hub file's `addresses` in order.
+    `AutomationClient.address` is the address it connected to.
+  - The MCP gateway reads the Hub file each time a tool is called;
+    `hub_unreachable` carries `details.hub_file`.
+  - pytest: the `hub_port` and `hub_url` fixtures, `spawn_qgis(hub_port=)`
+    and `E2EAutomationClient(url=)` are gone. The pytest plugin starts its
+    Hub with `--hub-file` in the session's temporary folder and waits until
+    the Hub file names a live Hub. The QGIS it starts gets
+    `QPUPPETEER_HUB_FILE`, and every other `QPUPPETEER_HUB_*` variable
+    inherited from the environment is removed first (ones passed in `env=`
+    stay). Dev mode (`QPUPPETEER_E2E_USE_RUNNING_QGIS=1`) connects to the Hub
+    in `QPUPPETEER_HUB_FILE`, or in the default Hub file, and stops with an
+    error when no live Hub is there.
+  - The QGIS plugin starts no Hub when `QPUPPETEER_HUB_FILE` is set; it waits
+    for the Hub that writes that file. Without it, it uses the default Hub
+    file and starts a Hub when that file names no live Hub. **If you keep
+    `QPUPPETEER_HUB_FILE` set in your environment, a QGIS you start by hand
+    no longer starts a Hub.**
+  - A Hub is live when its Hub file exists, the `pid` in it is running and
+    the greeting at its address succeeds (`qgis_puppeteer.hub_probe`), not
+    when something accepts TCP on the port. The lock that keeps two QGIS from
+    starting a Hub at once is next to the Hub file (`hub.json.lock`), and a
+    Hub that finds a live Hub on its Hub file exits instead of taking it
+    over.
+  - Logs are next to the Hub file: the Hub's own log `hub.log`, and the
+    output of a Hub the QGIS plugin starts `hub.spawn.log`
+    (`QPUPPETEER_HUB_LOG_FILE` still moves it).
+  Use the same version of qgis-puppeteer, pytest-qgis-puppeteer and the QGIS
+  plugin.
+
 - **Connecting to the Hub needs its token (protocol version 2).** Anything
   that could open a WebSocket to the Hub's port could list the QGIS
   instances, send them commands (including `execute_python`) and register as
@@ -770,7 +824,34 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whether the code captured a value. The MCP gateway response shape is unchanged
   (still JSON-formatted for Claude).
 
+### Removed
+
+- **The environment variables `QPUPPETEER_HUB_URL`, `QPUPPETEER_HUB_HOST`,
+  `QPUPPETEER_HUB_PORT`, `QPUPPETEER_HUB_ORIGIN`, `QPUPPETEER_E2E_HUB_URL` and
+  `QPUPPETEER_HUB_LOCK_PATH`.** The Hub file says where the Hub is (see
+  Changed); point everything at another Hub with `QPUPPETEER_HUB_FILE`. The
+  Origin header is always `http://localhost`.
+
+- **The Hub's pid file and `--no-pid-file`.** The Hub file carries the
+  Hub's `pid`.
+
 ### Fixed
+
+- **A Hub that cannot listen exits with an error.** It exited with 0, as if
+  another Hub had won the port, so whoever started it could not tell a
+  failure from a normal stop. It now exits with 1 and logs why.
+
+- **A Hub started through a `.bat` launcher is stopped when it does not
+  come up.** On Windows the QGIS plugin starts the Hub through
+  `python-qgis-ltr.bat`, so the process it held was `cmd.exe`; killing it
+  after a startup timeout left the Hub's Python running. It now stops the
+  whole process tree (`taskkill /T`; on POSIX the Hub's process group).
+
+- **Hubs no longer share one log.** Every Hub wrote to
+  `%APPDATA%\qgis_puppeteer\hub.log` and every started Hub's output went to
+  `<TEMP>/qgis_puppeteer.spawn.log`, so pytest's Hub and the one QGIS started
+  for you wrote over each other's lines. Each Hub now logs next to its Hub
+  file.
 
 - **A reply with an error code the reader does not know is no longer dropped.**
   Decoding failed on an unknown `error.code`, so the reply was thrown away and

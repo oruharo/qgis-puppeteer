@@ -48,7 +48,7 @@ qgis-puppeteer は QGIS を **WebSocket 経由で外部から操作する** 基�
 ```
 [Claude Desktop / pytest / your script]
                 ↓ WebSocket
-        [qgis-puppeteer Hub]   ← 単一ポート、ルーティング
+        [qgis-puppeteer Hub]   ← 1 つのポート（OS が選ぶ）、ルーティング
                 ↓ WebSocket (Worker dial out)
         [QGIS + QGIS Puppeteer plugin]
 ```
@@ -165,7 +165,9 @@ gateway を `pip install` せず、`uvx` に GitHub から取らせてもよい�
 ### 2. QGIS を起動
 
 QGIS が起動すると QGIS Puppeteer プラグインが自動的に Hub を spawn し、
-Worker として登録される。Hub のポートは既定 `9876`（127.0.0.1 のみ）。
+Worker として登録される。Hub は 127.0.0.1 の空いたポート（OS が選ぶ）で待ち受け、
+そのアドレスと接続の token を **Hub ファイル**（[Hub 接続関連](#hub-接続関連)）に書く。
+MCP gateway は、つなぐたびにこのファイルを読む。
 
 ### 3. Claude Desktop を起動して試す
 
@@ -211,7 +213,8 @@ import asyncio
 from qgis_puppeteer import AutomationClient
 
 async def main():
-    async with AutomationClient(url="ws://127.0.0.1:9876") as client:
+    # Hub ファイル（QPUPPETEER_HUB_FILE、無ければ既定の場所）からアドレスと token を読む
+    async with AutomationClient() as client:
         # 利用可能な instance（QGIS プロセス）を一覧
         instances = await client.list_instances()
         print(f"Found {len(instances)} QGIS instance(s)")
@@ -353,8 +356,9 @@ qgis_command = ["scripts/launcher.bat", "--config", "e2e", "--feature", "auth"]
 使わない。両方を書いてもエラーにはならず、`qgis_command` が勝つ。書いた場所は問わない
 （ini の `qgis_command` は、CLI 引数の `--qgis-bin` より勝つ）。`qgis_bin` は、
 `qgis_python` を書いていないときに、Hub を起こす Python を探す場所としてだけ使う。
-`QPUPPETEER_HUB_PORT` 等の env は Worker に継承されるので、launcher 側でそれを QGIS に
-渡せばよい。
+pytest は起こす QGIS の env に `QPUPPETEER_HUB_FILE`（pytest の Hub の Hub ファイル）を
+入れるので、launcher 側でそれを QGIS に渡せばよい。pytest を起こしたシェルにある
+ほかの `QPUPPETEER_HUB_*` は、QGIS の env から外す。
 
 ### 2. 失敗時の診断バンドル
 
@@ -618,15 +622,13 @@ from pytest_qgis_puppeteer.spawn import spawn_qgis
 
 QGIS_BIN = "C:/Program Files/QGIS 3.34.6/bin/qgis-ltr-bin.exe"
 
-def test_two_workers_compare(automation_client, hub_port):
+def test_two_workers_compare(automation_client):
     with spawn_qgis(
-        hub_port=hub_port,
         automation_client=automation_client,
         qgis_bin=QGIS_BIN,
         args=["--profile", "A"],
         label="worker-A",
     ) as worker_a, spawn_qgis(
-        hub_port=hub_port,
         automation_client=automation_client,
         qgis_bin=QGIS_BIN,
         args=["--profile", "B"],
@@ -704,11 +706,10 @@ pytest test_e2e/
 Windows の cmd では `set QPUPPETEER_E2E_USE_RUNNING_QGIS=1`、PowerShell では
 `$env:QPUPPETEER_E2E_USE_RUNNING_QGIS = "1"`。
 
-繋ぐ先は `ws://127.0.0.1:9876`（QGIS のプラグインが自分で起こす Hub）。別の Hub に
-繋ぐなら `QPUPPETEER_E2E_HUB_URL` に `ws://host:port` を書く（ポートは省けない）。
-相乗りする QGIS は、`QPUPPETEER_HUB_HOST` / `QPUPPETEER_HUB_PORT` /
-`QPUPPETEER_HUB_URL` を立てずに起こす。どれかが立っていると、プラグインは Hub を
-起こさない（[Hub 接続関連](#hub-接続関連)）。
+繋ぐ先は、`QPUPPETEER_HUB_FILE` の Hub ファイルに書かれた Hub。立っていなければ
+既定の Hub ファイルの Hub（QGIS のプラグインが自分で起こす Hub）。その Hub が
+動いていなければ、pytest はテストを始めずに止まる。相乗りする QGIS とは同じ
+Hub ファイルを使う（[Hub 接続関連](#hub-接続関連)）。
 
 dev モードでは、`fresh_qgis` と `spawn_qgis()` のテストは skip になる。未捕捉例外と
 メッセージログでテストを落とす判定もしない。
@@ -803,10 +804,9 @@ import pytest
 from pytest_qgis_puppeteer.spawn import spawn_qgis
 
 @pytest.fixture(scope="session")
-def qgis_process(automation_client, hub_port):
-    # QPUPPETEER_HUB_PORT などは spawn_qgis が足す。渡すのはホスト固有の env だけ
+def qgis_process(automation_client):
+    # QPUPPETEER_HUB_FILE などは spawn_qgis が足す。渡すのはホスト固有の env だけ
     with spawn_qgis(
-        hub_port=hub_port,
         automation_client=automation_client,
         command=["scripts/launcher.bat", "--name", "e2e"],
         env={"MYAPP_CONFIG": "e2e"},
@@ -2781,20 +2781,32 @@ QGIS の操作は `await client.call("qgis_list_layers")` のように、
 
 | 変数 | 既定 | 用途 |
 |---|---|---|
-| `QPUPPETEER_HUB_HOST` | `127.0.0.1` | QGIS プラグインが繋ぐ Hub のホスト |
-| `QPUPPETEER_HUB_PORT` | `9876` | QGIS プラグインが繋ぐ Hub のポート |
-| `QPUPPETEER_HUB_URL` | — | `ws://host:port` を直接指定（host/port より優先）。MCP gateway が読むのはこちらだけ |
-| `QPUPPETEER_HUB_ORIGIN` | `http://localhost` | 登録時の Origin ヘッダ |
+| `QPUPPETEER_HUB_FILE` | 下の「既定の場所」 | Hub ファイルの場所。Hub はここに書き、QGIS プラグイン・MCP gateway・`AutomationClient`・pytest はここを読む |
 
-QGIS プラグインは、`QPUPPETEER_HUB_HOST` / `QPUPPETEER_HUB_PORT` /
-`QPUPPETEER_HUB_URL` のどれかが立っていると、**Hub を自分では起動しない**。
-既に動いている Hub に繋ぐだけで、Hub が無ければ現れるまで繋ぎ直し続ける。
+Hub は待ち受けを始めると、そのアドレス（`127.0.0.1:<ポート>`。ポートは OS が
+選ぶ）・起動ごとに変わる token・pid を **Hub ファイル** に書き、止まるときに消す。
+Hub につなぐ側は、つなぐたびにこのファイルを読む。ファイルは本人だけが読める
+（Windows は既定の ACL、POSIX は 0600）。
+
+既定の場所:
+
+- Windows: `%LOCALAPPDATA%\qgis_puppeteer\hub.json`
+- それ以外: `$XDG_RUNTIME_DIR/qgis_puppeteer/hub.json`。`XDG_RUNTIME_DIR` が無ければ
+  `~/.local/state/qgis_puppeteer/hub.json`
+
+同じフォルダに、Hub のログ `hub.log`、プラグインが Hub を起こすときのロック
+`hub.json.lock`、起こした Hub の標準出力・標準エラー `hub.spawn.log` ができる。
+
+QGIS プラグインは、`QPUPPETEER_HUB_FILE` が**立っていると Hub を自分では起動しない**。
+そのファイルを書く Hub に繋ぐだけで、Hub が無ければ現れるまで繋ぎ直し続ける。
 pytest の fixture のように、Hub を別に起こす使い方のための動きである。
+立っていなければ既定の Hub ファイルを見て、生きた Hub が無ければ自分で起こす。
 
-- プラグインが自分で起こす Hub は、いつも既定のポート `9876` で立つ。
-- 別のポートを使うなら、そのポートの Hub を先に起こしてから QGIS を起動する。
-- Claude Desktop などの MCP gateway を別のポートに向けるときは、
-  `QPUPPETEER_HUB_PORT` ではなく `QPUPPETEER_HUB_URL` を立てる。
+- **`QPUPPETEER_HUB_FILE` をシェルやユーザーの環境変数に常に立てておくと、
+  QGIS を普通に起動しても Hub が起きない。** Hub ファイルを動かしたいだけなら、
+  その Hub を先に起こしてから QGIS を起動する。
+- Claude Desktop などの MCP gateway を別の Hub に向けるときは、gateway の env
+  （`claude_desktop_config.json` の `env`）に、その Hub の `QPUPPETEER_HUB_FILE` を立てる。
 
 ### Worker 関連
 
@@ -2805,8 +2817,7 @@ pytest の fixture のように、Hub を別に起こす使い方のための動
 | `QPUPPETEER_WORKER_TAKEOVER` | unset | `1` で同時同 label 衝突時に既存 active を奪取（連続再起動の開発ループ向け） |
 | `QPUPPETEER_WORKER_LABEL_SUFFIX` | unset | `1` で同時同 label 衝突時に `A (2)` 等へ自動 rename |
 | `QPUPPETEER_HUB_PYTHON` | — | Hub spawn 用 Python launcher を明示指定（自動検出失敗時） |
-| `QPUPPETEER_HUB_LOG_FILE` | `<TEMP>/qgis_puppeteer.spawn.log` | Hub subprocess の stdout/stderr 出力先 |
-| `QPUPPETEER_HUB_LOCK_PATH` | OS 一時ディレクトリ | Hub auto-spawn 用ロックファイル（port 別） |
+| `QPUPPETEER_HUB_LOG_FILE` | Hub ファイルの隣の `hub.spawn.log` | Hub subprocess の stdout/stderr 出力先 |
 
 ### 信頼 / テスト関連
 
@@ -2829,7 +2840,6 @@ QGIS（session の QGIS・`fresh_qgis`・`spawn_qgis()`）には、立ってい�
 | `QPUPPETEER_QGIS_PYTHON` | QGIS 同梱 Python launcher（未指定なら `qgis_bin` の隣、次に `OSGEO4W_ROOT/bin` から探す） |
 | `QPUPPETEER_QGIS_ARGS` | 追加引数（shell-style） |
 | `QPUPPETEER_E2E_USE_RUNNING_QGIS` | `1` で既存 QGIS に相乗り（dev モード） |
-| `QPUPPETEER_E2E_HUB_URL` | dev モード時の既存 Hub URL（既定 `ws://127.0.0.1:9876`） |
 | `QPUPPETEER_META_CHILD` | `--env=all` / `--env=A,B` の meta-parent から起動された子 invocation で `1` がセットされる（読み取り専用 signal） |
 
 ### MCP gateway
@@ -2889,8 +2899,10 @@ coverage が有効化される。
 
 **症状**: ツールの呼び出しが `{"error": {"code": "hub_unreachable", ...}}` で返る。
 
-**原因**: MCP gateway が Hub（既定 `ws://127.0.0.1:9876`）に繋がらない。gateway は
-起動時には繋がず、ツールを呼ぶたびに繋ぐので、gateway が動いていても出る。
+**原因**: MCP gateway が Hub に繋がらない。gateway はツールを呼ぶたびに Hub ファイル
+（[Hub 接続関連](#hub-接続関連)）を読んで繋ぐので、gateway が動いていても出る。
+Hub ファイルが無い・読めないときも `hub_unreachable` になる（`details.hub_file` に
+読んだ場所が入る）。
 上から順に確かめる:
 
 1. QGIS が起動しているか
@@ -2900,11 +2912,10 @@ coverage が有効化される。
    と同じ手順で入れる
 3. Hub が起動できたか。QGIS に「QGIS Puppeteer: Hub startup failed」が出ていれば
    [Hub spawn 失敗](#hub-spawn-失敗) へ
-4. 繋ぎ先と待ち受け先が合っているか。プラグインが自分で起こす Hub はいつも
-   `127.0.0.1:9876` で待ち受ける。gateway に `QPUPPETEER_HUB_URL`
-   （`claude_desktop_config.json` の `env` など）で別のポートを指していないか。
-   QGIS 側に `QPUPPETEER_HUB_HOST` / `QPUPPETEER_HUB_PORT` / `QPUPPETEER_HUB_URL`
-   が立っていると、プラグインは Hub を起こさない（[Hub 接続関連](#hub-接続関連)）
+4. gateway と QGIS が同じ Hub ファイルを見ているか。gateway に `QPUPPETEER_HUB_FILE`
+   （`claude_desktop_config.json` の `env` など）で別のファイルを指していないか。
+   QGIS 側に `QPUPPETEER_HUB_FILE` が立っていると、プラグインは Hub を起こさない
+   （[Hub 接続関連](#hub-接続関連)）
 5. QGIS を起こした直後なら、Hub がまだ待ち受けていないだけのことがある。
    `qgis_wait_ready` を先に呼ぶ。これは Hub が現れるまで `timeout_s` の内で待つ
 
@@ -3086,10 +3097,10 @@ Locator の操作は見つかるまで待つので、時間切れの `WidgetNotA
 
 **原因の切り分け**:
 
-1. `<TEMP>/qgis_puppeteer.spawn.log` を確認（Python 起動前の fatal がここに出る）
-2. `%APPDATA%\qgis_puppeteer\hub.log` を確認（Python 側の logger 出力）
-3. ポート衝突: 既に何かが `127.0.0.1:9876` を使ってないか
-4. QGIS 付属の Python launcher（`python-qgis-ltr.bat` / `python-qgis.bat`）が
+1. Hub ファイルの隣の `hub.spawn.log` を確認（Python 起動前の fatal がここに出る。
+   既定の場所は [Hub 接続関連](#hub-接続関連)）
+2. 同じフォルダの `hub.log` を確認（Python 側の logger 出力）
+3. QGIS 付属の Python launcher（`python-qgis-ltr.bat` / `python-qgis.bat`）が
    見つからない。プラグインは `OSGEO4W_ROOT/bin` と QGIS の実行ファイルの隣を探す
    → `QPUPPETEER_HUB_PYTHON` に launcher のパスを書く
 
@@ -3399,10 +3410,10 @@ Issue / PR: <https://github.com/oruharo/qgis-puppeteer/issues>
 1. コードを更新する。`pip install` で入れた gateway は入れ直す（`uvx --from ...@dev` は
    新しいセッションで最新の commit を取る）。プラグインのフォルダは、コピーで入れたなら
    新しいものをコピーし直す（ジャンクションなら `git pull` で済む）
-2. Hub プロセスを止める。プラグインが起こした Hub の pid は
-   `%APPDATA%\qgis_puppeteer\hub-9876.pid` の 1 行目にある:
+2. Hub プロセスを止める。プラグインが起こした Hub の pid は、Hub ファイル
+   （既定 `%LOCALAPPDATA%\qgis_puppeteer\hub.json`）の `pid` にある:
    ```powershell
-   Stop-Process -Id (Get-Content "$env:APPDATA\qgis_puppeteer\hub-9876.pid" -TotalCount 1)
+   Stop-Process -Id (Get-Content "$env:LOCALAPPDATA\qgis_puppeteer\hub.json" | ConvertFrom-Json).pid
    ```
    QGIS は起動したままでよい — Worker が数秒で
    Hub を立て直して再接続する。**instance_id は変わる**（grace は Hub の

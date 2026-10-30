@@ -20,7 +20,6 @@ import asyncio
 import contextlib
 import json
 import os
-import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -28,7 +27,7 @@ from typing import Any
 
 import pytest
 from qgis_puppeteer.client import AutomationClient, RegisterError
-from qgis_puppeteer.hub_file import ENV_HUB_FILE
+from qgis_puppeteer.hub_file import ENV_HUB_FILE, HubFileInfo, write_hub_file
 
 # skip するのは mcp extra が入っていない環境だけ。gateway 側の import 失敗
 # （mcp のメジャー不一致など）まで skip に巻き込むと、テストが 1 本も
@@ -50,14 +49,12 @@ from tests.test_client import _FakeWorker, fake_hub_server
 # ============================================================
 
 
-def _build_test_lifespan(
-    hub_url: str,
-) -> Any:
-    """テスト用 lifespan：指定 URL の AutomationClient を開く。"""
+def _build_test_lifespan() -> Any:
+    """テスト用 lifespan：``fake_hub_server`` の Hub に AutomationClient を開く。"""
 
     @asynccontextmanager
     async def _lifespan(_server: Any) -> AsyncIterator[GatewayContext]:
-        client = AutomationClient(url=hub_url)
+        client = AutomationClient()
         await client.connect()
         try:
             yield GatewayContext(client=client)
@@ -65,6 +62,22 @@ def _build_test_lifespan(
             await client.close()
 
     return _lifespan
+
+
+def _env_hub_file() -> Path:
+    """``fake_hub_server`` が向けた Hub ファイル。"""
+    return Path(os.environ[ENV_HUB_FILE])
+
+
+def _unreachable_hub_file(tmp_path: Path) -> Path:
+    """誰も待っていないアドレス（127.0.0.1:1）を書いた Hub ファイル。"""
+    hub_file = tmp_path / "hub.json"
+    write_hub_file(hub_file, HubFileInfo(addresses=("127.0.0.1:1",), token="t"))
+    return hub_file
+
+
+# 接続しない（get_client を差し替える・記述子だけ見る）テストの Hub ファイル
+_UNUSED_HUB_FILE = Path("unused-hub.json")
 
 
 def _extract_text(result: CallToolResult) -> str:
@@ -94,7 +107,7 @@ class TestMcpGatewayListInstances:
                 await worker.start()
                 await worker.ready.wait()
 
-                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                gateway = build_gateway(lifespan=_build_test_lifespan())
                 async with Client(gateway, raise_exceptions=True) as client:
                     result = await client.call_tool("qgis_list_instances", {})
                     return json.loads(_extract_text(result))
@@ -121,7 +134,7 @@ class TestMcpGatewayListInstances:
                 worker = _FakeWorker(hub_url, label="alpha", pid=1111)
                 await worker.start()
                 await worker.ready.wait()
-                ctx = GatewayContext(url=hub_url, origin=DEFAULT_ORIGIN)
+                ctx = GatewayContext(hub_file=_env_hub_file(), origin=DEFAULT_ORIGIN)
 
                 @asynccontextmanager
                 async def _lifespan(_server: Any) -> AsyncIterator[GatewayContext]:
@@ -171,7 +184,7 @@ class TestMcpGatewayListInstances:
                 worker = _FakeWorker(hub_url, label="alpha", pid=1111)
                 await worker.start()
                 await worker.ready.wait()
-                ctx = GatewayContext(url=hub_url, origin=DEFAULT_ORIGIN)
+                ctx = GatewayContext(hub_file=_env_hub_file(), origin=DEFAULT_ORIGIN)
 
                 @asynccontextmanager
                 async def _lifespan(_server: Any) -> AsyncIterator[GatewayContext]:
@@ -220,7 +233,7 @@ class TestMcpGatewayListInstances:
                 worker = _FakeWorker(hub_url, label="alpha", pid=1111)
                 await worker.start()
                 await worker.ready.wait()
-                ctx = GatewayContext(url=hub_url, origin=DEFAULT_ORIGIN)
+                ctx = GatewayContext(hub_file=_env_hub_file(), origin=DEFAULT_ORIGIN)
 
                 @asynccontextmanager
                 async def _lifespan(_server: Any) -> AsyncIterator[GatewayContext]:
@@ -254,7 +267,7 @@ class TestMcpGatewayListInstances:
                 worker = _FakeWorker(hub_url, label="alpha", pid=1111)
                 await worker.start()
                 await worker.ready.wait()
-                ctx = GatewayContext(url=hub_url, origin=DEFAULT_ORIGIN)
+                ctx = GatewayContext(hub_file=_env_hub_file(), origin=DEFAULT_ORIGIN)
 
                 @asynccontextmanager
                 async def _lifespan(_server: Any) -> AsyncIterator[GatewayContext]:
@@ -306,7 +319,7 @@ class TestMcpGatewayListInstances:
                 }
                 await worker.start()
                 await worker.ready.wait()
-                ctx = GatewayContext(url=hub_url, origin=DEFAULT_ORIGIN)
+                ctx = GatewayContext(hub_file=_env_hub_file(), origin=DEFAULT_ORIGIN)
 
                 @asynccontextmanager
                 async def _lifespan(_server: Any) -> AsyncIterator[GatewayContext]:
@@ -347,7 +360,7 @@ class TestMcpGatewayListInstances:
 
         async def run() -> tuple[bool, dict[str, Any]]:
             async with fake_hub_server() as (_, hub_url):
-                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                gateway = build_gateway(lifespan=_build_test_lifespan())
                 async with Client(gateway, raise_exceptions=True) as client:
                     result = await client.call_tool("qgis_list_layers", {})
                     return bool(result.is_error), json.loads(_extract_text(result))
@@ -389,7 +402,7 @@ class TestMcpGatewayListInstances:
 
         async def run() -> dict[str, Any]:
             async with fake_hub_server() as (_, hub_url):
-                ctx = GatewayContext(url=hub_url, origin=DEFAULT_ORIGIN)
+                ctx = GatewayContext(hub_file=_env_hub_file(), origin=DEFAULT_ORIGIN)
 
                 @asynccontextmanager
                 async def _lifespan(_server: Any) -> AsyncIterator[GatewayContext]:
@@ -418,7 +431,7 @@ class TestMcpGatewayListInstances:
         async def run() -> dict[str, Any]:
             async with fake_hub_server() as (_, hub_url):
                 Path(os.environ[ENV_HUB_FILE]).unlink()
-                ctx = GatewayContext(url=hub_url, origin=DEFAULT_ORIGIN)
+                ctx = GatewayContext(hub_file=_env_hub_file(), origin=DEFAULT_ORIGIN)
 
                 @asynccontextmanager
                 async def _lifespan(_server: Any) -> AsyncIterator[GatewayContext]:
@@ -437,7 +450,7 @@ class TestMcpGatewayListInstances:
         assert payload["error"]["code"] == "hub_unreachable"
         assert payload["error"]["details"]["type"] == "HubFileError"
 
-    def test_wait_ready_keeps_waiting_while_the_hub_is_not_listening(self) -> None:
+    def test_wait_ready_keeps_waiting_while_the_hub_is_not_listening(self, tmp_path: Path) -> None:
         """起動直後（Hub がまだ listen していない）に呼んでも即落ちしない。
 
         他のツールは hub_unreachable を即返すが、wait_ready は「まずこれを呼べ」と
@@ -445,12 +458,9 @@ class TestMcpGatewayListInstances:
         """
 
         async def run() -> tuple[dict[str, Any], dict[str, Any]]:
-            # 先にポートを確保して閉じ、その番号で「まだ居ない Hub」を指す
-            with socket.socket() as probe:
-                probe.bind(("127.0.0.1", 0))
-                port = probe.getsockname()[1]
-            url = f"ws://127.0.0.1:{port}"
-            ctx = GatewayContext(url=url, origin=DEFAULT_ORIGIN)
+            # まだ無い Hub ファイルで「まだ居ない Hub」を指す
+            hub_file = tmp_path / "hub.json"
+            ctx = GatewayContext(hub_file=hub_file, origin=DEFAULT_ORIGIN)
 
             @asynccontextmanager
             async def _lifespan(_server: Any) -> AsyncIterator[GatewayContext]:
@@ -469,7 +479,7 @@ class TestMcpGatewayListInstances:
                 # (2) 待っている最中に Hub と Worker が立つ → ok
                 async def hub_comes_up_later() -> None:
                     await asyncio.sleep(0.8)
-                    async with fake_hub_server(port=port):
+                    async with fake_hub_server(hub_file=hub_file) as (_, url):
                         worker = _FakeWorker(url, label="late", pid=7)
                         await worker.start()
                         await worker.ready.wait()
@@ -502,7 +512,7 @@ class TestMcpGatewayListInstances:
                 worker = _FakeWorker(hub_url, label="alpha", pid=1111)
                 await worker.start()
                 await worker.ready.wait()
-                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                gateway = build_gateway(lifespan=_build_test_lifespan())
                 async with Client(gateway, raise_exceptions=True) as client:
                     result = await client.call_tool("qgis_wait_ready", {"timeout_s": 5})
                     payload = json.loads(_extract_text(result))
@@ -526,7 +536,7 @@ class TestMcpGatewayListInstances:
                 await worker.start()
                 await worker.ready.wait()
                 hub.unresponsive.add("worker-alpha-1111")
-                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                gateway = build_gateway(lifespan=_build_test_lifespan())
                 async with Client(gateway, raise_exceptions=True) as client:
                     result = await client.call_tool("qgis_wait_ready", {"timeout_s": 0.3})
                     return bool(result.is_error), json.loads(_extract_text(result))
@@ -550,7 +560,7 @@ class TestMcpGatewayListInstances:
                         "message": "Invalid label: too_long",
                     }
                 )
-                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                gateway = build_gateway(lifespan=_build_test_lifespan())
                 async with Client(gateway, raise_exceptions=True) as client:
                     loop = asyncio.get_running_loop()
                     started = loop.time()
@@ -589,7 +599,7 @@ class TestMcpGatewayToolDispatch:
                 await worker.start()
                 await worker.ready.wait()
 
-                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                gateway = build_gateway(lifespan=_build_test_lifespan())
                 async with Client(gateway, raise_exceptions=True) as client:
                     result = await client.call_tool("qgis_list_layers", {})
                     text = _extract_text(result)
@@ -621,7 +631,7 @@ class TestMcpGatewayToolDispatch:
                 await worker.start()
                 await worker.ready.wait()
 
-                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                gateway = build_gateway(lifespan=_build_test_lifespan())
                 async with Client(gateway, raise_exceptions=True) as client:
                     result = await client.call_tool("qgis_execute_python", {"code": "1/0"})
                     return json.loads(_extract_text(result))
@@ -659,7 +669,7 @@ class TestMcpGatewayStickyInstance:
                 await w_a.ready.wait()
                 await w_b.ready.wait()
 
-                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                gateway = build_gateway(lifespan=_build_test_lifespan())
                 async with Client(gateway, raise_exceptions=True) as client:
                     # sticky を b に設定
                     use_res = await client.call_tool("qgis_use_instance", {"selector": "b"})
@@ -696,7 +706,7 @@ class TestMcpGatewayStickyInstance:
                 await w_a.ready.wait()
                 await w_b.ready.wait()
 
-                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                gateway = build_gateway(lifespan=_build_test_lifespan())
                 async with Client(gateway, raise_exceptions=True) as client:
                     await client.call_tool("qgis_use_instance", {"selector": "b"})
                     # instance= で明示指定すると sticky を上書き
@@ -713,7 +723,7 @@ class TestMcpGatewayStickyInstance:
                 await w.start()
                 await w.ready.wait()
 
-                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                gateway = build_gateway(lifespan=_build_test_lifespan())
                 async with Client(gateway, raise_exceptions=True) as client:
                     result = await client.call_tool(
                         "qgis_use_instance", {"selector": "does-not-exist"}
@@ -735,7 +745,7 @@ class TestMcpGatewayToolInventory:
                 await w.start()
                 await w.ready.wait()
 
-                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                gateway = build_gateway(lifespan=_build_test_lifespan())
                 async with Client(gateway, raise_exceptions=True) as client:
                     listed = await client.list_tools()
                     return [t.name for t in listed.tools]
@@ -808,7 +818,7 @@ class TestMcpGatewayRenderMap:
                 worker.responder = responder
                 await worker.start()
                 await worker.ready.wait()
-                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                gateway = build_gateway(lifespan=_build_test_lifespan())
                 async with Client(gateway, raise_exceptions=True) as client:
                     return await client.call_tool("qgis_render_map", args)
 
@@ -868,7 +878,7 @@ class TestMcpGatewayWidgetFailures:
                 worker.responder = responder
                 await worker.start()
                 await worker.ready.wait()
-                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                gateway = build_gateway(lifespan=_build_test_lifespan())
                 async with Client(gateway, raise_exceptions=True) as client:
                     return await client.call_tool(tool, args)
 
@@ -1031,7 +1041,7 @@ class TestMcpGatewayCheckActionability:
                 worker.responder = responder
                 await worker.start()
                 await worker.ready.wait()
-                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                gateway = build_gateway(lifespan=_build_test_lifespan())
                 async with Client(gateway, raise_exceptions=True) as client:
                     return await client.call_tool(
                         "qgis_check_actionability", {"selector": {"object_name": "ok"}}
@@ -1091,7 +1101,7 @@ class TestMcpGatewayWaitFor:
                 worker.responder = responder
                 await worker.start()
                 await worker.ready.wait()
-                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                gateway = build_gateway(lifespan=_build_test_lifespan())
                 async with Client(gateway, raise_exceptions=True) as client:
                     return await client.call_tool("qgis_wait_for", args)
 
@@ -1369,7 +1379,7 @@ class TestMcpGatewayWaitFor:
                 worker.responder = responder
                 await worker.start()
                 await worker.ready.wait()
-                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                gateway = build_gateway(lifespan=_build_test_lifespan())
                 async with Client(gateway, raise_exceptions=True) as client:
                     await client.call_tool("qgis_record_start", {"name": "wait"})
                     await client.call_tool(
@@ -1406,7 +1416,7 @@ class TestMcpGatewayWorkerRecords:
                 worker.responder = responder
                 await worker.start()
                 await worker.ready.wait()
-                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                gateway = build_gateway(lifespan=_build_test_lifespan())
                 async with Client(gateway, raise_exceptions=True) as client:
                     return await client.call_tool(tool, args)
 
@@ -1459,7 +1469,7 @@ class TestMcpGatewayRecording:
                 worker.responder = responder
                 await worker.start()
                 await worker.ready.wait()
-                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                gateway = build_gateway(lifespan=_build_test_lifespan())
                 async with Client(gateway, raise_exceptions=True) as client:
                     await client.call_tool("qgis_list_layers", {})  # 記録前：残らない
                     started = json.loads(
@@ -1528,13 +1538,13 @@ class TestMcpGatewayHubUnreachable:
     error JSON を一貫して返すのが仕様。
     """
 
-    def test_tool_returns_hub_unreachable_when_cannot_connect(self) -> None:
+    def test_tool_returns_hub_unreachable_when_cannot_connect(self, tmp_path: Path) -> None:
         # 127.0.0.1:1 は通常の環境では listen されていないので ConnectionRefused。
-        unreachable_url = "ws://127.0.0.1:1"
+        hub_file = _unreachable_hub_file(tmp_path)
 
         @asynccontextmanager
         async def _lifespan_no_hub(_server: Any) -> AsyncIterator[GatewayContext]:
-            yield GatewayContext(url=unreachable_url, origin=DEFAULT_ORIGIN)
+            yield GatewayContext(hub_file=hub_file, origin=DEFAULT_ORIGIN)
 
         async def run() -> dict[str, Any]:
             gateway = build_gateway(lifespan=_lifespan_no_hub)
@@ -1545,15 +1555,33 @@ class TestMcpGatewayHubUnreachable:
         payload = _run(run())
         assert payload["error"]["code"] == "hub_unreachable"
         assert "QGIS Puppeteer Hub" in payload["error"]["message"]
-        assert payload["error"]["details"]["url"] == unreachable_url
+        assert payload["error"]["details"]["hub_file"] == str(hub_file)
 
-    def test_layer_tool_also_returns_hub_unreachable(self) -> None:
-        """`_call` 経路（layer/python/ui など）でも同じ扱い。"""
-        unreachable_url = "ws://127.0.0.1:1"
+    def test_a_missing_hub_file_returns_hub_unreachable(self, tmp_path: Path) -> None:
+        """Hub ファイルが無い（Hub がまだ起きていない）のも hub_unreachable。"""
+        hub_file = tmp_path / "hub.json"
 
         @asynccontextmanager
         async def _lifespan_no_hub(_server: Any) -> AsyncIterator[GatewayContext]:
-            yield GatewayContext(url=unreachable_url, origin=DEFAULT_ORIGIN)
+            yield GatewayContext(hub_file=hub_file, origin=DEFAULT_ORIGIN)
+
+        async def run() -> dict[str, Any]:
+            gateway = build_gateway(lifespan=_lifespan_no_hub)
+            async with Client(gateway, raise_exceptions=True) as client:
+                result = await client.call_tool("qgis_list_instances", {})
+                return json.loads(_extract_text(result))
+
+        payload = _run(run())
+        assert payload["error"]["code"] == "hub_unreachable"
+        assert payload["error"]["details"]["type"] == "HubFileError"
+
+    def test_layer_tool_also_returns_hub_unreachable(self, tmp_path: Path) -> None:
+        """`_call` 経路（layer/python/ui など）でも同じ扱い。"""
+        hub_file = _unreachable_hub_file(tmp_path)
+
+        @asynccontextmanager
+        async def _lifespan_no_hub(_server: Any) -> AsyncIterator[GatewayContext]:
+            yield GatewayContext(hub_file=hub_file, origin=DEFAULT_ORIGIN)
 
         async def run() -> dict[str, Any]:
             gateway = build_gateway(lifespan=_lifespan_no_hub)
@@ -1573,11 +1601,10 @@ class TestMcpGatewayHubUnreachable:
         何らかの理由で TimeoutError が漏れてきても Gateway 側で同じ
         error JSON に丸める保険レイヤを検証する。
         """
-        url = "ws://127.0.0.1:9999"
 
         @asynccontextmanager
         async def _lifespan_timeout(_server: Any) -> AsyncIterator[GatewayContext]:
-            ctx = GatewayContext(url=url, origin=DEFAULT_ORIGIN)
+            ctx = GatewayContext(hub_file=_UNUSED_HUB_FILE, origin=DEFAULT_ORIGIN)
 
             async def _raise_timeout() -> AutomationClient:
                 raise asyncio.TimeoutError("simulated handshake timeout")
@@ -1608,7 +1635,7 @@ class TestMcpGatewayErrorSignalling:
     def test_hub_unreachable_is_marked_as_error(self) -> None:
         @asynccontextmanager
         async def _lifespan(_server: Any) -> AsyncIterator[GatewayContext]:
-            ctx = GatewayContext(url="ws://127.0.0.1:1", origin=DEFAULT_ORIGIN)
+            ctx = GatewayContext(hub_file=_UNUSED_HUB_FILE, origin=DEFAULT_ORIGIN)
 
             async def _raise_timeout() -> AutomationClient:
                 raise asyncio.TimeoutError("simulated handshake timeout")
@@ -1643,7 +1670,7 @@ class TestMcpGatewayErrorSignalling:
                 await worker.start()
                 await worker.ready.wait()
 
-                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                gateway = build_gateway(lifespan=_build_test_lifespan())
                 async with Client(gateway, raise_exceptions=True) as client:
                     result = await client.call_tool("qgis_execute_python", {"code": "1/0"})
                     return result.is_error, json.loads(_extract_text(result))
@@ -1659,7 +1686,7 @@ class TestMcpGatewayErrorSignalling:
                 await worker.start()
                 await worker.ready.wait()
 
-                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                gateway = build_gateway(lifespan=_build_test_lifespan())
                 async with Client(gateway, raise_exceptions=True) as client:
                     result = await client.call_tool(
                         "qgis_use_instance", {"selector": "does-not-exist"}
@@ -1677,7 +1704,7 @@ class TestMcpGatewayErrorSignalling:
                 await worker.start()
                 await worker.ready.wait()
 
-                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                gateway = build_gateway(lifespan=_build_test_lifespan())
                 async with Client(gateway, raise_exceptions=True) as client:
                     result = await client.call_tool("qgis_list_layers", {})
                     return result.is_error, json.loads(_extract_text(result))
@@ -1719,7 +1746,7 @@ class TestMcpGatewayLegacyHandshake:
                 await w_a.ready.wait()
                 await w_b.ready.wait()
 
-                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                gateway = build_gateway(lifespan=_build_test_lifespan())
                 # 公式の Testing ガイドに従い、legacy では raise_exceptions を付けない
                 async with Client(gateway, mode="legacy") as client:
                     server_info = client.server_info
@@ -1747,7 +1774,7 @@ class TestMcpGatewayToolDescriptors:
     @asynccontextmanager
     async def _lifespan(_server: Any) -> AsyncIterator[GatewayContext]:
         """Hub には触らない lifespan（記述子の確認だけなら接続は不要）。"""
-        yield GatewayContext(url="ws://127.0.0.1:1", origin=DEFAULT_ORIGIN)
+        yield GatewayContext(hub_file=_UNUSED_HUB_FILE, origin=DEFAULT_ORIGIN)
 
     def _list_tools(self) -> list[Any]:
         async def run() -> list[Any]:
@@ -1862,7 +1889,7 @@ class TestMcpGatewayToolDescriptors:
                 await worker.start()
                 await worker.ready.wait()
 
-                gateway = build_gateway(lifespan=_build_test_lifespan(hub_url))
+                gateway = build_gateway(lifespan=_build_test_lifespan())
                 async with Client(gateway, raise_exceptions=True) as client:
                     result = await client.call_tool("qgis_list_layers", {})
                     return result.structured_content, json.loads(_extract_text(result))

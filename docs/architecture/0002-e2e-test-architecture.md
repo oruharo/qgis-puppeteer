@@ -191,6 +191,16 @@ async def test_login_flow(qgis):
 
 #### Hub / Worker の起動責務（E2E では pytest が Hub を所有）
 
+> **2026-10-30 改訂（Hub ファイル。ADR-0001 §4・§6・§9.3）**: ポートと環境変数での隔離は、Hub ファイルでの隔離に変えた。この節以降の `hub_port` / `QPUPPETEER_HUB_PORT` / TCP probe の記述は当初案として残す。いまは次のとおり：
+>
+> - `hub_port` / `hub_url` fixture は廃止。`hub_file` fixture が session の一時フォルダの Hub ファイルを返す。
+> - `hub_process` は `python -m qgis_puppeteer.hub --hub-file <hub_file>` を起こし（ポートは OS が選ぶ）、Hub ファイルに生きた Hub が現れる（`find_live_hub`）まで待つ。
+> - `automation_client` は `E2EAutomationClient(hub_file=hub_file)`。つなぐたびに Hub ファイルからアドレスと token を読む。
+> - 起こす QGIS の env は、受け継いだ `QPUPPETEER_HUB_*` を全部消してから `QPUPPETEER_HUB_FILE=<hub_file>` を入れる。`QPUPPETEER_HUB_FILE` が立っている QGIS は Hub を起こさない（外部所有者モード）。
+> - dev モード（`QPUPPETEER_E2E_USE_RUNNING_QGIS=1`）は `QPUPPETEER_HUB_FILE` の Hub、無ければ既定の Hub ファイルの Hub につなぐ（`QPUPPETEER_E2E_HUB_URL` は廃止）。その Hub が動いていなければテストを始めずに止まる。
+> - xdist の worker ごとの隔離は、Hub ファイル（session の一時フォルダ）が worker ごとに分かれることで保たれる。
+> - pytest は Hub と Worker の `package_version` が自分の `qgis_puppeteer.__version__` と違えば警告する。
+
 ADR-0001 Rev.4 で導入された「外部所有者モード」を採用する。pytest session fixture が Hub を独立ポートで spawn・所有し、QGIS subprocess には `QPUPPETEER_HUB_PORT` / `QPUPPETEER_HUB_HOST` env を渡すことで Worker 側の自動 spawn を抑制する。
 
 **なぜこうするか**:

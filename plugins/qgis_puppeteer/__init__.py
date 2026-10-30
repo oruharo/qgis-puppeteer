@@ -30,15 +30,19 @@ from qgis_puppeteer.hub_file import (
     read_hub_file,
     resolve_hub_file_path,
 )
+from qgis_puppeteer.hub_probe import (
+    HubProbeError,
+    describe_hub_file,
+    find_live_hub,
+    greet_hub,
+)
 from qgis_puppeteer.hub_spawn import (
-    DEFAULT_HUB_HOST,
-    DEFAULT_HUB_PORT,
     EnsureOutcome,
+    HubReady,
     HubStartupError,
     SpawnOutcome,
     default_hub_command,
-    ensure_hub_reachable,
-    tcp_probe,
+    ensure_hub,
     try_spawn_hub,
 )
 from qgis_puppeteer.hub_state import (
@@ -184,15 +188,18 @@ __all__ = [
     "default_hub_file_path",
     "read_hub_file",
     "resolve_hub_file_path",
+    # hub_probe（生きた Hub の確かめ）
+    "HubProbeError",
+    "describe_hub_file",
+    "find_live_hub",
+    "greet_hub",
     # hub_spawn（Hub 起動競合回避）
-    "DEFAULT_HUB_HOST",
-    "DEFAULT_HUB_PORT",
     "EnsureOutcome",
+    "HubReady",
     "HubStartupError",
     "SpawnOutcome",
     "default_hub_command",
-    "ensure_hub_reachable",
-    "tcp_probe",
+    "ensure_hub",
     "try_spawn_hub",
     # hub_state（Hub 純ロジック）
     "GRACE_SECONDS",

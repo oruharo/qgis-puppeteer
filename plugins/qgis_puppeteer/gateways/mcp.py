@@ -18,9 +18,10 @@ ADR-0001 §5, §7 に基づき、MCP プロトコル層を自動化層の内部�
 - AutomationClient は `@asynccontextmanager` のライフスパンで open/close する
 - sticky instance は `GatewayContext.current_instance` に保存される
 
-## 引数注入
-- 環境変数 `QPUPPETEER_HUB_URL` / `QPUPPETEER_HUB_ORIGIN` でテスト・開発用に切り替え可能
-- デフォルトは `ws://127.0.0.1:9876` / `http://localhost`
+## つなぐ先
+- Hub ファイル（`qgis_puppeteer.hub_file`）でアドレスと token を知る。
+  `QPUPPETEER_HUB_FILE`、無ければ既定の場所。接続のたびに読む
+- gateway は Hub を起こさない（QGIS のプラグインが起こす）
 """
 
 from __future__ import annotations
@@ -55,6 +56,8 @@ from qgis_puppeteer.client import (
     RequestNotSentError,
 )
 from qgis_puppeteer.gateways.recording import ENV_RECORD, McpRecorder
+from qgis_puppeteer.hub_file import resolve_hub_file_path
+from qgis_puppeteer.hub_probe import describe_hub_file
 from qgis_puppeteer.hub_state import select_by_selector
 from qgis_puppeteer.protocol import Role, error_code_value
 from qgis_puppeteer.selector_match import live_only_keys
@@ -76,10 +79,7 @@ logger = logging.getLogger("qgis_puppeteer.gateways.mcp")
 # 定数
 # ============================================================
 
-DEFAULT_HUB_URL: str = "ws://127.0.0.1:9876"
 DEFAULT_ORIGIN: str = "http://localhost"
-ENV_HUB_URL: str = "QPUPPETEER_HUB_URL"
-ENV_ORIGIN: str = "QPUPPETEER_HUB_ORIGIN"
 
 MCP_SERVER_NAME: str = "qgis-puppeteer"
 MCP_SERVER_TITLE: str = "QGIS Puppeteer"
@@ -235,8 +235,8 @@ class GatewayContext:
     時に遅延実行** する（`get_client()`）。未接続のまま再利用される限りは
     Hub・Worker の状態に影響されない。
 
-    - `url` / `origin` 指定で構築すると、`get_client()` 初回呼び出し時に
-      `AutomationClient` を自前で接続する（所有権も Context 側）。
+    - `hub_file` 指定で構築すると、`get_client()` 初回呼び出し時に
+      その Hub ファイルで `AutomationClient` を自前で接続する（所有権も Context 側）。
     - `client` を直接注入して構築するとそれをそのまま使う（テスト用。
       close は呼び出し側が lifespan 内で管理する前提）。
     - `current_instance` は `qgis_use_instance` で設定された sticky な
@@ -248,7 +248,7 @@ class GatewayContext:
     """
 
     client: AutomationClient | None = None
-    url: str | None = None
+    hub_file: Path | None = None
     origin: str = DEFAULT_ORIGIN
     current_instance: str | None = field(default=None)
     recorder: McpRecorder = field(default_factory=McpRecorder)
@@ -261,17 +261,29 @@ class GatewayContext:
         ユーザー向けエラー JSON に整形する。
         """
         if self.client is None:
-            if self.url is None:
-                raise RuntimeError("GatewayContext has neither url nor injected client")
+            if self.hub_file is None:
+                raise RuntimeError("GatewayContext has neither hub_file nor injected client")
             # McpGateway は Role.MCP_GATEWAY として Hub に自己申告する。
             # これにより Hub が Worker 転送時に `caller_role=MCP_GATEWAY` を
             # 付与し、Worker 側で Tier 3（`test.*`）ハンドラへのアクセスが
             # 自動的に遮断される（ADR-0001 §12.7）。
-            c = AutomationClient(url=self.url, origin=self.origin, role=Role.MCP_GATEWAY)
+            c = AutomationClient(hub_file=self.hub_file, origin=self.origin, role=Role.MCP_GATEWAY)
             await c.connect()
+            logger.info(
+                "Connected to the Hub at %s (Hub qgis-puppeteer %s)",
+                c.address,
+                c.hub_package_version or "?",
+            )
             self.client = c
             self._owns_client = True
         return self.client
+
+    @property
+    def hub_location(self) -> str:
+        """エラーメッセージに出す、つなぐ先（Hub ファイルの場所）。"""
+        if self.hub_file is not None:
+            return str(self.hub_file)
+        return "injected client"
 
     async def close(self) -> None:
         """自前で接続した client だけ close する（注入された client は触らない）。"""
@@ -301,13 +313,11 @@ class GatewayContext:
 async def _default_lifespan(
     server: MCPServer,
 ) -> AsyncIterator[GatewayContext]:
-    """URL/origin を覚えた `GatewayContext` を返すだけ。接続は遅延させる。
+    """Hub ファイルの場所を覚えた `GatewayContext` を返すだけ。接続は遅延させる。
 
-    環境変数 `QPUPPETEER_HUB_URL` / `QPUPPETEER_HUB_ORIGIN` があればそれを使う。
+    Hub ファイルは `QPUPPETEER_HUB_FILE`、無ければ既定の場所。
     """
-    url = os.environ.get(ENV_HUB_URL, DEFAULT_HUB_URL)
-    origin = os.environ.get(ENV_ORIGIN, DEFAULT_ORIGIN)
-    ctx = GatewayContext(url=url, origin=origin)
+    ctx = GatewayContext(hub_file=resolve_hub_file_path())
     if os.environ.get(ENV_RECORD) == "1":
         # 記録先が書けなくても gateway は立てる（記録無しで動く方がまし）
         try:
@@ -370,13 +380,13 @@ def _format_unreachable(gateway: GatewayContext, exc: BaseException) -> CallTool
             "error": {
                 "code": "hub_unreachable",
                 "message": (
-                    f"QGIS Puppeteer Hub ({gateway.url}) に接続できません。QGIS が起動し、"
-                    "QGIS Puppeteer プラグインが有効になっているか確認してください。"
+                    f"QGIS Puppeteer Hub (Hub file {gateway.hub_location}) に接続できません。"
+                    "QGIS が起動し、QGIS Puppeteer プラグインが有効になっているか確認してください。"
                 ),
                 "details": {
                     "type": type(exc).__name__,
                     "reason": str(exc),
-                    "url": gateway.url,
+                    "hub_file": gateway.hub_location,
                 },
             }
         }
@@ -420,7 +430,9 @@ async def _connect_or_exc(
         AutomationClientError,
         websockets.exceptions.WebSocketException,
     ) as e:  # noqa: BLE001 - intentional
-        logger.warning("Hub unreachable at %s: %s: %s", gateway.url, type(e).__name__, e)
+        logger.warning(
+            "Hub unreachable (Hub file %s): %s: %s", gateway.hub_location, type(e).__name__, e
+        )
         return None, e
     return client, None
 
@@ -517,7 +529,7 @@ def _may_have_run_result(
                 "details": {
                     "type": type(exc).__name__,
                     "reason": str(exc),
-                    "url": gateway.url,
+                    "hub_file": gateway.hub_location,
                 },
             }
         }
@@ -1087,15 +1099,15 @@ def _register_tools(mcp: MCPServer) -> None:  # noqa: C901 - ツール定義の�
                         "error": {
                             "code": "not_ready",
                             "message": (
-                                f"Hub ({gateway.url}) did not start listening within "
-                                f"{timeout_s}s; QGIS, or the QGIS Puppeteer plugin inside it, "
-                                "is probably not running yet"
+                                f"Hub (Hub file {gateway.hub_location}) did not start "
+                                f"listening within {timeout_s}s; QGIS, or the QGIS Puppeteer "
+                                "plugin inside it, is probably not running yet"
                             ),
                             "details": {
                                 "hub_unreachable": {
                                     "type": type(exc).__name__,
                                     "reason": str(exc),
-                                    "url": gateway.url,
+                                    "hub_file": gateway.hub_location,
                                 }
                             },
                             "instances": [],
@@ -2115,6 +2127,8 @@ def main() -> int:
         os.getpid(),
         sys.version.split()[0],
     )
+    # つなぐ先と、そこにいる Hub の版（版が違えば、ここで気づける）
+    logger.info("Hub file: %s", describe_hub_file(resolve_hub_file_path()))
     gateway = build_gateway()
     gateway.run()  # デフォルト transport=stdio
     return 0

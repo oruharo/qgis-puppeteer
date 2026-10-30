@@ -6,23 +6,31 @@ ADR-0001 §4, §6, §9 に基づき、`QCoreApplication` 上で
 
 ## 責務
 
-- 127.0.0.1:9876 で WebSocket listen（Origin 完全一致検証付き）
-- Hub ファイル（`qgis_puppeteer.hub_file`）に接続情報と token を書く
+- 127.0.0.1 の OS が選んだポート（port 0）で WebSocket listen（Origin 完全一致検証付き）
+- Hub ファイル（`qgis_puppeteer.hub_file`）に接続情報（アドレス・token・pid・版）を書く。
+  つなぐ側はこのファイルでアドレスと token を知る
 - 接続ごとに挨拶（`qgis_puppeteer.handshake`）：hello を送り、proof の通った
   register が来るまでほかのメッセージを受け付けない
 - 接続イベントを `HubState` に委譲
 - `request` / `response` の双方向ルーティング（`id` で対応付け）
 - grace 期限切れの定期 sweep
 - 全接続 0 + 30 秒経過で自己終了
-- PID ファイル（`%APPDATA%\\qgis_puppeteer\\hub.pid`）管理
 
 ## 実行方法
 
 ```
-python -m qgis_puppeteer.hub
+python -m qgis_puppeteer.hub [--hub-file PATH] [--port N]
 ```
 
-Worker プラグインから `subprocess.Popen` で DETACHED 起動される想定。
+Worker プラグインから `subprocess.Popen` で DETACHED 起動される想定
+（``qgis_puppeteer.hub_spawn``）。
+
+## 終了コード
+
+- 0：ふつうに止まった（idle 自動終了・シグナル）
+- 1：bind に失敗した
+- 2：Hub ファイルを書けなかった
+- 3：同じ Hub ファイルで生きた Hub がもういる（上書きせずに降りた）
 """
 
 from __future__ import annotations
@@ -64,6 +72,13 @@ from qgis_puppeteer.hub_file import (
     resolve_hub_file_path,
     write_hub_file,
 )
+from qgis_puppeteer.hub_probe import find_live_hub
+from qgis_puppeteer.hub_spawn import (
+    HUB_EXIT_ALREADY_RUNNING,
+    HUB_EXIT_BIND_FAILED,
+    HUB_EXIT_HUB_FILE_FAILED,
+    hub_log_path,
+)
 from qgis_puppeteer.hub_state import (
     IDLE_SHUTDOWN_DELAY_SECONDS,
     LIVENESS_PROBE_SECONDS,
@@ -101,12 +116,10 @@ if TYPE_CHECKING:
 # 定数
 # ============================================================
 
-HUB_PORT: int = 9876
+# 0 は OS に選ばせる（ユーザーごと・pytest の session ごとに別のポート）。
+# つなぐ側は Hub ファイルでポートを知る
+HUB_PORT: int = 0
 SWEEP_INTERVAL_MS: int = 5_000  # grace 期限切れ sweep の周期
-PID_DIR_ENV: str = "APPDATA"  # Windows 想定。%APPDATA%\qgis_puppeteer\
-PID_DIR_NAME: str = "qgis_puppeteer"  # %APPDATA% 配下のサブディレクトリ名
-LOG_FILE_NAME: str = "hub.log"
-PID_FILE_TEMPLATE: str = "hub-{port}.pid"  # port ごとに分離（ADR-0001 §4）
 # 接続してから proof の通った register が来るまで待つ時間。過ぎたら切る
 REGISTER_TIMEOUT_MS: int = 10_000
 
@@ -152,7 +165,6 @@ class Hub(QObject):
         self,
         *,
         port: int = HUB_PORT,
-        pid_file: Path | None = None,
         hub_file: Path | None = None,
         token: str | None = None,
         register_timeout_ms: int = REGISTER_TIMEOUT_MS,
@@ -160,6 +172,7 @@ class Hub(QObject):
     ) -> None:
         """
         Args:
+            port: 待ち受けるポート。0 なら OS が選ぶ
             hub_file: 接続情報を書く Hub ファイル。None なら書かない（token を
                 ``token`` で渡して直接つなぐテスト用）
             token: 挨拶の token。None なら作る（ふだんはこちら。起きるたびに変わる）
@@ -167,7 +180,6 @@ class Hub(QObject):
         """
         super().__init__(parent)
         self._port = port
-        self._pid_file = pid_file
         self._hub_file = hub_file
         self._token = token if token is not None else generate_token()
         self._register_timeout_ms = register_timeout_ms
@@ -261,23 +273,14 @@ class Hub(QObject):
             self._wrote_hub_file = True
             logger.info("Hub file: %s", self._hub_file)
 
-        if self._pid_file is not None:
-            self._pid_file.parent.mkdir(parents=True, exist_ok=True)
-            self._pid_file.write_text(f"{os.getpid()}\n{time.time()}\n")
-
         # 起動直後は全接続 0 なので idle 自動終了タイマーを起動
         self._reassess_idle_shutdown()
 
     def stop(self) -> None:
-        """listen 停止、PID ファイル削除、idle 自動終了タイマー停止。"""
+        """listen 停止、Hub ファイル削除、idle 自動終了タイマー停止。"""
         self._sweep_timer.stop()
         self._idle_shutdown_timer.stop()
         self._server.close()
-        if self._pid_file is not None:
-            try:
-                self._pid_file.unlink(missing_ok=True)
-            except OSError as e:
-                logger.warning("Failed to remove PID file: %s", e)
         if self._wrote_hub_file and self._hub_file is not None:
             # 自分の token のときだけ消す（あとから起きた別の Hub のファイルは残す）
             try:
@@ -865,29 +868,21 @@ class Hub(QObject):
 # ============================================================
 
 
-def _default_pid_file(port: int) -> Path | None:
-    """`%APPDATA%\\qgis_puppeteer\\hub-{port}.pid` を返す。APPDATA 未定義なら None。
+def _setup_logging(hub_file: Path) -> None:
+    """ローテーション付きのログを Hub ファイルの隣（``hub_log_path``）に書く。
 
-    port サフィックスで分離することで、xdist 並列や外部所有者モードで
-    複数 Hub が異なる port で同時起動しても pid ファイルが衝突しない
-    （ADR-0001 §4）。
+    Hub ファイルごとに分かれるので、別の Hub（pytest の session など）と混ざらない。
     """
-    appdata = os.environ.get(PID_DIR_ENV)
-    if not appdata:
-        return None
-    return Path(appdata) / PID_DIR_NAME / PID_FILE_TEMPLATE.format(port=port)
-
-
-def _setup_logging() -> None:
-    """ローテーション付きログ設定（§Open Questions #1）。"""
-    appdata = os.environ.get(PID_DIR_ENV)
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
-    if appdata:
-        log_path = Path(appdata) / PID_DIR_NAME / LOG_FILE_NAME
-        log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path = hub_log_path(hub_file)
+    try:
+        log_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         rotating = logging.handlers.RotatingFileHandler(
             log_path, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
         )
+    except OSError as e:
+        print(f"qgis-puppeteer Hub: cannot open the log {log_path}: {e}", file=sys.stderr)
+    else:
         handlers.append(rotating)
 
     logging.basicConfig(
@@ -898,7 +893,7 @@ def _setup_logging() -> None:
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
-    """CLI 引数をパースする。テスト時は `--port` で動的ポート指定可能。"""
+    """CLI 引数をパースする。"""
     parser = argparse.ArgumentParser(
         prog="python -m qgis_puppeteer.hub",
         description="QGIS Puppeteer Hub.",
@@ -907,12 +902,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--port",
         type=int,
         default=HUB_PORT,
-        help=f"WebSocket listen port (default: {HUB_PORT})",
-    )
-    parser.add_argument(
-        "--no-pid-file",
-        action="store_true",
-        help="Disable PID file creation (for tests).",
+        help="WebSocket listen port on 127.0.0.1 (default: 0, chosen by the OS).",
     )
     parser.add_argument(
         "--hub-file",
@@ -935,18 +925,27 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     """python -m qgis_puppeteer.hub のエントリポイント。
 
-    bind 失敗（既に別の Hub が動作中）は exit code 0 で降りる（敗者 Hub）。
-    Hub ファイルを書けなければ 2。
+    終了コードはモジュールの docstring のとおり（``HUB_EXIT_*``）。
     """
-    _setup_logging()
     args = _parse_args(sys.argv[1:] if argv is None else argv)
+    hub_file = resolve_hub_file_path(args.hub_file)
+    _setup_logging(hub_file)
+
+    # 同じ Hub ファイルの生きた Hub を上書きしない（つないでいる相手の token が変わる）
+    live = find_live_hub(hub_file)
+    if live is not None:
+        logger.info(
+            "A live Hub already uses %s (pid %s, %s); exiting",
+            hub_file,
+            live.pid,
+            ", ".join(live.addresses),
+        )
+        return HUB_EXIT_ALREADY_RUNNING
 
     app = QCoreApplication(sys.argv)
-    pid_file = None if args.no_pid_file else _default_pid_file(args.port)
     hub = Hub(
         port=args.port,
-        pid_file=pid_file,
-        hub_file=resolve_hub_file_path(args.hub_file),
+        hub_file=hub_file,
         register_timeout_ms=args.register_timeout_ms,
     )
 
@@ -954,10 +953,10 @@ def main(argv: list[str] | None = None) -> int:
         hub.start()
     except HubFileWriteError as e:
         logger.error("%s", e)
-        return 2
+        return HUB_EXIT_HUB_FILE_FAILED
     except OSError as e:
-        logger.info("Hub bind failed (other Hub already running?): %s", e)
-        return 0
+        logger.error("%s", e)
+        return HUB_EXIT_BIND_FAILED
 
     # SIGINT/SIGTERM で正常終了できるように
     def _on_signal(signum: int, _frame: object) -> None:

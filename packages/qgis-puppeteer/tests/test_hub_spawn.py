@@ -1,31 +1,31 @@
 """qgis_puppeteer.hub_spawn のユニットテスト。
 
 ADR-0001 §4 "Hub の起動競合回避" を Qt 非依存で検証する。
-TCP probe、非ブロッキング排他ロック、spawn ロジックの各層を単体テスト。
-
-実ネットワーク接続を伴うが、ローカル listen ソケットを作る程度なので
-`@pytest.mark.integration` マークは付けない（ユニット扱い）。
+非ブロッキング排他ロック、spawn ロジック（Popen と「生きた Hub がいるか」の
+確かめを偽物に差し替える）の各層を単体テスト。ロックの取り合いは別プロセスで確かめる。
 """
 
 from __future__ import annotations
 
-import socket
 import subprocess
 import sys
-import threading
-import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
+from qgis_puppeteer.hub_file import HubFileInfo
 from qgis_puppeteer.hub_spawn import (
     EnsureOutcome,
     HubStartupError,
     SpawnOutcome,
     _exclusive_nonblocking_lock,
     default_hub_command,
-    ensure_hub_reachable,
-    tcp_probe,
+    ensure_hub,
+    hub_lock_path,
+    hub_log_path,
+    hub_spawn_log_path,
     try_spawn_hub,
 )
 
@@ -36,42 +36,105 @@ from qgis_puppeteer.hub_spawn import (
 
 # 子プロセスから qgis_puppeteer を import するためのパッケージ親パス。
 # Windows パスのバックスラッシュは unicode_escape でエスケープする。
-_pkg_parent = str(Path(__file__).parent.parent).encode("unicode_escape").decode()
+_pkg_parent = str(Path(__file__).parent.parent / "src").encode("unicode_escape").decode()
+
+_INFO = HubFileInfo(addresses=("127.0.0.1:50123",), token="t" * 43, pid=1234)
 
 
-def _get_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+@contextmanager
+def _lock_held_by_other_process(lock_path: Path) -> Iterator[None]:
+    """with の間、別プロセスに ``lock_path`` のロックを握らせる。
+
+    抜けるときは子の stdin を閉じ、子がロックを放して終わるのを待つ。kill は
+    しない：Windows の venv の python.exe は本体を子として起こすので、kill して
+    も本体がロックを持ったまま残ることがある。
+    """
+    holder_script = f"""
+import sys
+sys.path.insert(0, {_pkg_parent!r})
+from pathlib import Path
+from qgis_puppeteer.hub_spawn import _exclusive_nonblocking_lock
+
+with _exclusive_nonblocking_lock(Path({str(lock_path)!r})) as locked:
+    assert locked is True
+    print("LOCKED", flush=True)
+    sys.stdin.read()
+"""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", holder_script],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline().strip()
+        assert line == "LOCKED", f"unexpected: {line!r}"
+        yield
+    finally:
+        assert proc.stdin is not None
+        proc.stdin.close()
+        try:
+            proc.wait(timeout=10.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5.0)
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()
 
 
-@pytest.fixture
-def listen_socket() -> Any:
-    """127.0.0.1 で listen する TCP ソケットを作成し、テスト後に閉じる。"""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(("127.0.0.1", 0))
-    s.listen(5)
-    yield s
-    s.close()
+class _FakePopen:
+    """subprocess.Popen の互換モック（poll/kill/returncode/pid のみ）。"""
+
+    def __init__(self, *, exit_code: int | None = None) -> None:
+        self.returncode: int | None = exit_code
+        self.pid = 99999
+        self.kill_called = False
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def kill(self) -> None:
+        self.kill_called = True
+        self.returncode = -9
+
+
+class _FakeFinder:
+    """``find_live_hub`` の偽物。``ready`` になるまで None、なった後は ``_INFO``。
+
+    ``ready_after`` 回呼ばれたら自分で ready になる（None なら ``ready`` を立てるまで）。
+    """
+
+    def __init__(self, *, ready: bool = False, ready_after: int | None = None) -> None:
+        self.ready = ready
+        self.ready_after = ready_after
+        self.calls: list[Path] = []
+
+    def __call__(self, path: Any, *, timeout: float) -> HubFileInfo | None:
+        del timeout
+        self.calls.append(Path(path))
+        if self.ready_after is not None and len(self.calls) > self.ready_after:
+            self.ready = True
+        return _INFO if self.ready else None
+
+
+def _no_popen(*_args: Any, **_kwargs: Any) -> _FakePopen:
+    raise AssertionError("must not spawn")
 
 
 # ============================================================
-# tcp_probe
+# Hub ファイルの隣のパス
 # ============================================================
 
 
-class TestTcpProbe:
-    def test_returns_true_when_port_open(self, listen_socket: socket.socket) -> None:
-        port = listen_socket.getsockname()[1]
-        assert tcp_probe("127.0.0.1", port, timeout=1.0) is True
-
-    def test_returns_false_when_port_closed(self) -> None:
-        port = _get_free_port()  # 取得直後に閉じる → 誰も listen していない
-        assert tcp_probe("127.0.0.1", port, timeout=0.2) is False
-
-    def test_returns_false_on_unreachable_host(self) -> None:
-        # 192.0.2.0/24 は RFC 5737 でドキュメンテーション用、到達不能想定
-        assert tcp_probe("192.0.2.1", 9999, timeout=0.3) is False
+class TestNeighbourPaths:
+    def test_lock_log_and_spawn_log_sit_next_to_the_hub_file(self, tmp_path: Path) -> None:
+        hub_file = tmp_path / "hub.json"
+        assert hub_lock_path(hub_file) == tmp_path / "hub.json.lock"
+        assert hub_log_path(hub_file) == tmp_path / "hub.log"
+        assert hub_spawn_log_path(hub_file) == tmp_path / "hub.spawn.log"
 
 
 # ============================================================
@@ -88,51 +151,14 @@ class TestExclusiveLock:
         with _exclusive_nonblocking_lock(lock_path) as locked:
             assert locked is True
 
-    def test_concurrent_second_thread_fails_to_acquire(self, tmp_path: Path) -> None:
-        """同一プロセス内のロック挙動は OS 依存のため別プロセスで検証する。"""
-        # Windows msvcrt.locking は fd ごとの排他、POSIX fcntl.flock は
-        # 同一プロセスでは通ることがあるため、ここでは skip。
-        # 別プロセス間排他は test_concurrent_second_process で確認。
-        pytest.skip("same-process semantics vary by platform")
-
-    def test_concurrent_second_process_fails_to_acquire(self, tmp_path: Path) -> None:
-        """別プロセスがロック中なら False を返すこと。"""
+    def test_second_process_fails_to_acquire(self, tmp_path: Path) -> None:
+        """別プロセスがロック中なら False を返し、離せば取れる。"""
         lock_path = tmp_path / "cross.lock"
-        # 子プロセスに 2 秒間ロックを保持させる
-        holder_script = f"""
-import sys, time
-sys.path.insert(0, {_pkg_parent!r})
-from pathlib import Path
-from qgis_puppeteer.hub_spawn import _exclusive_nonblocking_lock
-
-with _exclusive_nonblocking_lock(Path({str(lock_path)!r})) as locked:
-    assert locked is True
-    print("LOCKED", flush=True)
-    time.sleep(2.0)
-"""
-        proc = subprocess.Popen(
-            [sys.executable, "-c", holder_script],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        try:
-            # 子プロセスが "LOCKED" を出力するまで待つ
-            assert proc.stdout is not None
-            line = proc.stdout.readline().strip()
-            assert line == "LOCKED", f"unexpected: {line!r}"
-
-            # この時点で子がロックを保持中 → 親は取れない
-            with _exclusive_nonblocking_lock(lock_path) as locked:
-                assert locked is False
-        finally:
-            try:
-                proc.wait(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=2.0)
-
-        # 子が終了したので親は再取得できる
+        with (
+            _lock_held_by_other_process(lock_path),
+            _exclusive_nonblocking_lock(lock_path) as locked,
+        ):
+            assert locked is False
         with _exclusive_nonblocking_lock(lock_path) as locked:
             assert locked is True
 
@@ -143,475 +169,238 @@ with _exclusive_nonblocking_lock(Path({str(lock_path)!r})) as locked:
 
 
 class TestDefaultHubCommand:
-    def test_contains_python_module_port(self) -> None:
-        cmd = default_hub_command(port=9999)
-        assert cmd[0] == sys.executable
-        assert cmd[1] == "-m"
-        assert cmd[2] == "qgis_puppeteer.hub"
-        assert "--port" in cmd
-        assert "9999" in cmd
+    def test_runs_the_hub_module_with_the_hub_file(self, tmp_path: Path) -> None:
+        hub_file = tmp_path / "hub.json"
+        cmd = default_hub_command(hub_file=hub_file)
+        assert cmd == [sys.executable, "-m", "qgis_puppeteer.hub", "--hub-file", str(hub_file)]
+        # ポートは決めない（Hub が空いているポートを選んで Hub ファイルに書く）
+        assert "--port" not in cmd
 
-    def test_custom_python(self) -> None:
-        cmd = default_hub_command(port=1, python="C:/custom/python.exe")
+    def test_custom_python(self, tmp_path: Path) -> None:
+        cmd = default_hub_command(hub_file=tmp_path / "hub.json", python="C:/custom/python.exe")
         assert cmd[0] == "C:/custom/python.exe"
 
 
 # ============================================================
-# try_spawn_hub — 動作検証（偽の Popen と probe を注入）
+# try_spawn_hub
 # ============================================================
-
-
-class _FakePopen:
-    """subprocess.Popen の互換モック（poll/kill/returncode のみ）。"""
-
-    def __init__(
-        self,
-        *,
-        exit_immediately: bool = False,
-        exit_code: int = 1,
-    ) -> None:
-        self._exit_immediately = exit_immediately
-        self.returncode: int | None = exit_code if exit_immediately else None
-        self.kill_called = False
-
-    def poll(self) -> int | None:
-        return self.returncode
-
-    def kill(self) -> None:
-        self.kill_called = True
-        self.returncode = -9
 
 
 class TestTrySpawnHub:
     def test_returns_another_when_lock_held(self, tmp_path: Path) -> None:
-        """他プロセスがロックを保持している間は spawn せず戻る。"""
-        lock_path = tmp_path / "busy.lock"
-
-        # 別スレッド経由で別プロセスにロックを握ってもらう
-        holder_script = f"""
-import sys, time
-sys.path.insert(0, {_pkg_parent!r})
-from pathlib import Path
-from qgis_puppeteer.hub_spawn import _exclusive_nonblocking_lock
-
-with _exclusive_nonblocking_lock(Path({str(lock_path)!r})) as locked:
-    print("LOCKED", flush=True)
-    time.sleep(3.0)
-"""
-        proc = subprocess.Popen(
-            [sys.executable, "-c", holder_script],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        try:
-            assert proc.stdout is not None
-            line = proc.stdout.readline().strip()
-            assert line == "LOCKED"
-
-            popen_called: list[Any] = []
-
-            def fake_popen(*args: Any, **kwargs: Any) -> _FakePopen:
-                popen_called.append((args, kwargs))
-                return _FakePopen()
-
-            outcome = try_spawn_hub(
-                lock_path=lock_path,
-                host="127.0.0.1",
-                port=_get_free_port(),
-                popen=fake_popen,
-                startup_deadline=0.5,
+        """他プロセスがロックを保持している間は確かめも spawn もせず戻る。"""
+        hub_file = tmp_path / "hub.json"
+        finder = _FakeFinder()
+        with _lock_held_by_other_process(hub_lock_path(hub_file)):
+            outcome, info = try_spawn_hub(
+                hub_file=hub_file, popen=_no_popen, find_hub=finder, startup_deadline=0.5
             )
-            assert outcome == SpawnOutcome.ANOTHER_PROCESS_OWNS_LOCK
-            assert popen_called == [], "must not spawn when lock held"
-        finally:
-            try:
-                proc.wait(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=2.0)
+        assert outcome == SpawnOutcome.ANOTHER_PROCESS_OWNS_LOCK
+        assert info is None
+        assert finder.calls == []
 
-    def test_already_listening_after_acquiring_lock(
-        self, tmp_path: Path, listen_socket: socket.socket
-    ) -> None:
-        """ロック獲得後の再 probe で既に listen 中ならスキップ。"""
-        lock_path = tmp_path / "free.lock"
-        port = listen_socket.getsockname()[1]
+    def test_already_running_after_acquiring_lock(self, tmp_path: Path) -> None:
+        """ロック獲得後の確かめで生きた Hub がいれば起こさない。"""
+        hub_file = tmp_path / "hub.json"
+        outcome, info = try_spawn_hub(
+            hub_file=hub_file, popen=_no_popen, find_hub=_FakeFinder(ready=True)
+        )
+        assert outcome == SpawnOutcome.ALREADY_RUNNING
+        assert info == _INFO
 
-        popen_called: list[Any] = []
+    def test_spawned_when_the_hub_becomes_live(self, tmp_path: Path) -> None:
+        """起こした後、Hub ファイルの Hub が生きれば SPAWNED と、その中身を返す。"""
+        hub_file = tmp_path / "hub.json"
+        finder = _FakeFinder(ready_after=3)
+        commands: list[list[str]] = []
 
-        def fake_popen(*args: Any, **kwargs: Any) -> _FakePopen:
-            popen_called.append((args, kwargs))
+        def fake_popen(cmd: list[str], **_kwargs: Any) -> _FakePopen:
+            commands.append(cmd)
             return _FakePopen()
 
-        outcome = try_spawn_hub(
-            lock_path=lock_path,
-            host="127.0.0.1",
-            port=port,
+        outcome, info = try_spawn_hub(
+            hub_file=hub_file,
             popen=fake_popen,
-            startup_deadline=0.5,
+            find_hub=finder,
+            startup_deadline=2.0,
+            poll_interval=0.01,
         )
-        assert outcome == SpawnOutcome.ALREADY_LISTENING
-        assert popen_called == [], "must not spawn when already listening"
+        assert outcome == SpawnOutcome.SPAWNED
+        assert info == _INFO
+        assert commands == [default_hub_command(hub_file=hub_file)]
+        assert all(p == hub_file for p in finder.calls)
 
-    def test_spawn_success_when_child_starts_listening(self, tmp_path: Path) -> None:
-        """spawn 後に子が listen を開始したら SPAWNED を返す。
+    def test_uses_the_given_command(self, tmp_path: Path) -> None:
+        commands: list[list[str]] = []
 
-        実際には Popen を差し替え、テスト用の listen socket を起動する
-        スレッドを別途走らせる。
-        """
-        lock_path = tmp_path / "spawn.lock"
-        port = _get_free_port()
+        def fake_popen(cmd: list[str], **_kwargs: Any) -> _FakePopen:
+            commands.append(cmd)
+            return _FakePopen()
 
-        # spawn 呼び出しのタイミングで listen を開始するスレッド
-        listen_started = threading.Event()
+        try_spawn_hub(
+            hub_file=tmp_path / "hub.json",
+            command=["python-qgis-ltr.bat", "bootstrap.py", "--hub-file", "x"],
+            popen=fake_popen,
+            find_hub=_FakeFinder(ready_after=1),
+            poll_interval=0.01,
+        )
+        assert commands == [["python-qgis-ltr.bat", "bootstrap.py", "--hub-file", "x"]]
 
-        def delayed_listen() -> None:
-            time.sleep(0.3)
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.bind(("127.0.0.1", port))
-            s.listen(5)
-            listen_started.set()
-            # 2 秒待ってから閉じる
-            time.sleep(2.0)
-            s.close()
-
-        t = threading.Thread(target=delayed_listen, daemon=True)
-
-        def fake_popen(*_args: Any, **_kwargs: Any) -> _FakePopen:
-            t.start()
-            return _FakePopen()  # 生存中のプロセスを模擬
-
-        try:
-            outcome = try_spawn_hub(
-                lock_path=lock_path,
-                host="127.0.0.1",
-                port=port,
-                popen=fake_popen,
-                startup_deadline=2.0,
-                poll_interval=0.05,
-            )
-            assert outcome == SpawnOutcome.SPAWNED
-            assert listen_started.is_set()
-        finally:
-            t.join(timeout=3.0)
-
-    def test_raises_when_child_exits_immediately(self, tmp_path: Path) -> None:
-        """spawn 直後に子が死んだら HubStartupError。"""
-        lock_path = tmp_path / "dead.lock"
-        port = _get_free_port()
-
-        def fake_popen(*_args: Any, **_kwargs: Any) -> _FakePopen:
-            return _FakePopen(exit_immediately=True, exit_code=2)
-
-        with pytest.raises(HubStartupError, match="exited immediately"):
+    def test_raises_with_exit_code_when_child_exits(self, tmp_path: Path) -> None:
+        """生きた Hub になる前に子が終われば、その終了コードを添えて HubStartupError。"""
+        with pytest.raises(HubStartupError, match="exited with code 3"):
             try_spawn_hub(
-                lock_path=lock_path,
-                host="127.0.0.1",
-                port=port,
-                popen=fake_popen,
+                hub_file=tmp_path / "hub.json",
+                popen=lambda *_a, **_k: _FakePopen(exit_code=3),
+                find_hub=_FakeFinder(),
                 startup_deadline=2.0,
             )
 
-    def test_raises_on_startup_timeout(self, tmp_path: Path) -> None:
-        """spawn しても listen しなければタイムアウトで HubStartupError + kill。"""
-        lock_path = tmp_path / "slow.lock"
-        port = _get_free_port()
+    def test_child_that_exits_after_writing_the_hub_file_counts(self, tmp_path: Path) -> None:
+        """子が終わった直後の最後の確かめで Hub がいれば成功とする。"""
+        # 1 回目（lock 後）・2 回目（ループ）は None、子の終了を見た後の 3 回目で生きる
+        finder = _FakeFinder(ready_after=2)
+        outcome, info = try_spawn_hub(
+            hub_file=tmp_path / "hub.json",
+            popen=lambda *_a, **_k: _FakePopen(exit_code=0),
+            find_hub=finder,
+        )
+        assert outcome == SpawnOutcome.SPAWNED
+        assert info == _INFO
 
+    def test_raises_on_startup_timeout_and_kills_the_tree(self, tmp_path: Path) -> None:
+        """期限までに生きた Hub にならなければ、子を木ごと止めて HubStartupError。"""
         fake = _FakePopen()
-
-        def fake_popen(*_args: Any, **_kwargs: Any) -> _FakePopen:
-            return fake
-
-        with pytest.raises(HubStartupError, match="did not start listening"):
+        killed: list[Any] = []
+        with pytest.raises(HubStartupError, match="did not start within"):
             try_spawn_hub(
-                lock_path=lock_path,
-                host="127.0.0.1",
-                port=port,
-                popen=fake_popen,
-                startup_deadline=0.3,
-                poll_interval=0.05,
+                hub_file=tmp_path / "hub.json",
+                popen=lambda *_a, **_k: fake,
+                find_hub=_FakeFinder(),
+                startup_deadline=0.2,
+                poll_interval=0.02,
+                kill_tree=killed.append,
             )
-        assert fake.kill_called, "must kill runaway child"
+        assert killed == [fake]
 
     def test_passes_env_to_popen(self, tmp_path: Path) -> None:
-        """`env=` が subprocess.Popen の kwargs に正しく渡ること。
-
-        プラグインから `PYTHONPATH` を注入するフローを保証するため。
-        """
-        lock_path = tmp_path / "envpass.lock"
-        port = _get_free_port()
+        """`env=` が subprocess.Popen の kwargs に正しく渡ること（プラグインの PYTHONPATH）。"""
         captured: dict[str, Any] = {}
 
         def fake_popen(*_args: Any, **kwargs: Any) -> _FakePopen:
             captured.update(kwargs)
-            return _FakePopen(exit_immediately=True, exit_code=0)
+            return _FakePopen(exit_code=0)
 
         custom_env = {"FOO": "bar", "PYTHONPATH": "/custom/path"}
-        # startup_deadline 後にすぐ exit_immediately で HubStartupError になる
-        # が、その前に Popen kwargs は記録されているのでそれを検証する
         with pytest.raises(HubStartupError):
             try_spawn_hub(
-                lock_path=lock_path,
-                host="127.0.0.1",
-                port=port,
+                hub_file=tmp_path / "hub.json",
                 popen=fake_popen,
+                find_hub=_FakeFinder(),
                 env=custom_env,
-                startup_deadline=0.1,
             )
         assert captured.get("env") == custom_env
 
     def test_omits_env_when_none(self, tmp_path: Path) -> None:
-        """`env=None` のとき Popen の kwargs に env キーが含まれない
-        （親環境を継承するため）。"""
-        lock_path = tmp_path / "envnone.lock"
-        port = _get_free_port()
+        """`env=None` のとき Popen の kwargs に env キーが含まれない（親環境を継承）。"""
         captured: dict[str, Any] = {}
 
         def fake_popen(*_args: Any, **kwargs: Any) -> _FakePopen:
             captured.update(kwargs)
-            return _FakePopen(exit_immediately=True, exit_code=0)
+            return _FakePopen(exit_code=0)
 
         with pytest.raises(HubStartupError):
-            try_spawn_hub(
-                lock_path=lock_path,
-                host="127.0.0.1",
-                port=port,
-                popen=fake_popen,
-                startup_deadline=0.1,
-            )
+            try_spawn_hub(hub_file=tmp_path / "hub.json", popen=fake_popen, find_hub=_FakeFinder())
         assert "env" not in captured
 
     def test_closes_log_file_on_parent_side(self, tmp_path: Path) -> None:
-        """`log_file` を渡した場合、親側のハンドルは Popen 直後に閉じられる。
-
-        子プロセスは OS レベルで fd を継承済みなので親は close して OK。
-        close し忘れると GC で `ResourceWarning: unclosed file` が出る。
-        """
-        lock_path = tmp_path / "log.lock"
-        log_path = tmp_path / "hub.out"
-        port = _get_free_port()
-
+        """`log_file` を渡した場合、親側のハンドルは Popen 直後に閉じられる。"""
         captured: dict[str, Any] = {}
 
         def fake_popen(*_args: Any, **kwargs: Any) -> _FakePopen:
             captured.update(kwargs)
-            return _FakePopen(exit_immediately=True, exit_code=0)
+            return _FakePopen(exit_code=0)
 
         with pytest.raises(HubStartupError):
             try_spawn_hub(
-                lock_path=lock_path,
-                host="127.0.0.1",
-                port=port,
+                hub_file=tmp_path / "hub.json",
                 popen=fake_popen,
-                log_file=log_path,
-                startup_deadline=0.1,
+                find_hub=_FakeFinder(),
+                log_file=tmp_path / "hub.spawn.log",
             )
         stdout = captured.get("stdout")
-        # stdout は open された file-like。親側で close 済みであること。
         assert hasattr(stdout, "closed")
         assert stdout.closed is True, "parent side must close inherited log handle"
 
     def test_retains_child_reference_on_success(self, tmp_path: Path) -> None:
-        """spawn 成功後、Popen オブジェクトがモジュールレベルに保持される。
-
-        ローカル変数のみで放置すると GC で `ResourceWarning: subprocess is
-        still running` が出るため、モジュール寿命まで参照を残す必要がある。
-        """
+        """spawn 成功後、Popen オブジェクトをモジュールに保持する（ResourceWarning 回避）。"""
         from qgis_puppeteer.hub_spawn import _SPAWNED_CHILDREN
 
-        lock_path = tmp_path / "retain.lock"
-        port = _get_free_port()
         before = len(_SPAWNED_CHILDREN)
-
-        # spawn 後すぐに listen 開始するスレッド
-        def delayed_listen() -> None:
-            time.sleep(0.1)
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.bind(("127.0.0.1", port))
-            s.listen(5)
-            time.sleep(1.0)
-            s.close()
-
-        t = threading.Thread(target=delayed_listen, daemon=True)
         fake = _FakePopen()
-
-        def fake_popen(*_args: Any, **_kwargs: Any) -> _FakePopen:
-            t.start()
-            return fake
-
-        try:
-            outcome = try_spawn_hub(
-                lock_path=lock_path,
-                host="127.0.0.1",
-                port=port,
-                popen=fake_popen,
-                startup_deadline=2.0,
-                poll_interval=0.05,
-            )
-            assert outcome == SpawnOutcome.SPAWNED
-            assert len(_SPAWNED_CHILDREN) == before + 1
-            assert _SPAWNED_CHILDREN[-1] is fake
-        finally:
-            t.join(timeout=3.0)
+        outcome, _ = try_spawn_hub(
+            hub_file=tmp_path / "hub.json",
+            popen=lambda *_a, **_k: fake,
+            find_hub=_FakeFinder(ready_after=1),
+            poll_interval=0.01,
+        )
+        assert outcome == SpawnOutcome.SPAWNED
+        assert len(_SPAWNED_CHILDREN) == before + 1
+        assert _SPAWNED_CHILDREN[-1] is fake
 
 
 # ============================================================
-# ensure_hub_reachable — 全体フロー
+# ensure_hub — 全体フロー
 # ============================================================
 
 
-class TestEnsureHubReachable:
-    def test_already_listening_skips_spawn(
-        self, tmp_path: Path, listen_socket: socket.socket
-    ) -> None:
-        """初回 probe で繋がれば spawn を試みずに戻る。"""
-        lock_path = tmp_path / "skip.lock"
-        port = listen_socket.getsockname()[1]
-
-        def fake_popen(*_args: Any, **_kwargs: Any) -> _FakePopen:
-            raise AssertionError("must not spawn")
-
-        outcome = ensure_hub_reachable(
-            lock_path=lock_path,
-            host="127.0.0.1",
-            port=port,
-            popen=fake_popen,
-            connect_backoff=(0.05,),
+class TestEnsureHub:
+    def test_already_running_skips_spawn(self, tmp_path: Path) -> None:
+        ready = ensure_hub(
+            hub_file=tmp_path / "hub.json", popen=_no_popen, find_hub=_FakeFinder(ready=True)
         )
-        assert outcome == EnsureOutcome.ALREADY_LISTENING
+        assert ready.outcome == EnsureOutcome.ALREADY_RUNNING
+        assert ready.info == _INFO
 
-    def test_spawns_when_not_listening(self, tmp_path: Path) -> None:
-        """probe 失敗 → ロック獲得 → spawn して listen を開始 → SPAWNED_BY_US。"""
-        lock_path = tmp_path / "spawn-it.lock"
-        port = _get_free_port()
+    def test_spawns_when_no_live_hub(self, tmp_path: Path) -> None:
+        ready = ensure_hub(
+            hub_file=tmp_path / "hub.json",
+            popen=lambda *_a, **_k: _FakePopen(),
+            find_hub=_FakeFinder(ready_after=3),
+            poll_interval=0.01,
+            sleep=lambda _s: None,
+        )
+        assert ready.outcome == EnsureOutcome.SPAWNED_BY_US
+        assert ready.info == _INFO
 
-        def delayed_listen() -> None:
-            time.sleep(0.2)
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.bind(("127.0.0.1", port))
-            s.listen(5)
-            time.sleep(2.0)
-            s.close()
-
-        t = threading.Thread(target=delayed_listen, daemon=True)
-
-        def fake_popen(*_args: Any, **_kwargs: Any) -> _FakePopen:
-            t.start()
-            return _FakePopen()
-
-        try:
-            outcome = ensure_hub_reachable(
-                lock_path=lock_path,
-                host="127.0.0.1",
-                port=port,
-                popen=fake_popen,
-                startup_deadline=2.0,
-                poll_interval=0.05,
-                connect_backoff=(0.05,),
+    def test_waits_while_another_process_spawns(self, tmp_path: Path) -> None:
+        """ロックを別プロセスが持っていれば起こさず待ち、Hub が現れたら SPAWNED_BY_OTHER。"""
+        hub_file = tmp_path / "hub.json"
+        sleeps: list[float] = []
+        # 最初の確かめと 1 回目の待ちの後は None、2 回目の待ちの後で生きる
+        finder = _FakeFinder(ready_after=2)
+        with _lock_held_by_other_process(hub_lock_path(hub_file)):
+            ready = ensure_hub(
+                hub_file=hub_file,
+                popen=_no_popen,
+                find_hub=finder,
+                connect_backoff=(0.1, 0.2, 0.3),
+                sleep=sleeps.append,
             )
-            assert outcome == EnsureOutcome.SPAWNED_BY_US
-        finally:
-            t.join(timeout=3.0)
+        assert ready.outcome == EnsureOutcome.SPAWNED_BY_OTHER
+        assert sleeps == [0.1, 0.2]
 
-    def test_waits_when_other_process_spawning(self, tmp_path: Path) -> None:
-        """他プロセスが spawn 中（ロック保持）で、途中で listen が
-        開始された場合は SPAWNED_BY_OTHER を返す。"""
-        lock_path = tmp_path / "other-spawning.lock"
-        port = _get_free_port()
-
-        # 外部プロセスにロックを先に保持させ、少し遅らせて listen 開始させる。
-        # 親側の初回 probe は失敗し、ロック取得にも失敗（= ANOTHER）。
-        # バックオフ中に helper が listen を開始して SPAWNED_BY_OTHER となる。
-        helper_script = f"""
-import sys, time, socket
-sys.path.insert(0, {_pkg_parent!r})
-from pathlib import Path
-from qgis_puppeteer.hub_spawn import _exclusive_nonblocking_lock
-
-with _exclusive_nonblocking_lock(Path({str(lock_path)!r})) as locked:
-    assert locked
-    print("LOCKED", flush=True)
-    time.sleep(0.5)  # 親が initial probe と lock 試行を済ませるまで待つ
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(("127.0.0.1", {port}))
-    s.listen(5)
-    print("LISTENING", flush=True)
-    time.sleep(1.5)
-    s.close()
-"""
-        proc = subprocess.Popen(
-            [sys.executable, "-c", helper_script],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        try:
-            assert proc.stdout is not None
-            assert proc.stdout.readline().strip() == "LOCKED"
-            # ここで ensure_hub_reachable を呼ぶと、この時点では listen していない
-
-            def fake_popen(*_args: Any, **_kwargs: Any) -> _FakePopen:
-                raise AssertionError("must not spawn (other already did)")
-
-            outcome = ensure_hub_reachable(
-                lock_path=lock_path,
-                host="127.0.0.1",
-                port=port,
-                popen=fake_popen,
-                connect_backoff=(0.3, 0.5, 0.5),
-                probe_timeout=0.1,
+    def test_raises_when_no_hub_appears(self, tmp_path: Path) -> None:
+        """他プロセスがロックを握ったまま Hub が現れなければ、待ちきって HubStartupError。"""
+        hub_file = tmp_path / "hub.json"
+        with (
+            _lock_held_by_other_process(hub_lock_path(hub_file)),
+            pytest.raises(HubStartupError, match="No live Hub appeared"),
+        ):
+            ensure_hub(
+                hub_file=hub_file,
+                popen=_no_popen,
+                find_hub=_FakeFinder(),
+                connect_backoff=(0.01, 0.01, 0.01),
+                sleep=lambda _s: None,
             )
-            assert outcome == EnsureOutcome.SPAWNED_BY_OTHER
-        finally:
-            try:
-                proc.wait(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=2.0)
-
-    def test_raises_when_nothing_becomes_reachable(self, tmp_path: Path) -> None:
-        """他プロセスがロックを握ったまま listen しないなら、バックオフ
-        消化後に HubStartupError。"""
-        lock_path = tmp_path / "nobody.lock"
-        port = _get_free_port()
-
-        # ロックを長く握る helper（listen はしない）
-        helper_script = f"""
-import sys, time
-sys.path.insert(0, {_pkg_parent!r})
-from pathlib import Path
-from qgis_puppeteer.hub_spawn import _exclusive_nonblocking_lock
-
-with _exclusive_nonblocking_lock(Path({str(lock_path)!r})) as locked:
-    print("LOCKED", flush=True)
-    time.sleep(3.0)
-"""
-        proc = subprocess.Popen(
-            [sys.executable, "-c", helper_script],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        try:
-            assert proc.stdout is not None
-            assert proc.stdout.readline().strip() == "LOCKED"
-
-            def fake_popen(*_args: Any, **_kwargs: Any) -> _FakePopen:
-                raise AssertionError("must not spawn (lock held)")
-
-            with pytest.raises(HubStartupError, match="did not become reachable"):
-                ensure_hub_reachable(
-                    lock_path=lock_path,
-                    host="127.0.0.1",
-                    port=port,
-                    popen=fake_popen,
-                    connect_backoff=(0.05, 0.05, 0.05),
-                    probe_timeout=0.05,
-                )
-        finally:
-            try:
-                proc.wait(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=2.0)

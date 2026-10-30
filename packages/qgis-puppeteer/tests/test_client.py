@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import socket
 import tempfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -33,7 +34,7 @@ from qgis_puppeteer.handshake import (
     generate_token,
     hub_proof,
 )
-from qgis_puppeteer.hub_file import ENV_HUB_FILE, HubFileInfo, write_hub_file
+from qgis_puppeteer.hub_file import ENV_HUB_FILE, HubFileError, HubFileInfo, write_hub_file
 from qgis_puppeteer.protocol import (
     PROTOCOL_VERSION,
     SUPPORTED_PROTOCOL,
@@ -268,17 +269,20 @@ class FakeHub:
 
 
 @asynccontextmanager
-async def fake_hub_server(port: int = 0) -> AsyncIterator[tuple[FakeHub, str]]:
-    """偽の Hub を立て、本物と同じく Hub ファイルに token を書く。
+async def fake_hub_server(
+    port: int = 0, hub_file: Path | None = None
+) -> AsyncIterator[tuple[FakeHub, str]]:
+    """偽の Hub を立て、本物と同じく Hub ファイルにアドレスと token を書く。
 
-    その間 ``QPUPPETEER_HUB_FILE`` をそのファイルに向けるので、url だけで作った
-    ``AutomationClient``（gateway の中のものも）がこの Hub の token を読む。
+    その間 ``QPUPPETEER_HUB_FILE`` をそのファイルに向けるので、引数なしの
+    ``AutomationClient``（gateway の中のものも）がこの Hub につなぐ。``hub_file``
+    を省けば一時のファイルに書く（「あとから Hub が立つ」を再現したいテストは、
+    先に決めた ``hub_file`` を渡す）。
     """
     hub = FakeHub()
-    # port=0 で OS に空きポートを割り当てさせる（「あとから Hub が立つ」を
-    # 再現したいテストは、先に確保したポート番号を渡す）
     with tempfile.TemporaryDirectory() as tmp:
-        hub_file = Path(tmp) / "hub.json"
+        if hub_file is None:
+            hub_file = Path(tmp) / "hub.json"
         saved = os.environ.get(ENV_HUB_FILE)
         os.environ[ENV_HUB_FILE] = str(hub_file)
         try:
@@ -295,6 +299,13 @@ async def fake_hub_server(port: int = 0) -> AsyncIterator[tuple[FakeHub, str]]:
                 os.environ.pop(ENV_HUB_FILE, None)
             else:
                 os.environ[ENV_HUB_FILE] = saved
+
+
+def _closed_port() -> int:
+    """誰も待っていないポート（取ってすぐ閉じる）。"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def signed_register(msg_id: str, hello: Hello, *, role: Role, **fields: Any) -> RegisterRequest:
@@ -402,7 +413,7 @@ class _FakeWorker:
 class TestConnect:
     def test_connect_and_close(self) -> None:
         async def inner() -> None:
-            async with fake_hub_server() as (_, url), AutomationClient(url=url):
+            async with fake_hub_server() as (_, url), AutomationClient():
                 pass  # register_ack まで届けば成功
 
         _run(inner())
@@ -411,7 +422,7 @@ class TestConnect:
         async def inner() -> None:
             async with fake_hub_server() as (hub, url):
                 hub.reject_register = True
-                client = AutomationClient(url=url, register_timeout=2.0)
+                client = AutomationClient(register_timeout=2.0)
                 with pytest.raises(RegisterError) as exc_info:
                     await client.connect()
                 assert exc_info.value.error is not None
@@ -421,7 +432,7 @@ class TestConnect:
 
     def test_hub_package_version_is_read_from_the_ack(self) -> None:
         async def inner() -> None:
-            async with fake_hub_server() as (_, url), AutomationClient(url=url) as client:
+            async with fake_hub_server() as (_, url), AutomationClient() as client:
                 assert client.hub_package_version == __version__
 
         _run(inner())
@@ -429,7 +440,9 @@ class TestConnect:
     def test_token_can_be_given_directly(self) -> None:
         async def inner() -> None:
             async with fake_hub_server() as (hub, url):
-                client = AutomationClient(url=url, token=hub.token, hub_file="missing.json")
+                client = AutomationClient(
+                    address=url.removeprefix("ws://"), token=hub.token, hub_file="missing.json"
+                )
                 await client.connect()
                 await client.close()
 
@@ -438,7 +451,7 @@ class TestConnect:
     def test_a_wrong_token_is_refused_as_unauthorized(self) -> None:
         async def inner() -> None:
             async with fake_hub_server() as (_, url):
-                client = AutomationClient(url=url, token="not-the-token", register_timeout=2.0)
+                client = AutomationClient(token="not-the-token", register_timeout=2.0)
                 with pytest.raises(RegisterError) as exc_info:
                     await client.connect()
                 assert exc_info.value.error is not None
@@ -452,9 +465,63 @@ class TestConnect:
         async def inner() -> None:
             async with fake_hub_server() as (hub, url):
                 hub.wrong_hub_proof = True
-                client = AutomationClient(url=url, register_timeout=2.0)
+                client = AutomationClient(register_timeout=2.0)
                 with pytest.raises(HubAuthError):
                     await client.connect()
+
+        _run(inner())
+
+    def test_an_address_alone_takes_the_token_from_the_hub_file(self) -> None:
+        async def inner() -> None:
+            async with fake_hub_server() as (_, url):
+                address = url.removeprefix("ws://")
+                async with AutomationClient(address=address) as client:
+                    assert client.address == address
+
+        _run(inner())
+
+    def test_no_hub_file_raises_hub_file_error(self, tmp_path: Path) -> None:
+        async def inner() -> None:
+            client = AutomationClient(hub_file=tmp_path / "missing.json")
+            with pytest.raises(HubFileError):
+                await client.connect()
+
+        _run(inner())
+
+    def test_the_hub_file_addresses_are_tried_in_order(self) -> None:
+        """先のアドレスで誰も待っていなければ、次のアドレスにつなぐ。"""
+
+        async def inner() -> None:
+            async with fake_hub_server() as (hub, url):
+                dead = f"127.0.0.1:{_closed_port()}"
+                live = url.removeprefix("ws://")
+                hub_file = Path(os.environ[ENV_HUB_FILE])
+                write_hub_file(hub_file, HubFileInfo(addresses=(dead, live), token=hub.token))
+                async with AutomationClient() as client:
+                    assert client.address == live
+
+        _run(inner())
+
+    def test_no_reachable_address_raises_the_last_error(self) -> None:
+        async def inner() -> None:
+            async with fake_hub_server() as (hub, _):
+                dead = f"127.0.0.1:{_closed_port()}"
+                hub_file = Path(os.environ[ENV_HUB_FILE])
+                write_hub_file(hub_file, HubFileInfo(addresses=(dead,), token=hub.token))
+                client = AutomationClient(connect_timeout=2.0)
+                with pytest.raises(OSError):
+                    await client.connect()
+                assert client.address == dead
+
+        _run(inner())
+
+    def test_a_hub_file_without_addresses_is_refused(self, tmp_path: Path) -> None:
+        async def inner() -> None:
+            hub_file = tmp_path / "hub.json"
+            write_hub_file(hub_file, HubFileInfo(addresses=(), token="t"))
+            client = AutomationClient(hub_file=hub_file)
+            with pytest.raises(ConnectionRefusedError):
+                await client.connect()
 
         _run(inner())
 
@@ -466,7 +533,7 @@ class TestConnect:
             async with serve(silent, "127.0.0.1", 0) as server:
                 port = next(iter(server.sockets)).getsockname()[1]
                 client = AutomationClient(
-                    url=f"ws://127.0.0.1:{port}", token="t", register_timeout=0.5
+                    address=f"127.0.0.1:{port}", token="t", register_timeout=0.5
                 )
                 with pytest.raises(HubAuthError):
                     await client.connect()
@@ -482,7 +549,7 @@ class TestConnect:
             async with serve(chatty, "127.0.0.1", 0) as server:
                 port = next(iter(server.sockets)).getsockname()[1]
                 client = AutomationClient(
-                    url=f"ws://127.0.0.1:{port}", token="t", register_timeout=2.0
+                    address=f"127.0.0.1:{port}", token="t", register_timeout=2.0
                 )
                 with pytest.raises(HubAuthError):
                     await client.connect()
@@ -507,7 +574,7 @@ class TestConnectionLoss:
                 worker = _FakeWorker(url, label="alpha", pid=1)
                 await worker.start()
                 await worker.ready.wait()
-                client = AutomationClient(url=url)
+                client = AutomationClient()
                 await client.connect()
                 try:
                     hub.drop_caller_on_request = True
@@ -539,7 +606,7 @@ class TestConnectionLoss:
                 await worker.ready.wait()
                 hub.drop_caller_on_request = True
                 try:
-                    async with AutomationClient(url=url) as client:
+                    async with AutomationClient() as client:
                         with pytest.raises(NotConnectedError) as exc_info:
                             await client.call("cmd", timeout_ms=5_000)
                         assert not isinstance(exc_info.value, RequestNotSentError)
@@ -560,7 +627,7 @@ class TestListInstances:
         async def inner() -> None:
             async with (
                 fake_hub_server() as (_, url),
-                AutomationClient(url=url) as client,
+                AutomationClient() as client,
             ):
                 instances = await client.list_instances()
                 assert instances == []
@@ -575,7 +642,7 @@ class TestListInstances:
                 await worker.ready.wait()
 
                 try:
-                    async with AutomationClient(url=url) as client:
+                    async with AutomationClient() as client:
                         instances = await client.list_instances()
                         assert len(instances) == 1
                         assert instances[0].instance_id == "worker-alpha-4321"
@@ -596,7 +663,7 @@ class TestListInstances:
                 hub.unresponsive.add("worker-alpha-4321")
 
                 try:
-                    async with AutomationClient(url=url) as client:
+                    async with AutomationClient() as client:
                         # 一覧には出る
                         [info] = await client.list_instances()
                         assert info.state == "unresponsive"
@@ -625,7 +692,7 @@ class TestListInstances:
                 await worker.start()
                 await worker.ready.wait()
                 try:
-                    async with AutomationClient(url=url) as client:
+                    async with AutomationClient() as client:
                         info = await client.wait_for_ready(timeout_s=2.0, poll_interval_s=0.05)
                         assert info.instance_id == "worker-alpha-4321"
                         probes = [
@@ -653,7 +720,7 @@ class TestListInstances:
                 await worker.ready.wait()
                 hub.unresponsive.add("worker-alpha-4321")
                 try:
-                    async with AutomationClient(url=url) as client:
+                    async with AutomationClient() as client:
                         with pytest.raises(TimeoutError):
                             await client.wait_for_ready(timeout_s=0.4, poll_interval_s=0.05)
                         # unresponsive の間は probe を撃たない（ソケットに溜めない）
@@ -676,7 +743,7 @@ class TestListInstances:
                 await worker.start()
                 await worker.ready.wait()
                 try:
-                    async with AutomationClient(url=url) as client:
+                    async with AutomationClient() as client:
                         # GUI は空いている（probe は通る）が project はまだ無い
                         with pytest.raises(TimeoutError) as ei:
                             await client.wait_for_ready(
@@ -710,7 +777,7 @@ class TestListInstances:
                 await w2.start()
                 await w2.ready.wait()
                 try:
-                    async with AutomationClient(url=url) as client:
+                    async with AutomationClient() as client:
                         with pytest.raises(RequestError) as ei:
                             await client.wait_for_ready(timeout_s=1.0)
                         assert ei.value.code is ErrorCode.INSTANCE_AMBIGUOUS
@@ -737,7 +804,7 @@ class TestCall:
                 await worker.start()
 
                 try:
-                    async with AutomationClient(url=url) as client:
+                    async with AutomationClient() as client:
                         result = await client.call("qgis_list_layers", {"x": 1}, timeout_ms=5_000)
                         assert result == {
                             "echo": {"x": 1},
@@ -770,7 +837,7 @@ class TestCall:
                 }
 
                 try:
-                    async with AutomationClient(url=url) as client:
+                    async with AutomationClient() as client:
                         r1 = await client.call("cmd", instance="alpha")
                         r2 = await client.call("cmd", instance="beta")
                         assert r1 == "from-alpha"
@@ -788,7 +855,7 @@ class TestCall:
         async def inner() -> None:
             async with (
                 fake_hub_server() as (_, url),
-                AutomationClient(url=url) as client,
+                AutomationClient() as client,
             ):
                 with pytest.raises(RequestError) as exc_info:
                     await client.call("cmd", instance="nonexistent")
@@ -813,7 +880,7 @@ class TestCall:
                 }
 
                 try:
-                    async with AutomationClient(url=url) as client:
+                    async with AutomationClient() as client:
                         with pytest.raises(RequestError) as exc_info:
                             await client.call("cmd")
                         assert exc_info.value.code == ErrorCode.WORKER_EXECUTION_ERROR
@@ -831,7 +898,7 @@ class TestCall:
                 worker = _FakeWorker(url, label="m", pid=5)
                 await worker.start()
                 try:
-                    async with AutomationClient(url=url) as client:
+                    async with AutomationClient() as client:
                         results = await asyncio.gather(
                             client.call("c1", {"n": 1}),
                             client.call("c2", {"n": 2}),
@@ -851,7 +918,7 @@ class TestCall:
                 worker = _FakeWorker(url, label="solo", pid=1111)
                 await worker.start()
                 try:
-                    async with AutomationClient(url=url, request_timeout=2.5) as client:
+                    async with AutomationClient(request_timeout=2.5) as client:
                         await client.call("cmd")
                         await client.call("cmd", timeout_ms=700)
                 finally:
@@ -869,7 +936,7 @@ class TestCall:
                 worker = _FakeWorker(url, label="slow", pid=7)
                 await worker.start()
                 try:
-                    async with AutomationClient(url=url) as client:
+                    async with AutomationClient() as client:
                         with pytest.raises(RequestError) as excinfo:
                             await client.call("cmd", timeout_ms=200)
                     assert excinfo.value.code == ErrorCode.INSTANCE_TIMEOUT
@@ -894,7 +961,7 @@ class TestCall:
                 }
 
                 try:
-                    async with AutomationClient(url=url) as client:
+                    async with AutomationClient() as client:
                         with pytest.raises(asyncio.TimeoutError):
                             await client.call("cmd", timeout_ms=200)
                 finally:

@@ -68,9 +68,11 @@ qgis_command = ["scripts/launcher.bat", "--config", "e2e", "--feature", "auth"]
 
 When `qgis_command` is set, it is used instead of `qgis_bin` / `qgis_args`,
 which are then ignored. The plugin
-still injects `QPUPPETEER_HUB_PORT` / `QPUPPETEER_TRUSTED_MODE` /
+still injects `QPUPPETEER_HUB_FILE` / `QPUPPETEER_TRUSTED_MODE` /
 `QPUPPETEER_ALLOW_TEST_HANDLERS` into the spawn env — your wrapper just needs
-to inherit and forward them to QGIS.
+to inherit and forward them to QGIS. Any other `QPUPPETEER_HUB_*` variable
+inherited from your shell is removed, so QGIS always joins the Hub pytest
+started.
 
 The plugin is auto-loaded via `entry_points`; no manual `pytest_plugins` setup
 needed.
@@ -78,7 +80,9 @@ needed.
 Override via environment variables:
 - `QPUPPETEER_QGIS_BIN` / `QPUPPETEER_QGIS_COMMAND`
 - `QPUPPETEER_QGIS_PYTHON`
-- `QPUPPETEER_E2E_USE_RUNNING_QGIS=1` — reuse existing QGIS instance (dev mode)
+- `QPUPPETEER_E2E_USE_RUNNING_QGIS=1` — reuse existing QGIS instance (dev mode).
+  pytest connects to the Hub in `QPUPPETEER_HUB_FILE`, or in the default Hub
+  file when it is not set
 
 ### Full control — fixture override
 
@@ -90,7 +94,8 @@ teardown), override the `qgis_process` fixture in your `conftest.py`:
 import pytest
 
 @pytest.fixture(scope="session")
-def qgis_process(automation_client, hub_port, my_custom_setup):
+def qgis_process(automation_client, my_custom_setup):
+    # QGIS finds the Hub through QPUPPETEER_HUB_FILE=automation_client.hub_file
     # ... spawn QGIS your way, yield, teardown ...
 ```
 
@@ -166,9 +171,8 @@ from pytest_qgis_puppeteer import spawn_qgis
 
 QGIS_BIN = "C:/Program Files/QGIS 3.34.6/bin/qgis-ltr-bin.exe"
 
-def test_clean_canvas_clears_layers(hub_port, automation_client):
+def test_clean_canvas_clears_layers(automation_client):
     with spawn_qgis(
-        hub_port=hub_port,
         automation_client=automation_client,
         qgis_bin=QGIS_BIN,
         args=["--clean-canvas"],

@@ -26,6 +26,7 @@ from pytest_qgis_puppeteer.plugin import (
     _resolve_qgis_command,
     _resolve_setting,
 )
+from qgis_puppeteer import __version__
 
 
 class _FakeConfig:
@@ -410,8 +411,16 @@ class TestPluginFingerprintCheck:
     """#17: session の QGIS のプラグインと pytest 側の qgis-puppeteer の指紋を比べる。"""
 
     class _Client:
-        def __init__(self, fingerprint: str | None) -> None:
+        def __init__(
+            self,
+            fingerprint: str | None,
+            *,
+            hub_version: str | None,
+            worker_version: str | None,
+        ) -> None:
             self.fingerprint = fingerprint
+            self.hub_package_version = hub_version
+            self.worker_version = worker_version
 
         def list_instances(self) -> list[Any]:
             from qgis_puppeteer.protocol import InstanceInfo
@@ -422,17 +431,25 @@ class TestPluginFingerprintCheck:
                     label="qgis_process",
                     pid=1,
                     source_fingerprint=self.fingerprint,
+                    package_version=self.worker_version,
                 )
             ]
 
-    def _check(self, fingerprint: str | None) -> list[Any]:
+    def _check(
+        self,
+        fingerprint: str | None,
+        *,
+        hub_version: str | None = __version__,
+        worker_version: str | None = __version__,
+    ) -> list[Any]:
         import warnings
 
         from pytest_qgis_puppeteer.plugin import _check_plugin_fingerprint
 
+        client = self._Client(fingerprint, hub_version=hub_version, worker_version=worker_version)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            _check_plugin_fingerprint(self._Client(fingerprint), "w-1")  # type: ignore[arg-type]
+            _check_plugin_fingerprint(client, "w-1")  # type: ignore[arg-type]
         return caught
 
     def test_matching_plugin_is_quiet(self) -> None:
@@ -450,6 +467,25 @@ class TestPluginFingerprintCheck:
     def test_an_old_plugin_without_a_fingerprint_warns(self) -> None:
         [w] = self._check(None)
         assert "older than the version check" in str(w.message)
+
+    def test_a_hub_of_another_version_warns(self) -> None:
+        from pytest_qgis_puppeteer import QgisPluginMismatchWarning
+        from qgis_puppeteer._fingerprint import source_fingerprint
+
+        [w] = self._check(source_fingerprint(), hub_version="0.0.1")
+        assert issubclass(w.category, QgisPluginMismatchWarning)
+        assert "The Hub runs qgis-puppeteer 0.0.1" in str(w.message)
+
+    def test_a_plugin_of_another_version_warns_once(self) -> None:
+        """版が違えば指紋も違うので、版の警告だけを出す。"""
+        [w] = self._check("000000000000", worker_version="0.0.1")
+        assert "plugin in QGIS is qgis-puppeteer 0.0.1" in str(w.message)
+
+    def test_unknown_versions_fall_back_to_the_fingerprint(self) -> None:
+        """版を送らない旧い相手は、指紋だけで比べる。"""
+        from qgis_puppeteer._fingerprint import source_fingerprint
+
+        assert self._check(source_fingerprint(), hub_version=None, worker_version=None) == []
 
 
 # ============================================================

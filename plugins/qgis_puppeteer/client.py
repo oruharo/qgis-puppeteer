@@ -5,9 +5,9 @@ ADR-0001 §2, §3 に基づき、McpGateway やテストハーネスから Worke
 
 ## 責務
 
-- Hub に `role=automation_client` として接続・登録。Hub の hello に、Hub ファイル
-  （`qgis_puppeteer.hub_file`）の token で作った proof で答え、Hub の
-  hub_proof を確かめる（`qgis_puppeteer.handshake`）
+- Hub ファイル（`qgis_puppeteer.hub_file`）からアドレスと token を読み（``connect()``
+  のたびに）、Hub に `role=automation_client` として接続・登録。Hub の hello に
+  token で作った proof で答え、Hub の hub_proof を確かめる（`qgis_puppeteer.handshake`）
 - `request` を送って `id` で対応する `response` を待機
 - `list_instances` で現在の active Worker 一覧を取得
 - エラー応答を Python 例外として伝播
@@ -71,7 +71,6 @@ from qgis_puppeteer.protocol import (
 
 logger = logging.getLogger("qgis_puppeteer.client")
 
-DEFAULT_HUB_URL: str = "ws://127.0.0.1:9876"
 # Origin ヘッダはデフォルトで "http://localhost"（ADR-0001 §9.2 で許可）
 DEFAULT_ORIGIN: str = "http://localhost"
 DEFAULT_REQUEST_TIMEOUT_SECONDS: float = 30.0
@@ -268,28 +267,35 @@ class AutomationClient:
     def __init__(
         self,
         *,
-        url: str = DEFAULT_HUB_URL,
+        address: str | None = None,
+        token: str | None = None,
+        hub_file: str | os.PathLike[str] | None = None,
         origin: str = DEFAULT_ORIGIN,
         role: Role = Role.AUTOMATION_CLIENT,
         request_timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
         register_timeout: float = DEFAULT_REGISTER_TIMEOUT_SECONDS,
         connect_timeout: float = DEFAULT_CONNECT_TIMEOUT_SECONDS,
-        token: str | None = None,
-        hub_file: str | os.PathLike[str] | None = None,
     ) -> None:
         """
         Args:
+            address: つなぐ Hub の ``"host:port"``。省略時は Hub ファイルの
+                ``addresses`` を順に試す
+            token: 挨拶に使う token。省略時は Hub ファイルから読む
+            hub_file: アドレスと token を読む Hub ファイル。省略時は
+                ``QPUPPETEER_HUB_FILE``、それも無ければ既定の場所
+                （``qgis_puppeteer.hub_file``）。``connect()`` のたびに読む
+                （Hub が起き直すとポートも token も変わる）。``address`` と
+                ``token`` の両方を渡せば読まない
+            origin: WebSocket の Origin ヘッダ（Hub が確かめる。ADR-0001 §9.2）
             role: Hub に自己申告する role。McpGateway は `Role.MCP_GATEWAY` を、
                 pytest / その他の直接呼び出しは既定の `Role.AUTOMATION_CLIENT`
                 を使う（ADR-0001 §12.7 caller_role 伝達）。
-            token: 挨拶に使う token。省略時は Hub ファイルから読む
-            hub_file: token を読む Hub ファイル。省略時は ``QPUPPETEER_HUB_FILE``、
-                それも無ければ既定の場所（``qgis_puppeteer.hub_file``）。
-                ``connect()`` のたびに読む（Hub が起き直すと token が変わる）
         """
         if role == Role.WORKER:
             raise ValueError("AutomationClient cannot register as WORKER role")
-        self._url = url
+        self._address_arg = address
+        # 今つないでいる（最後につなごうとした）アドレス。エラーメッセージに使う
+        self._address: str | None = address
         self._origin = origin
         self._role = role
         self._request_timeout = request_timeout
@@ -315,6 +321,11 @@ class AutomationClient:
     # ------------------------------------------------------------
 
     @property
+    def address(self) -> str | None:
+        """今つないでいる（最後につなごうとした）Hub のアドレス。"""
+        return self._address
+
+    @property
     def hub_package_version(self) -> str | None:
         """つないでいる Hub のライブラリの版（connect 前は None）。"""
         return self._hub_package_version
@@ -337,9 +348,9 @@ class AutomationClient:
         接続不能を単一のエラー型で扱えるようにするため）。
 
         Raises:
-            ConnectionRefusedError / OSError: つながらない
-            HubFileError: token を引数で渡さず、Hub ファイルが無い・読めない
-                （``OSError`` の子）
+            ConnectionRefusedError / OSError: どのアドレスにもつながらない
+            HubFileError: アドレスか token を引数で渡さず、Hub ファイルが無い・
+                読めない（``OSError`` の子）
             HubAuthError: 相手を Hub として信用できない
             RegisterError: Hub が登録を断った（``unauthorized`` /
                 ``protocol_version_mismatch`` など）
@@ -352,23 +363,12 @@ class AutomationClient:
         self._lost = False
         self._closing = False
 
-        # Origin ヘッダを明示（Hub 側で完全一致検証されるため）
-        try:
-            self._ws = await connect(
-                self._url,
-                additional_headers={"Origin": self._origin},
-                open_timeout=self._connect_timeout,
-            )
-        except (TimeoutError, asyncio.TimeoutError) as e:
-            # Python 3.11+ では両者は同一だが、古い環境でも安全に拾えるよう両方 catch
-            raise ConnectionRefusedError(
-                f"Hub connection timed out after {self._connect_timeout}s at {self._url}"
-            ) from e
+        addresses, token = self._resolve_target()
+        await self._open(addresses)
 
         try:
             # 挨拶の 1 通目は reader を起こす前に自分で受ける
             hello = await self._receive_hello()
-            token = self._resolve_token()
             # reader タスクを起動してから register を送る
             self._reader_task = asyncio.create_task(
                 self._reader_loop(), name="AutomationClient.reader"
@@ -378,6 +378,42 @@ class AutomationClient:
             # 登録失敗時は掃除して再送できる状態にする
             await self._hard_close()
             raise
+
+    def _resolve_target(self) -> tuple[tuple[str, ...], str]:
+        """つなぐアドレス（順に試す）と token：引数か、Hub ファイル（毎回読む）。"""
+        if self._address_arg is not None and self._token is not None:
+            return (self._address_arg,), self._token
+        path = resolve_hub_file_path(self._hub_file)
+        info = read_hub_file(path)
+        addresses = (self._address_arg,) if self._address_arg is not None else info.addresses
+        token = self._token if self._token is not None else info.token
+        if not addresses:
+            raise ConnectionRefusedError(f"the Hub file {path} lists no address")
+        return addresses, token
+
+    async def _open(self, addresses: tuple[str, ...]) -> None:
+        """アドレスを順に試し、最初につながった WebSocket を ``self._ws`` に置く。"""
+        last_error: OSError | None = None
+        for address in addresses:
+            self._address = address
+            try:
+                # Origin ヘッダを明示（Hub 側で完全一致検証されるため）
+                self._ws = await connect(
+                    f"ws://{address}",
+                    additional_headers={"Origin": self._origin},
+                    open_timeout=self._connect_timeout,
+                )
+                return
+            except (TimeoutError, asyncio.TimeoutError):
+                # Python 3.11+ では両者は同一だが、古い環境でも安全に拾えるよう両方 catch
+                last_error = ConnectionRefusedError(
+                    f"Hub connection timed out after {self._connect_timeout}s at {address}"
+                )
+            except OSError as e:
+                last_error = e
+            logger.debug("Could not connect to the Hub at %s: %s", address, last_error)
+        assert last_error is not None
+        raise last_error
 
     async def close(self) -> None:
         """切断。reader タスクを止めて WebSocket を閉じる。"""
@@ -418,7 +454,7 @@ class AutomationClient:
             raw = await asyncio.wait_for(self._ws.recv(), timeout=self._register_timeout)
         except (TimeoutError, asyncio.TimeoutError) as e:
             raise HubAuthError(
-                f"{self._url} sent no hello within {self._register_timeout}s: it is not a "
+                f"{self._address} sent no hello within {self._register_timeout}s: it is not a "
                 "qgis-puppeteer Hub, or a Hub too old to greet (protocol 1)"
             ) from e
         except websockets.exceptions.ConnectionClosed as e:
@@ -429,16 +465,10 @@ class AutomationClient:
                 msg = decode_message(raw)
         if not isinstance(msg, Hello):
             raise HubAuthError(
-                f"{self._url} did not greet with hello: it is not a qgis-puppeteer Hub, "
+                f"{self._address} did not greet with hello: it is not a qgis-puppeteer Hub, "
                 "or a Hub too old to greet (protocol 1)"
             )
         return msg
-
-    def _resolve_token(self) -> str:
-        """挨拶に使う token：引数か、Hub ファイル（毎回読む）。"""
-        if self._token is not None:
-            return self._token
-        return read_hub_file(resolve_hub_file_path(self._hub_file)).token
 
     async def _register(self, hello: Hello, token: str) -> None:
         req_id = self._new_id()
@@ -470,7 +500,7 @@ class AutomationClient:
             )
         if not ack_is_trusted(msg, token=token, client_nonce=nonce, hub_nonce=hello.nonce):
             raise HubAuthError(
-                f"{self._url} answered register without a valid Hub proof: it does not "
+                f"{self._address} answered register without a valid Hub proof: it does not "
                 "know the token in the Hub file"
             )
         if not msg.ok:

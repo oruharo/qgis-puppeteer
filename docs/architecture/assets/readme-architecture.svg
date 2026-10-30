@@ -79,7 +79,7 @@
   <!-- ============ Hub ============ -->
   <rect x="300" y="305" width="260" height="60" rx="10" fill="#c8e6c9" stroke="#1b5e20" stroke-width="2.5"/>
   <text x="430" y="332" text-anchor="middle" font-size="18" font-weight="700" fill="#1b5e20">Hub</text>
-  <text x="430" y="354" text-anchor="middle" font-size="10.5" fill="#1b5e20">single port :9876 — routes by instance label</text>
+  <text x="430" y="354" text-anchor="middle" font-size="10.5" fill="#1b5e20">single port (OS-picked) — routes by instance label</text>
 
   <!-- mid -> Hub arrows -->
   <g stroke="#546e7a" stroke-width="1.6" fill="none">

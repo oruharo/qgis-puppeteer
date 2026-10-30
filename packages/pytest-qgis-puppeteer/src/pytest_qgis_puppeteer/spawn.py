@@ -4,7 +4,7 @@
 直接書ける context manager を提供する。fixture override や ``qgis_env`` marker と
 違い、option がテスト関数の中に出るので intent が明確になる:
 
-    with spawn_qgis(qgis_bin=QGIS_BIN, args=["--clean-canvas"], hub_port=hub_port):
+    with spawn_qgis(qgis_bin=QGIS_BIN, args=["--clean-canvas"], automation_client=client):
         client.wait_for_worker(timeout_s=60)
         # execute_python は _result の値を返す。コード例外時は WorkerCodeError。
         assert client.execute_python("_result = len(...)") == 0
@@ -48,9 +48,8 @@ logger = logging.getLogger("pytest_qgis_puppeteer.spawn")
 # dev mode 判定は plugin.py の定義を真として再利用する
 _ENV_DEV_MODE = "QPUPPETEER_E2E_USE_RUNNING_QGIS"
 
-# QGIS subprocess に渡す env 変数（plugin._qgis_spawn_env と同じセマンティクス）
-_ENV_HUB_PORT = "QPUPPETEER_HUB_PORT"
-_ENV_HUB_HOST = "QPUPPETEER_HUB_HOST"
+# QGIS subprocess に渡す env 変数
+_ENV_HUB_PREFIX = "QPUPPETEER_HUB_"
 _ENV_HUB_FILE = "QPUPPETEER_HUB_FILE"
 _ENV_TRUSTED_MODE = "QPUPPETEER_TRUSTED_MODE"
 _ENV_ALLOW_TEST_HANDLERS = "QPUPPETEER_ALLOW_TEST_HANDLERS"
@@ -141,7 +140,6 @@ class SpawnedWorker:
 @contextmanager
 def spawn_qgis(
     *,
-    hub_port: int,
     automation_client: E2EAutomationClient,
     qgis_bin: str | Path | None = None,
     args: Sequence[str] | None = None,
@@ -157,15 +155,15 @@ def spawn_qgis(
     ``command`` は排他で、両方指定すると ``ValueError``。
 
     Args:
-        hub_port: 既存 session の ``hub_port`` fixture を渡す。
         automation_client: 既存 session の ``automation_client`` fixture を渡す。
-            register 検出（pid 一致 polling）に使う。
+            register 検出（pid 一致 polling）に使う。QGIS はこの client と同じ
+            Hub ファイル（``automation_client.hub_file``）の Hub につなぐ。
         qgis_bin: QGIS 実行ファイルパス。``command`` 指定時は不要。
         args: ``qgis_bin`` 用の追加引数。
         command: 起動コマンド全体（host 独自 launcher 用）。``qgis_bin``/``args``
             と排他。
-        env: 追加環境変数。``QPUPPETEER_HUB_PORT`` 等は内部で merge され、helper
-            による値が常に勝つ（別 port を渡すと register 出来ないため）。
+        env: 追加環境変数。``QPUPPETEER_HUB_FILE`` は helper による値が常に勝つ
+            （別の Hub ファイルを渡すと、この session の Hub に register 出来ないため）。
         register_timeout_s: Worker が Hub に register するまでの待機（秒）。
         graceful_shutdown_timeout_s: terminate → kill のタイムアウト（秒）。
         label: ユーザー指定ラベル。未指定時は ``worker-{pid}`` で自動採番。
@@ -203,7 +201,6 @@ def spawn_qgis(
     launch_token = generate_launch_token()
     spawn_env = _build_env(
         base=os.environ,
-        hub_port=hub_port,
         hub_file=automation_client.hub_file,
         user_env=env,
     )
@@ -338,25 +335,23 @@ def _build_command(
 def _build_env(
     *,
     base: Mapping[str, str],
-    hub_port: int,
     hub_file: str | os.PathLike[str],
     user_env: Mapping[str, str] | None,
 ) -> dict[str, str]:
     """spawn 用 env を組み立てる。
 
-    plugin._qgis_spawn_env と同じ意味の自動注入をしつつ、ユーザー指定 env を
-    上に merge する。``QPUPPETEER_HUB_PORT`` と ``QPUPPETEER_HUB_FILE`` は
-    helper が常に勝つ（ユーザーが違う port や Hub ファイルを渡すと register
-    出来ないため）。Hub ファイルは ``automation_client`` が挨拶に使うものと同じ。
+    ``base``（ふつうは pytest の環境変数）から ``QPUPPETEER_HUB_*`` を全部消し、
+    ユーザー指定 env を上に merge する。``QPUPPETEER_HUB_FILE`` は helper が
+    常に勝つ（ユーザーが違う Hub ファイルを渡すと、この session の Hub に
+    register 出来ないため）。Hub ファイルは ``automation_client`` が挨拶に
+    使うものと同じ。
     """
-    env = dict(base)
+    # 開発者の環境に残った Hub の設定を、起こす QGIS に持ち込まない
+    env = {k: v for k, v in base.items() if not k.upper().startswith(_ENV_HUB_PREFIX)}
     if user_env:
-        # ユーザー指定が QPUPPETEER_HUB_PORT を含んでいても上書きしない
         for k, v in user_env.items():
             env[k] = v
     # helper による上書き（ユーザー指定よりも後に書くことで helper を勝たせる）
-    env[_ENV_HUB_PORT] = str(hub_port)
-    env[_ENV_HUB_HOST] = "127.0.0.1"
     env[_ENV_HUB_FILE] = os.fspath(hub_file)
     env.setdefault(_ENV_TRUSTED_MODE, "1")
     env.setdefault(_ENV_ALLOW_TEST_HANDLERS, "1")
@@ -1361,11 +1356,9 @@ def spawn_qgis_fixture(
 
     @pytest.fixture(scope=scope, name=name)
     def _fixture(
-        hub_port: int,
         automation_client: E2EAutomationClient,
     ) -> Iterator[Any]:
         spawn_kwargs: dict[str, Any] = {
-            "hub_port": hub_port,
             "automation_client": automation_client,
             "env": env,
             "register_timeout_s": register_timeout_s,

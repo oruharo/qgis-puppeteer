@@ -50,7 +50,7 @@ def _make_client(
     こうすると `call(...)` -> `loop.run_until_complete(client.call(...))` の
     呼び出しチェーンが、テスト側で受け取れる側に流れる。
     """
-    e2e = E2EAutomationClient(url="ws://test")
+    e2e = E2EAutomationClient(hub_file="unused-hub.json")
 
     inner = MagicMock(name="AutomationClient")
     if call_results is None:
@@ -93,16 +93,16 @@ class TestUseInstance:
     """``use_instance`` で設定した default が ``call(...)`` に伝播するか。"""
 
     def test_default_is_none(self) -> None:
-        e2e = E2EAutomationClient(url="ws://test")
+        e2e = E2EAutomationClient(hub_file="unused-hub.json")
         assert e2e.get_default_instance() is None
 
     def test_use_instance_sets_default(self) -> None:
-        e2e = E2EAutomationClient(url="ws://test")
+        e2e = E2EAutomationClient(hub_file="unused-hub.json")
         e2e.use_instance("worker-A")
         assert e2e.get_default_instance() == "worker-A"
 
     def test_use_instance_clears_default(self) -> None:
-        e2e = E2EAutomationClient(url="ws://test")
+        e2e = E2EAutomationClient(hub_file="unused-hub.json")
         e2e.use_instance("worker-A")
         e2e.use_instance(None)
         assert e2e.get_default_instance() is None
@@ -1250,11 +1250,11 @@ class TestActionRecorderWireup:
         return rec
 
     def test_get_recorder_initially_none(self) -> None:
-        e2e = E2EAutomationClient(url="ws://test")
+        e2e = E2EAutomationClient(hub_file="unused-hub.json")
         assert e2e.get_recorder() is None
 
     def test_set_and_get_recorder(self) -> None:
-        e2e = E2EAutomationClient(url="ws://test")
+        e2e = E2EAutomationClient(hub_file="unused-hub.json")
         rec = self._attach(e2e)
         assert e2e.get_recorder() is rec
 

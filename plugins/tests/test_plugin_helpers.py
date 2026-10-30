@@ -223,10 +223,12 @@ class TestBuildHubSpawnCommand:
         # `-m qgis_puppeteer.hub` ではなく bootstrap の絶対パスを渡す。
         # python-qgis-ltr.bat 経由だと PYTHONPATH が wipe されるため。
         python = Path("/usr/bin/python3")
-        cmd = ph._build_hub_spawn_command(python, 9876)
+        hub_file = Path("/run/hub.json")
+        cmd = ph._build_hub_spawn_command(python, hub_file)
         assert cmd[0] == str(python)
         assert cmd[1] == str(ph._HUB_BOOTSTRAP)
-        assert cmd[2:] == ["--port", "9876"]
+        # ポートは渡さない（OS が選び、Hub が Hub ファイルに書く）
+        assert cmd[2:] == ["--hub-file", str(hub_file)]
 
     def test_bootstrap_path_exists(self) -> None:
         # 実ファイルとして存在していないと subprocess が即死する
@@ -236,9 +238,8 @@ class TestBuildHubSpawnCommand:
         # `_hub_bootstrap.py` は qgis_puppeteer パッケージ内に同梱される
         assert ph._HUB_BOOTSTRAP == ph._QGIS_PUPPETEER_ROOT / "_hub_bootstrap.py"
 
-    def test_port_is_converted_to_string(self) -> None:
-        cmd = ph._build_hub_spawn_command(Path("py"), 12345)
-        assert "12345" in cmd
+    def test_every_argument_is_a_string(self) -> None:
+        cmd = ph._build_hub_spawn_command(Path("py"), Path("hub.json"))
         assert all(isinstance(x, str) for x in cmd)
 
 
@@ -281,30 +282,6 @@ class TestBuildHubSpawnEnv:
 
 
 # ==============================================================
-# _extract_port
-# ==============================================================
-
-
-class TestExtractPort:
-    def test_extracts_explicit_port(self) -> None:
-        assert ph._extract_port("ws://127.0.0.1:9876/path") == 9876
-
-    def test_returns_default_when_port_missing(self) -> None:
-        assert ph._extract_port("ws://127.0.0.1/path") == ph.DEFAULT_HUB_PORT
-
-    def test_returns_custom_default(self) -> None:
-        assert ph._extract_port("ws://127.0.0.1/", default=1234) == 1234
-
-    def test_returns_default_for_invalid_url(self) -> None:
-        # urlparse は緩いのでほぼ何でも受ける。それでも port が取れなければ default
-        assert ph._extract_port("not a url") == ph.DEFAULT_HUB_PORT
-
-    def test_supports_wss_and_custom_ports(self) -> None:
-        assert ph._extract_port("wss://example.com:443/register") == 443
-        assert ph._extract_port("ws://[::1]:8765/") == 8765
-
-
-# ==============================================================
 # _resolve_hub_log_file
 # ==============================================================
 
@@ -314,16 +291,13 @@ class TestResolveHubLogFile:
         explicit = tmp_path / "my.log"
         monkeypatch.setenv(ph.ENV_HUB_LOG_FILE, str(explicit))
 
-        assert ph._resolve_hub_log_file() == explicit
+        assert ph._resolve_hub_log_file(tmp_path / "hub.json") == explicit
 
-    def test_default_is_temp_dir_with_known_filename(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_default_is_next_to_the_hub_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.delenv(ph.ENV_HUB_LOG_FILE, raising=False)
-        result = ph._resolve_hub_log_file()
-        assert result.name == ph.DEFAULT_SPAWN_LOG_FILENAME
-        # 一時ディレクトリ配下にあること
-        import tempfile
-
-        assert str(result.parent) == tempfile.gettempdir()
+        assert ph._resolve_hub_log_file(tmp_path / "hub.json") == tmp_path / "hub.spawn.log"
 
 
 # ==============================================================
@@ -501,48 +475,26 @@ class TestDiscoverExtensions:
 
 
 # ==============================================================
-# _resolve_hub_url
+# _is_external_hub
 # ==============================================================
 
 
-class TestResolveHubUrl:
-    """ENV の優先順（URL > HOST/PORT > default）。
+class TestIsExternalHub:
+    """``QPUPPETEER_HUB_FILE`` があれば Hub は持ち主が起こす（プラグインは起こさない）。"""
 
-    `monkeypatch.delenv(..., raising=False)` で 3 キーを空に戻してから
-    個別のシナリオを作る。
-    """
+    def test_no_hub_file_env_means_the_plugin_starts_the_hub(self) -> None:
+        assert ph._is_external_hub({}) is False
 
-    def _clear_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        for key in (ph.ENV_HUB_URL, ph.ENV_HUB_HOST, ph.ENV_HUB_PORT):
-            monkeypatch.delenv(key, raising=False)
+    def test_an_empty_hub_file_env_is_ignored(self) -> None:
+        assert ph._is_external_hub({ph.ENV_HUB_FILE: ""}) is False
 
-    def test_returns_default_when_no_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._clear_env(monkeypatch)
-        assert ph._resolve_hub_url() == "ws://127.0.0.1:9876"
+    def test_a_hub_file_env_means_someone_else_owns_the_hub(self) -> None:
+        assert ph._is_external_hub({ph.ENV_HUB_FILE: "/run/hub.json"}) is True
 
-    def test_hub_url_override_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._clear_env(monkeypatch)
-        monkeypatch.setenv(ph.ENV_HUB_URL, "ws://example.com:8080/path")
-        # HOST/PORT を併設しても HUB_URL が優先される
-        monkeypatch.setenv(ph.ENV_HUB_HOST, "10.0.0.1")
-        monkeypatch.setenv(ph.ENV_HUB_PORT, "1234")
-        assert ph._resolve_hub_url() == "ws://example.com:8080/path"
-
-    def test_host_and_port_are_composed(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._clear_env(monkeypatch)
-        monkeypatch.setenv(ph.ENV_HUB_HOST, "10.0.0.5")
-        monkeypatch.setenv(ph.ENV_HUB_PORT, "9999")
-        assert ph._resolve_hub_url() == "ws://10.0.0.5:9999"
-
-    def test_only_host_keeps_default_port(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._clear_env(monkeypatch)
-        monkeypatch.setenv(ph.ENV_HUB_HOST, "192.168.1.10")
-        assert ph._resolve_hub_url() == "ws://192.168.1.10:9876"
-
-    def test_only_port_keeps_default_host(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._clear_env(monkeypatch)
-        monkeypatch.setenv(ph.ENV_HUB_PORT, "4242")
-        assert ph._resolve_hub_url() == "ws://127.0.0.1:4242"
+    def test_old_url_settings_no_longer_count(self) -> None:
+        """廃止した ``QPUPPETEER_HUB_URL`` / ``HUB_PORT`` だけでは外部の Hub とみなさない。"""
+        env = {"QPUPPETEER_HUB_URL": "ws://127.0.0.1:9876", "QPUPPETEER_HUB_PORT": "9876"}
+        assert ph._is_external_hub(env) is False
 
 
 class TestShouldCloseAfterRegisterFailure:
