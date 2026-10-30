@@ -3187,6 +3187,37 @@ QGIS で 2 回走ることがある。送り直すのは、要求が Hub に届�
 2. プラグインが読み込みで失敗している。QGIS に Python のエラーが出ていないか見る
 3. 起動に時間がかかる（重いプロジェクト、初めての起動、遅い CI のマシン）。
    `qgis_startup_timeout`（既定 60 秒）を伸ばす
+4. <a id="faulthandler"></a>QGIS に `PYTHONFAULTHANDLER`（か `PYTHONDEVMODE`）が渡っていて、
+   QGIS が stderr を持たずに起きている。エラーの末尾に stderr の行が無く、
+   `QGIS wrote nothing to stderr, and it was started with PYTHONFAULTHANDLER=...` と
+   出ていればこれ。faulthandler は Python の初期化の途中で stderr に向けて有効になる
+   ので、stderr が無いと有効にできず、QGIS の中の Python が起動しない（プラグインも
+   動かず、Hub に接続も来ない）。Python は空でない値なら `0` でも有効にする。
+   - stderr が無くなるのは、`qgis_command` のランチャーが途中で QGIS へ stderr を
+     渡していないとき。よくあるのは、bat が `start "" qgis-ltr-bin.exe` のように
+     cmd の `start` で QGIS を起こす形（`start` は GUI の子に標準入出力を渡さない）。
+     Python の `subprocess.Popen` に `DETACHED_PROCESS` を付けて切り離すのも同じ。
+     bat や `subprocess.Popen` を挟むだけなら stderr はそのまま渡るし、`2>nul` の
+     ように捨てても stderr はあるので起きない。`qgis_bin` で直接起こすときは、QGIS の
+     stderr が pytest につながるので起きない
+   - 直し方（どれか一つ）:
+     - ランチャーを直し、QGIS に stderr を渡す。`start` で待たずに戻りたいなら
+       `start "" /b qgis-ltr-bin.exe` にする（`/b` なら標準入出力が渡る。小さな GUI の
+       Python では確かめたが、QGIS 本体ではまだ確かめていない）。起動に失敗したときの
+       QGIS の stderr もエラーに載るようになる
+     - pytest の環境に入れない。pytest は組み込みの faulthandler で自分のクラッシュを
+       最初から書き出すので、pytest 自身のためには要らない。どうしても付けるなら
+       `python -X faulthandler -m pytest`（`-X` は子のプロセスに渡らない）
+     - Hub には付けたまま、QGIS にだけ空の値を渡す（空なら無効）:
+
+       ```python
+       # conftest.py
+       def pytest_qgis_before_spawn(config, kind):
+           return {"env": {"PYTHONFAULTHANDLER": ""}}
+       ```
+
+       `environments.toml` の `env` で同じ変数を決めているときはそちらが勝つので、
+       そこに `PYTHONFAULTHANDLER = ""` と書く
 
 ### `label_conflict`（同時同 label）
 

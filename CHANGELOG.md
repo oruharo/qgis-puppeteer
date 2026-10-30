@@ -8,6 +8,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A register timeout names PYTHONFAULTHANDLER when QGIS wrote nothing to
+  stderr.** When QGIS starts without a stderr (for example, a launcher .bat
+  that runs it with `start`, which gives a GUI program no standard handles) and `PYTHONFAULTHANDLER` or `PYTHONDEVMODE` is set to a
+  non-empty value, even `0`, the Python in QGIS cannot enable faulthandler and
+  fails to start, so the Worker never registers. `WorkerRegisterTimeout` now
+  says so when it sees that variable in the environment given to QGIS and no
+  stderr line, and how to give QGIS an empty value from
+  `pytest_qgis_before_spawn`. The user guide's Troubleshooting has the causes
+  and the fixes.
+
 - **pytest warns when the Hub or QGIS runs another qgis-puppeteer.** The
   pytest plugin compared only the source fingerprint of the plugin in QGIS,
   which says nothing when the versions differ. It now warns when the Hub's or

@@ -54,6 +54,10 @@ _ENV_HUB_FILE = "QPUPPETEER_HUB_FILE"
 _ENV_TRUSTED_MODE = "QPUPPETEER_TRUSTED_MODE"
 _ENV_ALLOW_TEST_HANDLERS = "QPUPPETEER_ALLOW_TEST_HANDLERS"
 
+# Python の初期化で faulthandler を有効にする環境変数（空でない値なら "0" でも有効）。
+# stderr を持たずに起きた QGIS では、中の Python が初期化に失敗する
+_FAULTHANDLER_ENV_VARS = ("PYTHONFAULTHANDLER", "PYTHONDEVMODE")
+
 
 class WorkerRegisterTimeout(TimeoutError):
     """spawn した QGIS が ``register_timeout_s`` 内に Hub に register しなかった。
@@ -240,6 +244,7 @@ def spawn_qgis(
                 command=cmd,
                 stderr=captured_stderr,
                 drain_threads=drain_threads,
+                env=spawn_env,
             ),
         )
     except WorkerRegisterRejected as e:
@@ -424,6 +429,8 @@ class _Launch:
     command: Sequence[str]
     stderr: list[str]
     drain_threads: list[threading.Thread]
+    # QGIS に渡した環境変数（時間切れのヒントに使う）
+    env: Mapping[str, str] = field(default_factory=dict)
 
     def failed_returncode(self) -> int | None:
         """0 以外の終了コードで終わっていれば、その終了コード。まだ動いているか 0 なら None。"""
@@ -450,6 +457,31 @@ def _format_stderr_tail(tail: list[str]) -> str:
         return ""
     body = "\n".join(f"  {line}" for line in tail)
     return f"\nstderr of the launch command (last {len(tail)} lines):\n{body}"
+
+
+def _faulthandler_hint(env: Mapping[str, str], tail: list[str]) -> str:
+    """stderr が 1 行も無く、faulthandler を有効にする環境変数を QGIS に渡していれば、そのヒント。
+
+    QGIS が stderr を持たずに起きる（ランチャーが QGIS へ stderr を渡さない）と、
+    中の Python は faulthandler を有効にできずに初期化で止まり、プラグインも動かない。
+    外からは時間切れにしか見えないので、ここで名指しする。stderr に何か届いていれば
+    QGIS には stderr があるので、この原因ではない。
+    """
+    if tail:
+        return ""
+    names = [name for name in _FAULTHANDLER_ENV_VARS if env.get(name)]
+    if not names:
+        return ""
+    shown = " and ".join(f"{name}={env[name]}" for name in names)
+    return (
+        f"\nQGIS wrote nothing to stderr, and it was started with {shown}. When QGIS "
+        "starts without a stderr (for example, a launcher .bat that runs it with "
+        '`start ""`, which gives a GUI program no standard handles), its Python cannot '
+        "enable faulthandler and fails to start, so QGIS never registers. Give QGIS an "
+        f'empty value, e.g. return {{"env": {{"{names[0]}": ""}}}} from '
+        'pytest_qgis_before_spawn ("0" still turns it on), or pass stderr on in the '
+        'launcher (`start "" /b` does). See Troubleshooting in the user guide.'
+    )
 
 
 def _launch_failed(launch_token: str, launch: _Launch, returncode: int) -> WorkerLaunchFailed:
@@ -514,15 +546,17 @@ def _wait_for_worker_by_token(
     except TimeoutError as e:
         if launch is None:
             tail: list[str] = []
+            hint = ""
         else:
             # 待ちが切れる間際に終わったなら、そちらが原因
             returncode = launch.failed_returncode()
             if returncode is not None:
                 raise _launch_failed(launch_token, launch, returncode) from e
             tail = launch.stderr_tail()
+            hint = _faulthandler_hint(launch.env, tail)
         raise WorkerRegisterTimeout(
             f"QGIS subprocess (launch_token={launch_token}) did not register "
-            f"to Hub and answer a command within {timeout_s}s" + _format_stderr_tail(tail)
+            f"to Hub and answer a command within {timeout_s}s" + _format_stderr_tail(tail) + hint
         ) from e
 
 

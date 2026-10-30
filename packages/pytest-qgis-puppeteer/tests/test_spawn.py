@@ -424,7 +424,11 @@ class TestWaitForWorkerByToken:
             )
 
     @staticmethod
-    def _launch(returncode: int | None, stderr: list[str] | None = None) -> _Launch:
+    def _launch(
+        returncode: int | None,
+        stderr: list[str] | None = None,
+        env: dict[str, str] | None = None,
+    ) -> _Launch:
         proc = _FakePopen()
         proc.returncode = returncode
         return _Launch(
@@ -432,6 +436,7 @@ class TestWaitForWorkerByToken:
             command=["launcher.bat", "--profile", "e2e"],
             stderr=list(stderr or []),
             drain_threads=[],
+            env=dict(env or {}),
         )
 
     def test_launch_that_exits_with_an_error_fails_without_waiting(self) -> None:
@@ -521,6 +526,43 @@ class TestWaitForWorkerByToken:
         assert "warning 14" in message
         assert "warning 5" in message
         assert "warning 4" not in message
+
+    def _timeout_message(self, launch: _Launch) -> str:
+        client = _FakeAutomationClient()
+        client.feed([])
+        with pytest.raises(WorkerRegisterTimeout, match="did not register") as excinfo:
+            _wait_for_worker_by_token(
+                client,  # type: ignore[arg-type]
+                launch_token="lt-x",
+                timeout_s=0.1,
+                poll_interval_s=0.01,
+                launch=launch,
+            )
+        return str(excinfo.value)
+
+    @pytest.mark.parametrize("name", ["PYTHONFAULTHANDLER", "PYTHONDEVMODE"])
+    def test_a_silent_qgis_with_faulthandler_on_gets_a_hint(self, name: str) -> None:
+        """stderr が無い QGIS では faulthandler で Python が起きないので、名指しする。"""
+        message = self._timeout_message(self._launch(None, env={name: "1"}))
+        assert f"started with {name}=1" in message
+        assert "pytest_qgis_before_spawn" in message
+        assert f'"{name}": ""' in message
+
+    def test_zero_still_counts_as_on(self) -> None:
+        """Python は空でない値なら "0" でも有効にする。"""
+        message = self._timeout_message(self._launch(None, env={"PYTHONFAULTHANDLER": "0"}))
+        assert "PYTHONFAULTHANDLER=0" in message
+
+    def test_no_hint_when_the_variable_is_empty(self) -> None:
+        message = self._timeout_message(self._launch(None, env={"PYTHONFAULTHANDLER": ""}))
+        assert "faulthandler" not in message
+
+    def test_no_hint_when_qgis_wrote_to_stderr(self) -> None:
+        """stderr に何か届いていれば QGIS には stderr があるので、この原因ではない。"""
+        launch = self._launch(None, ["warning\n"], env={"PYTHONFAULTHANDLER": "1"})
+        message = self._timeout_message(launch)
+        assert "faulthandler" not in message
+        assert "warning" in message
 
 
 # ============================================================
