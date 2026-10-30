@@ -31,6 +31,7 @@ from qgis_puppeteer.hub_file import (
     resolve_hub_file_path,
 )
 from qgis_puppeteer.hub_probe import (
+    HubFingerprintError,
     HubProbeError,
     describe_hub_file,
     find_live_hub,
@@ -189,6 +190,7 @@ __all__ = [
     "read_hub_file",
     "resolve_hub_file_path",
     # hub_probe（生きた Hub の確かめ）
+    "HubFingerprintError",
     "HubProbeError",
     "describe_hub_file",
     "find_live_hub",

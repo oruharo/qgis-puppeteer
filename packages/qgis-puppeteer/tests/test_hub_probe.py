@@ -24,6 +24,7 @@ from qgis_puppeteer._version import __version__
 from qgis_puppeteer.handshake import check_register, generate_nonce, generate_token, hub_proof
 from qgis_puppeteer.hub_file import HubFileInfo, write_hub_file
 from qgis_puppeteer.hub_probe import (
+    HubFingerprintError,
     HubProbeError,
     describe_hub_file,
     find_live_hub,
@@ -236,7 +237,7 @@ class TestGreetHubOverTls:
         hub = _FakeHub()
         with (
             _serve(hub, server_ssl_context(tls_identity())) as address,
-            pytest.raises(HubProbeError, match="does not match"),
+            pytest.raises(HubFingerprintError, match="does not match"),
         ):
             greet_hub(address, hub.token, tls_fingerprint=tls_identity(1).fingerprint_sha256)
 
@@ -357,6 +358,27 @@ class TestFindLiveHubOverTls:
                 tls=self._tls(tls_identity(1).fingerprint_sha256),
             )
             assert find_live_hub(tmp_path / "hub.json") is None
+
+    def test_a_mismatch_stops_before_the_other_addresses(self, tmp_path: Path) -> None:
+        """指紋の合わない相手が出たら、後ろのアドレスに本物がいても None。
+
+        ``AutomationClient`` はそこで HubAuthError になるので、「生きている」と答えない。
+        """
+        identity = tls_identity()
+        imposter, hub = _FakeHub(), _FakeHub()
+        hub.token = imposter.token
+        with (
+            _serve(imposter, server_ssl_context(tls_identity(1))) as wrong,
+            _serve(hub, server_ssl_context(identity)) as right,
+        ):
+            tls = self._tls(identity.fingerprint_sha256)
+            _write(tmp_path / "hub.json", wrong, right, token=hub.token, network=True, tls=tls)
+            assert find_live_hub(tmp_path / "hub.json") is None
+            # 順を入れ替えれば見つかる（後ろのアドレス自体は生きている）
+            written = _write(
+                tmp_path / "hub.json", right, wrong, token=hub.token, network=True, tls=tls
+            )
+            assert find_live_hub(tmp_path / "hub.json") == written
 
     def test_an_unusable_fingerprint_means_no_hub(self, tmp_path: Path) -> None:
         """tls があるのに指紋が読めなければ、平文で試さずに None。"""

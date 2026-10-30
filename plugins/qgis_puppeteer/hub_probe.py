@@ -10,7 +10,8 @@
    があれば TLS でつなぎ、証明書の指紋も照合する（``qgis_puppeteer.hub_remote``）
 
 どれかが欠ければ、そのファイルは古い（Hub が落ちた、別のプログラムがそのポートを
-使っている、など）とみなして無視する。
+使っている、など）とみなして無視する。指紋の合わない相手が出たら、ほかのアドレスは
+試さない（``AutomationClient`` と同じ。確かめた結果とつないだ結果をそろえる）。
 
 挨拶は、標準ライブラリだけで書いた小さな同期の WebSocket クライアントで行う
 （QGIS の Python には websockets が無い。プラグインが Hub を起こすか決めるときにも
@@ -73,6 +74,10 @@ _OP_PONG = 0xA
 
 class HubProbeError(Exception):
     """挨拶が通らなかった（つながらない・Hub でない・token が違う・時間切れ）。"""
+
+
+class HubFingerprintError(HubProbeError):
+    """TLS の相手の証明書が Hub ファイルの指紋と合わない（挨拶の前に切った）。"""
 
 
 # ============================================================
@@ -159,8 +164,8 @@ def greet_hub(
             ことを挨拶の前に確かめる
 
     Raises:
-        HubProbeError: つながらない・hello が来ない・Hub が断った・hub_proof が合わない・
-            証明書の指紋が合わない
+        HubFingerprintError: 証明書の指紋が合わない
+        HubProbeError: つながらない・hello が来ない・Hub が断った・hub_proof が合わない
     """
     deadline = time.monotonic() + timeout
     try:
@@ -212,7 +217,7 @@ def greet_hub(
 
 
 def _wrap_tls(sock: socket.socket, address: str, fingerprint: str) -> socket.socket:
-    """TLS でつなぎ、証明書の指紋を照合する。合わなければ切って HubProbeError。"""
+    """TLS でつなぎ、証明書の指紋を照合する。合わなければ切って HubFingerprintError。"""
     try:
         tls = client_ssl_context().wrap_socket(sock)
     except (OSError, ValueError) as e:
@@ -220,7 +225,7 @@ def _wrap_tls(sock: socket.socket, address: str, fingerprint: str) -> socket.soc
         raise HubProbeError(f"TLS with {address} failed: {e}") from e
     if not peer_matches(tls.getpeercert(binary_form=True), fingerprint):
         tls.close()
-        raise HubProbeError(fingerprint_mismatch_message(address))
+        raise HubFingerprintError(fingerprint_mismatch_message(address))
     return tls
 
 
@@ -239,8 +244,10 @@ def find_live_hub(
 ) -> HubFileInfo | None:
     """``path`` の Hub ファイルが生きた Hub を指していれば、その中身を返す。
 
-    ファイルが無い・壊れている・pid が死んでいる・どのアドレスでも挨拶が通らない
-    （TLS なら証明書の指紋が合わない）なら None（古いファイルは無視する）。
+    ファイルが無い・壊れている・pid が死んでいる・どのアドレスでも挨拶が通らないなら
+    None（古いファイルは無視する）。TLS で証明書の指紋が合わない相手が出たら、
+    ほかのアドレスは試さずに None（``AutomationClient`` はそこで ``HubAuthError`` に
+    なるので、ここで「生きている」と答えない）。
 
     Args:
         address: ファイルの ``addresses`` の代わりに試すアドレス（VM の NAT の先など、
@@ -256,6 +263,8 @@ def find_live_hub(
     for candidate in (address,) if address is not None else info.addresses:
         try:
             greet_hub(candidate, info.token, timeout=timeout, tls_fingerprint=fingerprint)
+        except HubFingerprintError:
+            return None
         except HubProbeError:
             continue
         return info

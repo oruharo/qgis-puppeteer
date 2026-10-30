@@ -60,8 +60,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `AutomationClient`, `find_live_hub` / `greet_hub` (`tls_fingerprint=`) and
   the pytest plugin connect over TLS and check that the certificate's SHA-256
   is the fingerprint in the file before the greeting; when it is not, they
-  close the connection and raise `HubAuthError` (`HubProbeError` in the
-  probe) without trying the other addresses. A `tls` without a usable
+  close the connection and raise `HubAuthError` (`HubFingerprintError`, a
+  `HubProbeError`, in `greet_hub`) without trying the other addresses;
+  `find_live_hub` then returns `None`. A `tls` without a usable
   fingerprint is a `HubFileError`. A Hub file without a `pid` skips the pid
   check.
 - **The address can be overridden.** `AutomationClient(address=...)`,
