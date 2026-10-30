@@ -222,12 +222,16 @@ class E2EAutomationClient:
         self,
         *,
         hub_file: str | os.PathLike[str] | None = None,
+        address: str | None = None,
         origin: str = "http://localhost",
     ) -> None:
         self._origin = origin
         # Hub のアドレスと挨拶の token を読む Hub ファイル。省略時は
         # QPUPPETEER_HUB_FILE、それも無ければ既定の場所（qgis_puppeteer.hub_file）
         self._hub_file = hub_file
+        # Hub ファイルの addresses の代わりにつなぐ宛先（token と TLS の指紋は
+        # ファイルから。pytest の --qgis-hub-address）
+        self._address = address
         self._loop: asyncio.AbstractEventLoop | None = None
         self._client: AutomationClient | None = None
         # use_instance() で sticky に設定するデフォルト instance。``call(...)`` の
@@ -260,6 +264,7 @@ class E2EAutomationClient:
             origin=self._origin,
             role=Role.AUTOMATION_CLIENT,
             hub_file=self._hub_file,
+            address=self._address,
         )
         self._loop.run_until_complete(self._client.connect())
         logger.info(

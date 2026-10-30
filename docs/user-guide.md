@@ -711,6 +711,10 @@ Windows の cmd では `set QPUPPETEER_E2E_USE_RUNNING_QGIS=1`、PowerShell で�
 動いていなければ、pytest はテストを始めずに止まる。相乗りする QGIS とは同じ
 Hub ファイルを使う（[Hub 接続関連](#hub-接続関連)）。
 
+別の機械の Hub（`--listen`）の `remote\hub.json` を `QPUPPETEER_HUB_FILE` で指せば、
+その Hub の QGIS で走らせられる。ファイルのアドレスで届かないときは
+`--qgis-hub-address=<host>:<port>` で宛先を渡す（dev モードだけ）。
+
 dev モードでは、`fresh_qgis` と `spawn_qgis()` のテストは skip になる。未捕捉例外と
 メッセージログでテストを落とす判定もしない。
 
@@ -2807,6 +2811,28 @@ pytest の fixture のように、Hub を別に起こす使い方のための動
   その Hub を先に起こしてから QGIS を起動する。
 - Claude Desktop などの MCP gateway を別の Hub に向けるときは、gateway の env
   （`claude_desktop_config.json` の `env`）に、その Hub の `QPUPPETEER_HUB_FILE` を立てる。
+
+#### 別の機械からつなぐ（`--listen`）
+
+Hub は既定では 127.0.0.1 でしか待たない。別の機械（WSL を含む）のクライアントから
+つなぐときは、QGIS の機械で QGIS より先に、QGIS 付属の Python で Hub を起こしておく:
+
+```bat
+python-qgis-ltr.bat -m qgis_puppeteer.hub --listen 0.0.0.0:9876
+```
+
+- ネットワーク側は **TLS だけ**で、つなげるのはクライアント（MCP gateway・
+  `AutomationClient`・pytest）だけ。QGIS は Hub と同じ機械で動かす。
+- Hub は既定の Hub ファイルも書くので、その機械の QGIS はいつもどおりこの Hub に
+  つなぐ。`--listen` の Hub は idle になっても止まらない。
+- ネットワーク用の token と証明書は `%LOCALAPPDATA%\qgis_puppeteer\remote\` に一度だけ
+  作られ、起こし直しても変わらない。その中の `hub.json` を相手の機械へ写し、
+  `QPUPPETEER_HUB_FILE` で指す。クライアントは証明書がこのファイルの指紋と合うことを
+  確かめてからつなぐ。
+- token と鍵を作り直すときは `--rotate` を付けて起こし、`hub.json` を写し直す。
+- 写した `hub.json` のアドレスで届かない（VM の NAT の先など）ときは、`addresses` を
+  書き換えるか、`AutomationClient(address=...)`・pytest の `--qgis-hub-address`
+  （dev モードだけ）で宛先を渡す。token と指紋はファイルのものを使う。
 
 ### Worker 関連
 

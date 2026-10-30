@@ -9,6 +9,11 @@ ADR-0001 §4, §6, §9 に基づき、`QCoreApplication` 上で
 - 127.0.0.1 の OS が選んだポート（port 0）で WebSocket listen（Origin 完全一致検証付き）
 - Hub ファイル（`qgis_puppeteer.hub_file`）に接続情報（アドレス・token・pid・版）を書く。
   つなぐ側はこのファイルでアドレスと token を知る
+- ``--listen`` を付けたときだけ、そのアドレスでもネットワークから受け付ける（TLS 必須）。
+  token・鍵・証明書はリモートのフォルダに残したものを使い（`qgis_puppeteer.hub_remote`）、
+  別の機械へ写す接続情報ファイル（``remote/hub.json``）を書く。そちらはクライアント
+  だけを受け、Worker の登録は断る（QGIS はいつも Hub と同じ機械）。この Hub は人が
+  常駐させるものなので、接続が無くなっても止まらない
 - 接続ごとに挨拶（`qgis_puppeteer.handshake`）：hello を送り、proof の通った
   register が来るまでほかのメッセージを受け付けない
 - 接続イベントを `HubState` に委譲
@@ -20,6 +25,7 @@ ADR-0001 §4, §6, §9 に基づき、`QCoreApplication` 上で
 
 ```
 python -m qgis_puppeteer.hub [--hub-file PATH] [--port N]
+python -m qgis_puppeteer.hub --listen 0.0.0.0:9876 [--rotate] [--remote-dir DIR]
 ```
 
 Worker プラグインから `subprocess.Popen` で DETACHED 起動される想定
@@ -28,8 +34,9 @@ Worker プラグインから `subprocess.Popen` で DETACHED 起動される想�
 ## 終了コード
 
 - 0：ふつうに止まった（idle 自動終了・シグナル）
-- 1：bind に失敗した
-- 2：Hub ファイルを書けなかった
+- 1：bind に失敗した（``--listen`` の TLS を使えないときも）
+- 2：Hub ファイル（または、ネットワーク用の token・鍵・証明書・接続情報ファイル）を
+  書けなかった
 - 3：同じ Hub ファイルで生きた Hub がもういる（上書きせずに降りた）
 """
 
@@ -52,7 +59,16 @@ from PyQt5.QtCore import (  # type: ignore[import-not-found]
     QObject,
     QTimer,
 )
-from PyQt5.QtNetwork import QHostAddress  # type: ignore[import-not-found]
+from PyQt5.QtNetwork import (  # type: ignore[import-not-found]
+    QAbstractSocket,
+    QHostAddress,
+    QNetworkInterface,
+    QSsl,
+    QSslCertificate,
+    QSslConfiguration,
+    QSslKey,
+    QSslSocket,
+)
 from PyQt5.QtWebSockets import (  # type: ignore[import-not-found]
     QWebSocketCorsAuthenticator,
     QWebSocketServer,
@@ -72,7 +88,14 @@ from qgis_puppeteer.hub_file import (
     resolve_hub_file_path,
     write_hub_file,
 )
-from qgis_puppeteer.hub_probe import find_live_hub
+from qgis_puppeteer.hub_probe import find_live_hub, split_address
+from qgis_puppeteer.hub_remote import (
+    FINGERPRINT_KEY,
+    REMOTE_HUB_FILE,
+    RemoteIdentity,
+    default_remote_dir,
+    load_or_create_remote_identity,
+)
 from qgis_puppeteer.hub_spawn import (
     HUB_EXIT_ALREADY_RUNNING,
     HUB_EXIT_BIND_FAILED,
@@ -149,6 +172,19 @@ class HubFileWriteError(Exception):
     """Hub ファイルを書けなかった。つなぐ側が token を読めないので Hub は動けない。"""
 
 
+@dataclass(frozen=True)
+class RemoteListen:
+    """ネットワークから受け付ける待ち受け（``--listen``）。"""
+
+    # IP アドレス（"0.0.0.0" / "::" ならすべて）
+    host: str
+    # 1〜65535（写したファイルが古くならないよう、0 は使わない）
+    port: int
+    identity: RemoteIdentity
+    # 別の機械へ写す接続情報ファイル。None なら書かない（テスト用）
+    hub_file: Path | None = None
+
+
 # ============================================================
 # Hub 本体
 # ============================================================
@@ -168,6 +204,7 @@ class Hub(QObject):
         hub_file: Path | None = None,
         token: str | None = None,
         register_timeout_ms: int = REGISTER_TIMEOUT_MS,
+        remote: RemoteListen | None = None,
         parent: QObject | None = None,
     ) -> None:
         """
@@ -177,14 +214,18 @@ class Hub(QObject):
                 ``token`` で渡して直接つなぐテスト用）
             token: 挨拶の token。None なら作る（ふだんはこちら。起きるたびに変わる）
             register_timeout_ms: 接続してから register を待つ時間
+            remote: ネットワークからも受け付けるときの待ち受け（TLS）
         """
         super().__init__(parent)
         self._port = port
         self._hub_file = hub_file
         self._token = token if token is not None else generate_token()
         self._register_timeout_ms = register_timeout_ms
+        self._remote = remote
         self._wrote_hub_file = False
         self._state = HubState()
+        # ネットワーク側（TLS）から来た接続。token が違い、Worker は受けない
+        self._remote_conns: set[str] = set()
 
         # 挨拶：hello を送ったが、まだ proof の通った register が来ていない接続 → hub の nonce
         self._hello_nonces: dict[str, str] = {}
@@ -207,8 +248,26 @@ class Hub(QObject):
 
         # Qt オブジェクト
         self._server = QWebSocketServer("qgis-puppeteer-hub", QWebSocketServer.NonSecureMode, self)
-        self._server.newConnection.connect(self._on_new_connection)
+        self._server.newConnection.connect(lambda: self._on_new_connection(self._server, False))
         self._server.originAuthenticationRequired.connect(self._on_origin_auth)
+        self._remote_server: QWebSocketServer | None = None
+        if remote is not None:
+            self._remote_server = QWebSocketServer(
+                "qgis-puppeteer-hub", QWebSocketServer.SecureMode, self
+            )
+            self._remote_server.newConnection.connect(
+                lambda: self._on_new_connection(self._remote_server, True)
+            )
+            self._remote_server.originAuthenticationRequired.connect(self._on_origin_auth)
+            self._remote_server.sslErrors.connect(
+                lambda errors: logger.warning(
+                    "TLS errors on a network connection: %s",
+                    "; ".join(e.errorString() for e in errors),
+                )
+            )
+            self._remote_server.acceptError.connect(
+                lambda err: logger.warning("Network accept error: %s", err)
+            )
 
         # grace 期限切れ定期 sweep
         self._sweep_timer = QTimer(self)
@@ -234,6 +293,19 @@ class Hub(QObject):
     def hub_file(self) -> Path | None:
         return self._hub_file
 
+    @property
+    def remote_port(self) -> int | None:
+        """ネットワーク側で待ち受けているポート（待ち受けていなければ None）。"""
+        if self._remote_server is None or not self._remote_server.isListening():
+            return None
+        return int(self._remote_server.serverPort())
+
+    def _token_for(self, conn_id: str) -> str:
+        """接続の側（ローカル / ネットワーク）の token。"""
+        if conn_id in self._remote_conns and self._remote is not None:
+            return self._remote.identity.token
+        return self._token
+
     def start(self) -> None:
         """listen を始め、Hub ファイルを書く。
 
@@ -248,6 +320,12 @@ class Hub(QObject):
             )
         port = self._server.serverPort()
         logger.info("Hub listening on 127.0.0.1:%d", port)
+        if self._remote is not None:
+            try:
+                self._listen_remote(self._remote)
+            except OSError:
+                self._server.close()
+                raise
 
         # listen できた Hub だけが書く（bind に負けた Hub は勝った Hub のファイルを
         # 上書きしない）。書いてからイベントループに戻るので、ファイルを読んだ相手が
@@ -267,11 +345,15 @@ class Hub(QObject):
                 )
             except OSError as e:
                 self._server.close()
+                if self._remote_server is not None:
+                    self._remote_server.close()
                 raise HubFileWriteError(
                     f"Hub could not write its Hub file {self._hub_file}: {e}"
                 ) from e
             self._wrote_hub_file = True
             logger.info("Hub file: %s", self._hub_file)
+        if self._remote is not None and self._remote.hub_file is not None:
+            self._write_remote_hub_file(self._remote)
 
         # 起動直後は全接続 0 なので idle 自動終了タイマーを起動
         self._reassess_idle_shutdown()
@@ -281,6 +363,10 @@ class Hub(QObject):
         self._sweep_timer.stop()
         self._idle_shutdown_timer.stop()
         self._server.close()
+        # ネットワーク用の接続情報ファイルは残す（写した先と同じ中身で、Hub を
+        # 起こし直しても変わらない）
+        if self._remote_server is not None:
+            self._remote_server.close()
         if self._wrote_hub_file and self._hub_file is not None:
             # 自分の token のときだけ消す（あとから起きた別の Hub のファイルは残す）
             try:
@@ -289,6 +375,71 @@ class Hub(QObject):
                 logger.warning("Failed to remove the Hub file: %s", e)
             self._wrote_hub_file = False
         logger.info("Hub stopped")
+
+    def _listen_remote(self, remote: RemoteListen) -> None:
+        """ネットワーク側の TLS の待ち受けを始める。
+
+        Raises:
+            OSError: TLS を使えない・鍵か証明書を読めない・bind に失敗した
+        """
+        assert self._remote_server is not None
+        if not QSslSocket.supportsSsl():
+            raise OSError(
+                "This Qt has no TLS support (OpenSSL not found), so the Hub cannot listen "
+                f"on {_format_address(remote.host, remote.port)}"
+            )
+        cert = QSslCertificate(remote.identity.cert_pem.encode("ascii"), QSsl.Pem)
+        key = QSslKey(remote.identity.key_pem.encode("ascii"), QSsl.Rsa, QSsl.Pem, QSsl.PrivateKey)
+        if cert.isNull() or key.isNull():
+            raise OSError("Qt could not load the Hub's TLS certificate or key")
+        config = QSslConfiguration.defaultConfiguration()
+        config.setLocalCertificate(cert)
+        config.setPrivateKey(key)
+        config.setPeerVerifyMode(QSslSocket.VerifyNone)
+        config.setProtocol(QSsl.TlsV1_2OrLater)
+        self._remote_server.setSslConfiguration(config)
+        if not self._remote_server.listen(_listen_host_address(remote.host), remote.port):
+            raise OSError(
+                f"Hub failed to bind to {_format_address(remote.host, remote.port)}: "
+                f"{self._remote_server.errorString()}"
+            )
+        logger.info(
+            "Hub listening for network clients on %s (TLS, certificate %s)",
+            _format_address(remote.host, remote.port),
+            remote.identity.fingerprint_sha256,
+        )
+
+    def _write_remote_hub_file(self, remote: RemoteListen) -> None:
+        """別の機械へ写す接続情報ファイルを書く（pid は無い）。
+
+        Raises:
+            HubFileWriteError: 書けなかった（待ち受けはやめている）
+        """
+        assert remote.hub_file is not None
+        addresses = network_addresses(remote.host, remote.port)
+        if not addresses:
+            logger.warning(
+                "No network address found for %s; edit the addresses in %s by hand",
+                remote.host,
+                remote.hub_file,
+            )
+        try:
+            write_hub_file(
+                remote.hub_file,
+                HubFileInfo(
+                    addresses=addresses,
+                    token=remote.identity.token,
+                    tls={FINGERPRINT_KEY: remote.identity.fingerprint_sha256},
+                    package_version=__version__,
+                    protocol=SUPPORTED_PROTOCOL,
+                ),
+            )
+        except OSError as e:
+            self.stop()
+            raise HubFileWriteError(
+                f"Hub could not write the network Hub file {remote.hub_file}: {e}"
+            ) from e
+        logger.info("Network Hub file (copy it to the client machine): %s", remote.hub_file)
 
     # ------------------------------------------------------------
     # Origin 検証（ハンドシェイク時）
@@ -306,7 +457,7 @@ class Hub(QObject):
     # 新規接続
     # ------------------------------------------------------------
 
-    def _on_new_connection(self) -> None:
+    def _on_new_connection(self, server: QWebSocketServer, remote: bool) -> None:
         # TCP accept された時点で idle shutdown タイマーを即キャンセルする
         # （ADR-0001 §4 "タイマーキャンセル条件"）。register 受信を待つと、
         # 受信前にタイマー満了して Hub が自殺する窓が残るため。
@@ -314,8 +465,8 @@ class Hub(QObject):
             logger.info("Connection accepted; idle shutdown timer canceled before register")
             self._idle_shutdown_timer.stop()
 
-        while self._server.hasPendingConnections():
-            ws = self._server.nextPendingConnection()
+        while server.hasPendingConnections():
+            ws = server.nextPendingConnection()
             # 受け取った接続は Python 側が持ち主になっている。そのままだと
             # `_sockets` から外した瞬間に C++ のオブジェクトが消え、それが
             # その接続の disconnected の中だと落ちる。Hub の子にして C++ 側に
@@ -323,6 +474,11 @@ class Hub(QObject):
             ws.setParent(self)
             conn_id = str(id(ws))
             self._sockets[conn_id] = ws
+            # conn_id は使い回されうるので、毎回入れ直す
+            if remote:
+                self._remote_conns.add(conn_id)
+            else:
+                self._remote_conns.discard(conn_id)
             # kind は register メッセージ受信時に確定するため、ここでは未定
             ws.textMessageReceived.connect(
                 lambda text, cid=conn_id: self._on_text_message(cid, text)
@@ -330,7 +486,11 @@ class Hub(QObject):
             # ADR-0005 D5: pong 受信を liveness 更新に使う。
             ws.pong.connect(lambda _e=0, _p=b"", cid=conn_id: self._on_pong(cid))
             ws.disconnected.connect(lambda cid=conn_id: self._on_disconnected(cid))
-            logger.info("New connection: %s", conn_id)
+            logger.info(
+                "New connection: %s%s",
+                conn_id,
+                f" (network, from {ws.peerAddress().toString()})" if remote else "",
+            )
             self._greet(conn_id)
 
         # register 到達後に正規の再判定。このパスでは既にタイマー止まってるので no-op
@@ -377,7 +537,15 @@ class Hub(QObject):
             self._refuse_before_register(conn_id, getattr(msg, "id", None))
             return
 
-        error = check_register(msg, token=self._token, hub_nonce=hub_nonce)
+        error = check_register(msg, token=self._token_for(conn_id), hub_nonce=hub_nonce)
+        if error is None and msg.role is Role.WORKER and conn_id in self._remote_conns:
+            error = Error(
+                code=ErrorCode.UNAUTHORIZED,
+                message=(
+                    "QGIS registers with the Hub on 127.0.0.1 of its own machine; the "
+                    "network address accepts clients only"
+                ),
+            )
         if error is not None:
             logger.warning("Rejected register from %s: %s", conn_id, error_code_value(error.code))
             self._send(
@@ -424,7 +592,7 @@ class Hub(QObject):
             hub_proof=(
                 None
                 if session is None
-                else hub_proof(self._token, session.client_nonce, session.hub_nonce)
+                else hub_proof(self._token_for(conn_id), session.client_nonce, session.hub_nonce)
             ),
         )
 
@@ -760,6 +928,7 @@ class Hub(QObject):
             ws.deleteLater()
         self._hello_nonces.pop(conn_id, None)
         self._sessions.pop(conn_id, None)
+        self._remote_conns.discard(conn_id)
         logger.info("Disconnected: %s (kind=%s)", conn_id, kind)
         self._reassess_idle_shutdown()
 
@@ -819,8 +988,11 @@ class Hub(QObject):
     # ------------------------------------------------------------
 
     def _reassess_idle_shutdown(self) -> None:
-        """全接続 0 なら idle 自動終了タイマー起動、そうでなければキャンセル。"""
-        if self._state.should_idle_shutdown():
+        """全接続 0 なら idle 自動終了タイマー起動、そうでなければキャンセル。
+
+        ネットワークから受け付ける Hub は人が常駐させるので、自分では止まらない。
+        """
+        if self._remote is None and self._state.should_idle_shutdown():
             if not self._idle_shutdown_timer.isActive():
                 logger.info(
                     "All connections empty; idle shutdown timer armed (%.0fs)",
@@ -872,6 +1044,62 @@ class Hub(QObject):
 
 
 # ============================================================
+# ネットワークのアドレス
+# ============================================================
+
+
+def _listen_host_address(host: str) -> QHostAddress:
+    if host == "0.0.0.0":
+        return QHostAddress(QHostAddress.AnyIPv4)
+    if host == "::":
+        return QHostAddress(QHostAddress.Any)
+    return QHostAddress(host)
+
+
+def _format_address(host: str, port: int) -> str:
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
+def network_addresses(host: str, port: int) -> tuple[str, ...]:
+    """接続情報ファイルに書くアドレス。
+
+    ``0.0.0.0`` ならこの機械のループバック以外の IPv4 のアドレスを、``::`` なら
+    IPv6（リンクローカルを除く）も並べる。それ以外は ``host`` そのもの。
+    """
+    if host not in ("0.0.0.0", "::"):
+        return (_format_address(host, port),)
+    found: list[str] = []
+    for address in QNetworkInterface.allAddresses():
+        if address.isLoopback():
+            continue
+        protocol = address.protocol()
+        ipv4 = protocol == QAbstractSocket.IPv4Protocol
+        ipv6 = (
+            host == "::" and protocol == QAbstractSocket.IPv6Protocol and not address.isLinkLocal()
+        )
+        if ipv4 or ipv6:
+            found.append(_format_address(address.toString(), port))
+    return tuple(dict.fromkeys(found))
+
+
+def parse_listen(value: str) -> tuple[str, int]:
+    """``--listen`` の ``"<IP>:<port>"`` を (host, port) にする。
+
+    Raises:
+        ValueError: 形が違う・IP アドレスでない・ポートが 1〜65535 でない
+    """
+    host, port = split_address(value)
+    if not 1 <= port <= 65535:
+        raise ValueError(
+            f"--listen needs a fixed port from 1 to 65535, not {port} (a port the OS "
+            "picks would change on each start and break the copied Hub file)"
+        )
+    if host not in ("0.0.0.0", "::") and QHostAddress(host).isNull():
+        raise ValueError(f"--listen needs an IP address, not {host!r}")
+    return host, port
+
+
+# ============================================================
 # エントリポイント
 # ============================================================
 
@@ -920,6 +1148,28 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "Default: $QPUPPETEER_HUB_FILE, else the per-user default location."
         ),
     )
+    parser.add_argument(
+        "--listen",
+        default=None,
+        metavar="ADDR:PORT",
+        help=(
+            "Also accept clients from the network on ADDR:PORT, over TLS only "
+            "(e.g. 0.0.0.0:9876). Writes remote/hub.json to copy to the client machine."
+        ),
+    )
+    parser.add_argument(
+        "--rotate",
+        action="store_true",
+        help="With --listen: make a new network token and TLS key (copy hub.json again).",
+    )
+    parser.add_argument(
+        "--remote-dir",
+        default=None,
+        help=(
+            "With --listen: where the network token, TLS key and remote hub.json live. "
+            "Default: the per-user qgis_puppeteer/remote folder."
+        ),
+    )
     # テストで register 待ちの時間切れを短くするため（ふだんは使わない）
     parser.add_argument(
         "--register-timeout-ms",
@@ -927,7 +1177,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=REGISTER_TIMEOUT_MS,
         help=argparse.SUPPRESS,
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.listen is None and (args.rotate or args.remote_dir is not None):
+        parser.error("--rotate and --remote-dir need --listen")
+    if args.listen is not None:
+        try:
+            args.listen = parse_listen(args.listen)
+        except ValueError as e:
+            parser.error(str(e))
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -950,11 +1208,25 @@ def main(argv: list[str] | None = None) -> int:
         )
         return HUB_EXIT_ALREADY_RUNNING
 
+    remote: RemoteListen | None = None
+    if args.listen is not None:
+        remote_dir = Path(args.remote_dir) if args.remote_dir else default_remote_dir()
+        try:
+            identity = load_or_create_remote_identity(remote_dir, rotate=args.rotate)
+        except OSError as e:
+            logger.error("Could not keep the network token and TLS key in %s: %s", remote_dir, e)
+            return HUB_EXIT_HUB_FILE_FAILED
+        host, port = args.listen
+        remote = RemoteListen(
+            host=host, port=port, identity=identity, hub_file=remote_dir / REMOTE_HUB_FILE
+        )
+
     app = QCoreApplication(sys.argv)
     hub = Hub(
         port=args.port,
         hub_file=hub_file,
         register_timeout_ms=args.register_timeout_ms,
+        remote=remote,
     )
 
     try:

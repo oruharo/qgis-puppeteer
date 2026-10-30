@@ -47,8 +47,11 @@ from qgis_puppeteer.protocol import (
     decode_message,
     encode_message,
 )
+from qgis_puppeteer.selfsigned import SelfSignedIdentity
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
+
+from tests._tls_helpers import server_ssl_context, tls_identity
 
 # ============================================================
 # Fake Hub：asyncio websockets.serve で立てる簡易 Hub
@@ -270,14 +273,17 @@ class FakeHub:
 
 @asynccontextmanager
 async def fake_hub_server(
-    port: int = 0, hub_file: Path | None = None
+    port: int = 0,
+    hub_file: Path | None = None,
+    tls: SelfSignedIdentity | None = None,
 ) -> AsyncIterator[tuple[FakeHub, str]]:
     """偽の Hub を立て、本物と同じく Hub ファイルにアドレスと token を書く。
 
     その間 ``QPUPPETEER_HUB_FILE`` をそのファイルに向けるので、引数なしの
     ``AutomationClient``（gateway の中のものも）がこの Hub につなぐ。``hub_file``
     を省けば一時のファイルに書く（「あとから Hub が立つ」を再現したいテストは、
-    先に決めた ``hub_file`` を渡す）。
+    先に決めた ``hub_file`` を渡す）。``tls`` を渡せばその証明書の TLS で待ち受け、
+    ネットワーク用の Hub ファイル（pid 無し、tls の指紋あり）を書く。
     """
     hub = FakeHub()
     with tempfile.TemporaryDirectory() as tmp:
@@ -286,19 +292,30 @@ async def fake_hub_server(
         saved = os.environ.get(ENV_HUB_FILE)
         os.environ[ENV_HUB_FILE] = str(hub_file)
         try:
-            async with serve(hub.handler, "127.0.0.1", port) as server:
+            ssl_context = None if tls is None else server_ssl_context(tls)
+            async with serve(hub.handler, "127.0.0.1", port, ssl=ssl_context) as server:
                 sock = next(iter(server.sockets))
                 port = sock.getsockname()[1]
                 write_hub_file(
                     hub_file,
-                    HubFileInfo(addresses=(f"127.0.0.1:{port}",), token=hub.token),
+                    HubFileInfo(
+                        addresses=(f"127.0.0.1:{port}",),
+                        token=hub.token,
+                        tls=None if tls is None else _tls_entry(tls.fingerprint_sha256),
+                    ),
                 )
-                yield hub, f"ws://127.0.0.1:{port}"
+                scheme = "ws" if tls is None else "wss"
+                yield hub, f"{scheme}://127.0.0.1:{port}"
         finally:
             if saved is None:
                 os.environ.pop(ENV_HUB_FILE, None)
             else:
                 os.environ[ENV_HUB_FILE] = saved
+
+
+def _tls_entry(fingerprint: object) -> dict[str, object]:
+    """Hub ファイルの ``tls``。"""
+    return {"fingerprint_sha256": fingerprint}
 
 
 def _closed_port() -> int:
@@ -561,6 +578,97 @@ class TestConnect:
             client = AutomationClient()
             with pytest.raises(RequestNotSentError):
                 await client.call("cmd")
+
+        _run(inner())
+
+
+class TestConnectOverTls:
+    """ネットワーク用の Hub ファイル（tls の指紋あり）なら wss でつなぎ、指紋を照合する。"""
+
+    def test_a_network_hub_file_connects_over_wss(self) -> None:
+        async def inner() -> None:
+            async with (
+                fake_hub_server(tls=tls_identity()) as (_, url),
+                AutomationClient() as client,
+            ):
+                assert url.startswith("wss://")
+                assert client.address == url.removeprefix("wss://")
+                assert await client.list_instances() == []
+
+        _run(inner())
+
+    def test_another_certificate_is_refused_as_hub_auth_error(self) -> None:
+        async def inner() -> None:
+            async with fake_hub_server(tls=tls_identity()) as (hub, url):
+                hub_file = Path(os.environ[ENV_HUB_FILE])
+                write_hub_file(
+                    hub_file,
+                    HubFileInfo(
+                        addresses=(url.removeprefix("wss://"),),
+                        token=hub.token,
+                        tls=_tls_entry(tls_identity(1).fingerprint_sha256),
+                    ),
+                )
+                client = AutomationClient(register_timeout=2.0)
+                with pytest.raises(HubAuthError, match="does not match"):
+                    await client.connect()
+
+        _run(inner())
+
+    def test_a_mismatch_does_not_go_on_to_the_next_address(self) -> None:
+        """合わない相手が出たことを知らせる（後ろのアドレスで黙って通さない）。"""
+
+        async def inner() -> None:
+            async with (
+                fake_hub_server(tls=tls_identity()) as (hub, url),
+                fake_hub_server() as (_, plain_url),
+            ):
+                hub_file = Path(os.environ[ENV_HUB_FILE])
+                write_hub_file(
+                    hub_file,
+                    HubFileInfo(
+                        addresses=(url.removeprefix("wss://"), plain_url.removeprefix("ws://")),
+                        token=hub.token,
+                        tls=_tls_entry(tls_identity(1).fingerprint_sha256),
+                    ),
+                )
+                client = AutomationClient(hub_file=hub_file, register_timeout=2.0)
+                with pytest.raises(HubAuthError):
+                    await client.connect()
+                assert client.address == url.removeprefix("wss://")
+
+        _run(inner())
+
+    def test_an_unusable_fingerprint_raises_hub_file_error(self, tmp_path: Path) -> None:
+        async def inner() -> None:
+            hub_file = tmp_path / "hub.json"
+            write_hub_file(
+                hub_file,
+                HubFileInfo(addresses=("127.0.0.1:1",), token="t", tls=_tls_entry("AB:CD")),
+            )
+            client = AutomationClient(hub_file=hub_file)
+            with pytest.raises(HubFileError, match="fingerprint_sha256"):
+                await client.connect()
+
+        _run(inner())
+
+    def test_the_address_argument_keeps_the_files_tls(self) -> None:
+        """address で宛先だけ変えても（VM の NAT の先など）、token と指紋はファイルから。"""
+
+        async def inner() -> None:
+            async with fake_hub_server(tls=tls_identity()) as (hub, url):
+                live = url.removeprefix("wss://")
+                hub_file = Path(os.environ[ENV_HUB_FILE])
+                write_hub_file(
+                    hub_file,
+                    HubFileInfo(
+                        addresses=("192.0.2.1:9",),
+                        token=hub.token,
+                        tls=_tls_entry(tls_identity().fingerprint_sha256),
+                    ),
+                )
+                async with AutomationClient(address=live) as client:
+                    assert client.address == live
 
         _run(inner())
 

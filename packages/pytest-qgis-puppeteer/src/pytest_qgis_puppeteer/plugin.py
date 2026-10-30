@@ -180,6 +180,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "env vars or DB connection info before launching QGIS). "
         f"Falls back to ${ENV_QGIS_COMMAND} or [tool.pytest.ini_options] qgis_command.",
     )
+    group.addoption(
+        "--qgis-hub-address",
+        dest="qgis_hub_address",
+        default=None,
+        help="Dev mode only: connect to the running Hub at this host:port instead of "
+        "the addresses listed in its Hub file (the token and the TLS fingerprint "
+        "still come from the file). Use it when the Hub is reached through an "
+        "address it does not know, e.g. a port forwarded by a VM's NAT.",
+    )
     # ADR-0003 Phase 1 / 2: Test Environments の active env 選択
     group.addoption(
         "--env",
@@ -412,6 +421,7 @@ def pytest_configure(config: pytest.Config) -> None:
         _message_check.rules_from_ini(config.getini("qgis_message_allowlist"))
     except ValueError as exc:
         raise pytest.UsageError(str(exc)) from exc
+    _hub_address(config)
 
     rootpath = Path(str(config.rootpath))
     toml_path = find_environments_toml(rootpath)
@@ -1192,6 +1202,32 @@ def _is_dev_mode() -> bool:
     return os.environ.get(ENV_DEV_MODE) == "1"
 
 
+def _hub_address(config: pytest.Config) -> str | None:
+    """``--qgis-hub-address`` の値（無ければ None）。
+
+    Hub ファイルの ``addresses`` の代わりにつなぐ宛先。dev モードだけで使える
+    （pytest が起こす Hub は自分の機械の 127.0.0.1 にいるので、宛先を変える意味が無い）。
+
+    Raises:
+        pytest.UsageError: ``host:port`` でない・dev モードでない
+    """
+    from qgis_puppeteer.hub_probe import split_address
+
+    address = config.getoption("qgis_hub_address", default=None)
+    if address is None:
+        return None
+    try:
+        split_address(address)
+    except ValueError as exc:
+        raise pytest.UsageError(f"--qgis-hub-address: {exc}") from exc
+    if not _is_dev_mode():
+        raise pytest.UsageError(
+            f"--qgis-hub-address is for dev mode ({ENV_DEV_MODE}=1), where the tests "
+            "use a Hub that is already running. Without it, pytest starts its own Hub."
+        )
+    return address
+
+
 # ==============================================================
 # ヘルパ
 # ==============================================================
@@ -1335,10 +1371,13 @@ def hub_process(
     from qgis_puppeteer.hub_probe import describe_hub_file, find_live_hub, split_address
 
     if _is_dev_mode():
-        if find_live_hub(hub_file) is None:
+        address = _hub_address(pytestconfig)
+        if find_live_hub(hub_file, address=address) is None:
+            at = f" at {address} (--qgis-hub-address)" if address is not None else ""
             raise RuntimeError(
-                f"Dev mode: no live Hub behind the Hub file {describe_hub_file(hub_file)}. "
-                f"Start the Hub-bearing QGIS first, or set {ENV_HUB_FILE} to its Hub file."
+                f"Dev mode: no live Hub{at} behind the Hub file "
+                f"{describe_hub_file(hub_file)}. Start the Hub-bearing QGIS first, "
+                f"or set {ENV_HUB_FILE} to its Hub file."
             )
         logger.info("Dev mode: using the live Hub of %s", describe_hub_file(hub_file))
         yield None
@@ -1513,12 +1552,13 @@ def _parse_listening_pid(netstat_output: str, port: int) -> int | None:
 
 @pytest.fixture(scope="session")
 def automation_client(
+    pytestconfig: pytest.Config,
     hub_process: subprocess.Popen[bytes] | None,
     hub_file: Path,
     action_recorder: ActionRecorder,
 ) -> Iterator[E2EAutomationClient]:
     del hub_process
-    client = E2EAutomationClient(hub_file=hub_file)
+    client = E2EAutomationClient(hub_file=hub_file, address=_hub_address(pytestconfig))
     client.connect()
     # ADR-0002 §13 / B5a: 各 ``call(...)`` を timeline に記録し、test 失敗時の
     # diagnostic bundle に ``actions.jsonl`` として吐き出す。test 単位の clear は

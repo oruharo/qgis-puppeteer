@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import os
 import socket
+import ssl
 import subprocess
 import sys
 import threading
@@ -41,6 +42,8 @@ from qgis_puppeteer.protocol import (
 )
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.server import ServerConnection, serve
+
+from tests._tls_helpers import server_ssl_context, tls_identity
 
 # ============================================================
 # 偽の Hub
@@ -92,9 +95,9 @@ class _FakeHub:
 
 
 @contextmanager
-def _serve(hub: _FakeHub) -> Iterator[str]:
-    """偽の Hub を立て、``"127.0.0.1:port"`` を返す。"""
-    with serve(hub.handler, "127.0.0.1", 0) as server:
+def _serve(hub: _FakeHub, ssl_context: ssl.SSLContext | None = None) -> Iterator[str]:
+    """偽の Hub を立て、``"127.0.0.1:port"`` を返す（``ssl_context`` があれば TLS）。"""
+    with serve(hub.handler, "127.0.0.1", 0, ssl=ssl_context) as server:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
@@ -119,12 +122,21 @@ def _dead_pid() -> int:
     return proc.pid
 
 
-def _write(path: Path, *addresses: str, token: str, pid: int | None = None) -> HubFileInfo:
+def _write(
+    path: Path,
+    *addresses: str,
+    token: str,
+    pid: int | None = None,
+    network: bool = False,
+    tls: dict[str, object] | None = None,
+) -> HubFileInfo:
+    """Hub ファイルを書く。``network`` なら pid を書かない（ネットワーク用のファイル）。"""
     info = HubFileInfo(
         addresses=addresses,
         token=token,
-        pid=os.getpid() if pid is None else pid,
+        pid=None if network else (os.getpid() if pid is None else pid),
         package_version=__version__,
+        tls=tls,
     )
     write_hub_file(path, info)
     return info
@@ -205,6 +217,48 @@ class TestGreetHub:
             greet_hub("no-port", "t")
 
 
+class TestGreetHubOverTls:
+    def test_the_right_fingerprint_lets_the_greeting_through(self) -> None:
+        hub = _FakeHub()
+        identity = tls_identity()
+        with _serve(hub, server_ssl_context(identity)) as address:
+            ack = greet_hub(address, hub.token, tls_fingerprint=identity.fingerprint_sha256)
+        assert ack.ok is True
+
+    def test_the_fingerprint_is_compared_ignoring_case_and_colons(self) -> None:
+        hub = _FakeHub()
+        identity = tls_identity()
+        loose = identity.fingerprint_sha256.replace(":", "").lower()
+        with _serve(hub, server_ssl_context(identity)) as address:
+            assert greet_hub(address, hub.token, tls_fingerprint=loose).ok is True
+
+    def test_another_certificate_is_refused_before_the_greeting(self) -> None:
+        hub = _FakeHub()
+        with (
+            _serve(hub, server_ssl_context(tls_identity())) as address,
+            pytest.raises(HubProbeError, match="does not match"),
+        ):
+            greet_hub(address, hub.token, tls_fingerprint=tls_identity(1).fingerprint_sha256)
+
+    def test_tls_to_a_plain_server_fails(self) -> None:
+        hub = _FakeHub()
+        with _serve(hub) as address, pytest.raises(HubProbeError, match="TLS"):
+            greet_hub(
+                address,
+                hub.token,
+                tls_fingerprint=tls_identity().fingerprint_sha256,
+                timeout=1.0,
+            )
+
+    def test_plain_to_a_tls_server_fails(self) -> None:
+        hub = _FakeHub()
+        with (
+            _serve(hub, server_ssl_context(tls_identity())) as address,
+            pytest.raises(HubProbeError),
+        ):
+            greet_hub(address, hub.token, timeout=1.0)
+
+
 # ============================================================
 # find_live_hub
 # ============================================================
@@ -249,6 +303,74 @@ class TestFindLiveHub:
             written = _write(tmp_path / "hub.json", dead, address, token=hub.token)
             assert find_live_hub(tmp_path / "hub.json", timeout=1.0) == written
 
+    def test_the_address_argument_replaces_the_files_addresses(self, tmp_path: Path) -> None:
+        hub = _FakeHub()
+        with _serve(hub) as address:
+            dead = f"127.0.0.1:{_closed_port()}"
+            written = _write(tmp_path / "hub.json", dead, token=hub.token)
+            assert find_live_hub(tmp_path / "hub.json", address=address) == written
+            assert find_live_hub(tmp_path / "hub.json", address=dead, timeout=1.0) is None
+
+
+class TestFindLiveHubOverTls:
+    """ネットワーク用の Hub ファイル（pid が無く、tls の指紋がある）。"""
+
+    @staticmethod
+    def _tls(fingerprint: str) -> dict[str, object]:
+        return {"fingerprint_sha256": fingerprint}
+
+    def test_a_network_hub_file_is_found_without_a_pid(self, tmp_path: Path) -> None:
+        hub = _FakeHub()
+        identity = tls_identity()
+        with _serve(hub, server_ssl_context(identity)) as address:
+            written = _write(
+                tmp_path / "hub.json",
+                address,
+                token=hub.token,
+                network=True,
+                tls=self._tls(identity.fingerprint_sha256),
+            )
+            assert written.pid is None
+            assert find_live_hub(tmp_path / "hub.json") == written
+
+    def test_the_address_argument_keeps_the_files_tls(self, tmp_path: Path) -> None:
+        hub = _FakeHub()
+        identity = tls_identity()
+        with _serve(hub, server_ssl_context(identity)) as address:
+            written = _write(
+                tmp_path / "hub.json",
+                "192.0.2.1:9",
+                token=hub.token,
+                network=True,
+                tls=self._tls(identity.fingerprint_sha256),
+            )
+            assert find_live_hub(tmp_path / "hub.json", address=address) == written
+
+    def test_a_certificate_that_does_not_match_means_no_hub(self, tmp_path: Path) -> None:
+        hub = _FakeHub()
+        with _serve(hub, server_ssl_context(tls_identity())) as address:
+            _write(
+                tmp_path / "hub.json",
+                address,
+                token=hub.token,
+                network=True,
+                tls=self._tls(tls_identity(1).fingerprint_sha256),
+            )
+            assert find_live_hub(tmp_path / "hub.json") is None
+
+    def test_an_unusable_fingerprint_means_no_hub(self, tmp_path: Path) -> None:
+        """tls があるのに指紋が読めなければ、平文で試さずに None。"""
+        hub = _FakeHub()
+        with _serve(hub) as address:
+            _write(tmp_path / "hub.json", address, token=hub.token, tls={"fingerprint_sha256": 1})
+            assert find_live_hub(tmp_path / "hub.json") is None
+
+    def test_a_plain_file_does_not_reach_a_tls_hub(self, tmp_path: Path) -> None:
+        hub = _FakeHub()
+        with _serve(hub, server_ssl_context(tls_identity())) as address:
+            _write(tmp_path / "hub.json", address, token=hub.token, network=True)
+            assert find_live_hub(tmp_path / "hub.json", timeout=1.0) is None
+
 
 # ============================================================
 # describe_hub_file
@@ -267,3 +389,16 @@ class TestDescribeHubFile:
         assert f"Hub qgis-puppeteer {__version__}" in text
         assert "pid 4242" in text
         assert "127.0.0.1:1, [::1]:2" in text
+        assert "TLS" not in text
+
+    def test_a_network_file_says_no_pid_and_tls(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path / "hub.json",
+            "192.0.2.1:8765",
+            token="t",
+            network=True,
+            tls={"fingerprint_sha256": tls_identity().fingerprint_sha256},
+        )
+        text = describe_hub_file(tmp_path / "hub.json")
+        assert "no pid (network), TLS" in text
+        assert "192.0.2.1:8765" in text

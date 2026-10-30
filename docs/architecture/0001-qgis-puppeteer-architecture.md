@@ -699,6 +699,8 @@ Worker 側の label 自動採番（`{project_basename}-{pid 下4桁}`）は文�
 > Hub の CLI 引数は `--hub-file`（無ければ `QPUPPETEER_HUB_FILE`、それも無ければ既定）と `--port`（既定 0。テスト用）。待ち受けは 127.0.0.1 だけ（§9.1）。Origin ヘッダは固定（`http://localhost`）。
 >
 > `AutomationClient` は `address="host:port"`・`token=`・`hub_file=` を取る（`url=` は廃止）。`address` と `token` の両方があれば Hub ファイルを読まない。`address` だけなら token を Hub ファイルから読む。どちらも無ければ Hub ファイルの `addresses` を順に試す。
+>
+> **2026-10-30 追記（`--listen`）**: `--listen <IP>:<port>` を付ければ、ネットワークからのクライアントも TLS で受ける（§9.1）。`--rotate` でネットワーク用の token と鍵を作り直し、`--remote-dir` でそれらの置き場所を変える（§9.3）。`address` だけを渡したときは、token に加えて TLS の指紋も Hub ファイルから読む（VM の NAT の先など、Hub の知らない宛先でつなぐため。pytest は `--qgis-hub-address`）。
 
 Hub / Worker / Client の接続先は以下の環境変数で差し替え可能：
 
@@ -798,6 +800,8 @@ WebSocket は HTTP ハンドシェイクなので、localhost 運用であって
 
 Hub は **`127.0.0.1` 固定で listen**（`QHostAddress.LocalHost`）。`0.0.0.0` やマシンの LAN IP へのバインドは remote 対応 + 認証実装が入るまで禁止（`## Roadmap` 参照）。
 
+> **2026-10-30 改訂（`--listen`）**: 既定は今も 127.0.0.1 だけ。`--listen <IP>:<port>`（ポートは固定。`0.0.0.0`・`::`・自機のアドレス）を付けたときだけ、もう 1 か所で待ち受けてネットワークからも受ける。そちらは **TLS だけ**（`QWebSocketServer.SecureMode`、TLS 1.2 以上）で、つなげるのはクライアントだけ（Worker の register は `unauthorized` で断る。QGIS はいつも Hub と同じ機械にいる）。token はローカル用と別（§9.3）。127.0.0.1 の待ち受けは平文のまま（同じ機械の Worker とクライアント用）。`--listen` の Hub は人が起こす常駐のもので、idle で自動終了しない。
+
 ```python
 server.listen(QHostAddress.LocalHost, 0)  # 2026-10-30 改訂：ポートは OS が選び、Hub ファイルに書く（当初は 9876 固定）
 ```
@@ -837,11 +841,13 @@ Origin 検証はブラウザしか防がない。同じ機械のほかのプロ�
 - 読めない（無い・壊れた・書式の版が違う・token が無い）ときは `HubFileError`（`OSError` の子）。MCP gateway は `hub_unreachable` として返す
 - pytest プラグインが起こす Hub は session の一時フォルダの Hub ファイルを使い、`spawn_qgis` が起こす QGIS には `QPUPPETEER_HUB_FILE` でそれを教える
 
+> **2026-10-30 追記（ネットワーク用の Hub ファイル）**: `--listen` の Hub は、ネットワーク用の token（ローカル用と別）・自己署名の証明書と RSA 2048 の鍵（`qgis_puppeteer.selfsigned` が標準ライブラリだけで作る）をリモートのフォルダ（`--remote-dir`。既定は Windows が `%LOCALAPPDATA%` の、POSIX が `$XDG_STATE_HOME` か `~/.local/state` の `qgis_puppeteer/remote`。0600）に一度だけ作って残し、起きるたびに使い回す（`--rotate` で作り直す。壊れていれば 3 つとも作り直す）。別の機械へ写す `remote/hub.json` には、ネットワークのアドレス（`0.0.0.0` ならループバック以外の自機の IPv4）・ネットワーク用の token・`tls.fingerprint_sha256` を書き、pid は書かない（Hub が止まっても消さない）。クライアントはこれを `QPUPPETEER_HUB_FILE` で指す。CA と名前は確かめず、証明書の SHA-256 がファイルの指紋と一致するかだけを挨拶の前に確かめ（pin）、違えば切って `HubAuthError`（ほかのアドレスは試さない）。挨拶（hello / proof）は TLS の中でもそのまま行う。pid の無いファイルでは pid を確かめない。
+
 ### 10. 将来検討事項
 
 詳細は末尾の `## Roadmap` を参照。主な項目:
 
-- **remote 運用**: 別マシンの Hub に接続できるよう、`127.0.0.1` 固定を緩和し TLS + トークン認証を追加。プロトコルは現行のまま流用可能なので、接続層の拡張で済む。
+- **remote 運用**: 別マシンの Hub に接続できるよう、`127.0.0.1` 固定を緩和し TLS + トークン認証を追加。プロトコルは現行のまま流用可能なので、接続層の拡張で済む。（2026-10-30：`--listen` で済んだ。§9.1・§9.3）
 - **`qgis_launch_instance` ツール**: Gateway から QGIS プロセス自体を起動する MCP ツール。現状は QGIS を手動起動しないと Worker が存在しないため、完全自動化シナリオでブロックになる。実装は `subprocess.Popen` + `list_instances` poll で `register` 到達を検出する。
 - **`InstanceInfo.project` フィールドの扱い**: register 時点のスナップショットしか持っておらず常に `null` になりがち。選択肢: (a) `fileNameChanged` シグナル連動 push、(b) register payload に乗せる、(c) フィールド削除。暫定方針は (c)。
 
@@ -1262,6 +1268,8 @@ MCP / LLM レイヤのオーバーヘッド：
 - バインドアドレス指定の解放（`0.0.0.0` / 任意 IP）
 - TLS（`wss://`）の終端を Hub または前段 reverse proxy で
 - トークン認証：同じ機械の中では済んだ（§3「挨拶」、§9.3）。別のマシンへは Hub ファイルの token をどう渡すかを決める
+
+> **2026-10-30 追記**: バインドアドレス・TLS（Hub が終端する）・別の機械へのトークンは `--listen` で済んだ（§9.1・§9.3）。別の機械のクライアントは、Hub が書く `remote/hub.json` を写して使う。Origin の設定化は残っている。
 - `Origin` 検証ホワイトリストの設定化
 
 プロトコル本体は現行のまま流用可能。接続層と register payload の拡張で済む。

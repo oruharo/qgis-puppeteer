@@ -3,9 +3,11 @@
 「生きた Hub がいる」とは、次の 3 つがそろうこと（同じ機械の Hub）:
 
 1. Hub ファイルがあって読める
-2. ファイルの pid のプロセスが生きている
+2. ファイルの pid のプロセスが生きている（pid の無い、別の機械へ写すネットワーク用の
+   ファイルでは確かめない）
 3. ファイルの ``addresses`` のどれかで挨拶（``qgis_puppeteer.handshake``）が通る
-   ＝相手が同じ token を知っている Hub だと、互いに確かめられた
+   ＝相手が同じ token を知っている Hub だと、互いに確かめられた。ファイルに ``tls``
+   があれば TLS でつなぎ、証明書の指紋も照合する（``qgis_puppeteer.hub_remote``）
 
 どれかが欠ければ、そのファイルは古い（Hub が落ちた、別のプログラムがそのポートを
 使っている、など）とみなして無視する。
@@ -37,6 +39,12 @@ from qgis_puppeteer.handshake import (
     generate_nonce,
 )
 from qgis_puppeteer.hub_file import HubFileError, HubFileInfo, read_hub_file
+from qgis_puppeteer.hub_remote import (
+    client_ssl_context,
+    fingerprint_mismatch_message,
+    peer_matches,
+    pinned_fingerprint,
+)
 from qgis_puppeteer.protocol import (
     SUPPORTED_PROTOCOL,
     Hello,
@@ -142,11 +150,17 @@ def greet_hub(
     token: str,
     *,
     timeout: float = DEFAULT_PROBE_TIMEOUT_SECONDS,
+    tls_fingerprint: str | None = None,
 ) -> RegisterAck:
     """``address`` の Hub と挨拶し、通れば Hub の register_ack を返す（すぐ切る）。
 
+    Args:
+        tls_fingerprint: 渡せば TLS でつなぎ、Hub の証明書の SHA-256 がこれと一致する
+            ことを挨拶の前に確かめる
+
     Raises:
-        HubProbeError: つながらない・hello が来ない・Hub が断った・hub_proof が合わない
+        HubProbeError: つながらない・hello が来ない・Hub が断った・hub_proof が合わない・
+            証明書の指紋が合わない
     """
     deadline = time.monotonic() + timeout
     try:
@@ -158,6 +172,8 @@ def greet_hub(
     except OSError as e:
         raise HubProbeError(f"Could not connect to {address}: {e}") from e
     try:
+        if tls_fingerprint is not None:
+            sock = _wrap_tls(sock, address, tls_fingerprint)
         conn = _WebSocket(sock, deadline)
         conn.handshake(host, port)
         hello = _decode(conn.recv_text(), address)
@@ -195,6 +211,19 @@ def greet_hub(
             sock.close()
 
 
+def _wrap_tls(sock: socket.socket, address: str, fingerprint: str) -> socket.socket:
+    """TLS でつなぎ、証明書の指紋を照合する。合わなければ切って HubProbeError。"""
+    try:
+        tls = client_ssl_context().wrap_socket(sock)
+    except (OSError, ValueError) as e:
+        sock.close()
+        raise HubProbeError(f"TLS with {address} failed: {e}") from e
+    if not peer_matches(tls.getpeercert(binary_form=True), fingerprint):
+        tls.close()
+        raise HubProbeError(fingerprint_mismatch_message(address))
+    return tls
+
+
 def _decode(text: str, address: str) -> object:
     try:
         return decode_message(text)
@@ -206,21 +235,27 @@ def find_live_hub(
     path: str | os.PathLike[str],
     *,
     timeout: float = DEFAULT_PROBE_TIMEOUT_SECONDS,
+    address: str | None = None,
 ) -> HubFileInfo | None:
     """``path`` の Hub ファイルが生きた Hub を指していれば、その中身を返す。
 
     ファイルが無い・壊れている・pid が死んでいる・どのアドレスでも挨拶が通らない
-    なら None（古いファイルは無視する）。
+    （TLS なら証明書の指紋が合わない）なら None（古いファイルは無視する）。
+
+    Args:
+        address: ファイルの ``addresses`` の代わりに試すアドレス（VM の NAT の先など、
+            Hub から見えない宛先を使うとき）
     """
     try:
         info = read_hub_file(path)
+        fingerprint = pinned_fingerprint(info, path)
     except HubFileError:
         return None
     if info.pid is not None and not pid_alive(info.pid):
         return None
-    for address in info.addresses:
+    for candidate in (address,) if address is not None else info.addresses:
         try:
-            greet_hub(address, info.token, timeout=timeout)
+            greet_hub(candidate, info.token, timeout=timeout, tls_fingerprint=fingerprint)
         except HubProbeError:
             continue
         return info
@@ -234,8 +269,10 @@ def describe_hub_file(path: str | os.PathLike[str]) -> str:
         info = read_hub_file(target)
     except HubFileError as e:
         return f"{target} ({e})"
+    pid = "no pid (network)" if info.pid is None else f"pid {info.pid}"
+    tls = ", TLS" if info.tls is not None else ""
     return (
-        f"{target} (Hub qgis-puppeteer {info.package_version or '?'}, pid {info.pid}, "
+        f"{target} (Hub qgis-puppeteer {info.package_version or '?'}, {pid}{tls}, "
         f"addresses {', '.join(info.addresses) or '-'})"
     )
 

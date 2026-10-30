@@ -39,6 +39,38 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gateway reports it as `hub_unreachable`; `qgis_puppeteer.hub_file` reads
   and writes the file.
 
+- **Clients on other machines, over TLS (`--listen`).** The Hub listens on
+  127.0.0.1 only, unless it is started with `--listen <IP>:<port>` (a fixed
+  port; `0.0.0.0`, `::` or one of the machine's addresses). It then also
+  accepts clients on that address, over TLS only (`wss://`), with a token of
+  their own: the network side takes clients, and refuses a Worker's
+  `register` as `unauthorized` (QGIS is always on the Hub's machine), and the
+  local token does not open it. The network token, a self-signed certificate
+  and its RSA key, made once in pure Python by `qgis_puppeteer.selfsigned`,
+  are kept in a remote folder (`--remote-dir`, by default
+  `%LOCALAPPDATA%\qgis_puppeteer\remote` on Windows and
+  `qgis_puppeteer/remote` under `$XDG_STATE_HOME` or `~/.local/state`
+  elsewhere) and reused on each start; `--rotate` makes new ones. The Hub
+  writes `remote/hub.json` there to copy to the client machine and point
+  `QPUPPETEER_HUB_FILE` at: the network addresses, the network token and
+  `tls.fingerprint_sha256`, without a `pid`, left in place when the Hub stops.
+  A Hub started with `--listen` does not stop when idle. It exits with `2`
+  when it cannot keep the token and key, and `1` when its Qt has no TLS.
+- **Clients pin the Hub's certificate.** When the Hub file has `tls`,
+  `AutomationClient`, `find_live_hub` / `greet_hub` (`tls_fingerprint=`) and
+  the pytest plugin connect over TLS and check that the certificate's SHA-256
+  is the fingerprint in the file before the greeting; when it is not, they
+  close the connection and raise `HubAuthError` (`HubProbeError` in the
+  probe) without trying the other addresses. A `tls` without a usable
+  fingerprint is a `HubFileError`. A Hub file without a `pid` skips the pid
+  check.
+- **The address can be overridden.** `AutomationClient(address=...)`,
+  `find_live_hub(path, address=...)`, `E2EAutomationClient(address=...)` and
+  the pytest option `--qgis-hub-address` (dev mode only) connect to that
+  `host:port` instead of the Hub file's addresses, still with the file's token
+  and fingerprint: for a Hub reached through an address it does not know,
+  such as a port forwarded by a VM's NAT.
+
 - **`HubAuthError`.** `AutomationClient.connect()` raises it when the other
   end is not a Hub it can trust: no `hello` came, the first message was not
   `hello` (not a Hub, or an older Hub), or `register_ack` did not carry the

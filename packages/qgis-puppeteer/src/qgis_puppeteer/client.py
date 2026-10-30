@@ -8,6 +8,9 @@ ADR-0001 §2, §3 に基づき、McpGateway やテストハーネスから Worke
 - Hub ファイル（`qgis_puppeteer.hub_file`）からアドレスと token を読み（``connect()``
   のたびに）、Hub に `role=automation_client` として接続・登録。Hub の hello に
   token で作った proof で答え、Hub の hub_proof を確かめる（`qgis_puppeteer.handshake`）
+- Hub ファイルに ``tls`` があれば（別の機械の、ネットワーク用の Hub）、wss でつなぎ、
+  Hub の証明書の SHA-256 がファイルの指紋と一致することを挨拶の前に確かめる
+  （`qgis_puppeteer.hub_remote`）
 - `request` を送って `id` で対応する `response` を待機
 - `list_instances` で現在の active Worker 一覧を取得
 - エラー応答を Python 例外として伝播
@@ -46,6 +49,12 @@ from qgis_puppeteer.handshake import (
     generate_nonce,
 )
 from qgis_puppeteer.hub_file import read_hub_file, resolve_hub_file_path
+from qgis_puppeteer.hub_remote import (
+    client_ssl_context,
+    fingerprint_mismatch_message,
+    peer_matches,
+    pinned_fingerprint,
+)
 from qgis_puppeteer.protocol import (
     SUPPORTED_PROTOCOL,
     AbandonLaunch,
@@ -124,8 +133,8 @@ class HubAuthError(AutomationClientError):
     """つないだ相手を Hub として信用できない。
 
     挨拶（hello）が来ない・hello でない（Hub ではない、または挨拶の無い古い Hub）、
-    または register_ack の hub_proof が合わない（Hub ファイルの token を知らない
-    相手）。相手には何も頼んでいない。
+    register_ack の hub_proof が合わない（Hub ファイルの token を知らない相手）、
+    または TLS の証明書が Hub ファイルの指紋と合わない。相手には何も頼んでいない。
     """
 
 
@@ -279,13 +288,14 @@ class AutomationClient:
         """
         Args:
             address: つなぐ Hub の ``"host:port"``。省略時は Hub ファイルの
-                ``addresses`` を順に試す
+                ``addresses`` を順に試す。VM の NAT の先など、Hub ファイルに無い宛先を
+                使うときに渡す（token と TLS の指紋はファイルから読む）
             token: 挨拶に使う token。省略時は Hub ファイルから読む
             hub_file: アドレスと token を読む Hub ファイル。省略時は
                 ``QPUPPETEER_HUB_FILE``、それも無ければ既定の場所
                 （``qgis_puppeteer.hub_file``）。``connect()`` のたびに読む
                 （Hub が起き直すとポートも token も変わる）。``address`` と
-                ``token`` の両方を渡せば読まない
+                ``token`` の両方を渡せば読まない（そのときは平文でつなぐ）
             origin: WebSocket の Origin ヘッダ（Hub が確かめる。ADR-0001 §9.2）
             role: Hub に自己申告する role。McpGateway は `Role.MCP_GATEWAY` を、
                 pytest / その他の直接呼び出しは既定の `Role.AUTOMATION_CLIENT`
@@ -363,8 +373,8 @@ class AutomationClient:
         self._lost = False
         self._closing = False
 
-        addresses, token = self._resolve_target()
-        await self._open(addresses)
+        addresses, token, fingerprint, path = self._resolve_target()
+        await self._open(addresses, fingerprint, path)
 
         try:
             # 挨拶の 1 通目は reader を起こす前に自分で受ける
@@ -379,30 +389,49 @@ class AutomationClient:
             await self._hard_close()
             raise
 
-    def _resolve_target(self) -> tuple[tuple[str, ...], str]:
-        """つなぐアドレス（順に試す）と token：引数か、Hub ファイル（毎回読む）。"""
+    def _resolve_target(self) -> tuple[tuple[str, ...], str, str | None, object]:
+        """つなぐアドレス（順に試す）・token・TLS の指紋・Hub ファイルの場所。
+
+        引数か、Hub ファイル（毎回読む）から。指紋が None なら平文でつなぐ。
+        """
         if self._address_arg is not None and self._token is not None:
-            return (self._address_arg,), self._token
+            return (self._address_arg,), self._token, None, None
         path = resolve_hub_file_path(self._hub_file)
         info = read_hub_file(path)
+        fingerprint = pinned_fingerprint(info, path)
         addresses = (self._address_arg,) if self._address_arg is not None else info.addresses
         token = self._token if self._token is not None else info.token
         if not addresses:
             raise ConnectionRefusedError(f"the Hub file {path} lists no address")
-        return addresses, token
+        return addresses, token, fingerprint, path
 
-    async def _open(self, addresses: tuple[str, ...]) -> None:
-        """アドレスを順に試し、最初につながった WebSocket を ``self._ws`` に置く。"""
+    async def _open(
+        self, addresses: tuple[str, ...], fingerprint: str | None, path: object
+    ) -> None:
+        """アドレスを順に試し、最初につながった WebSocket を ``self._ws`` に置く。
+
+        ``fingerprint`` があれば wss でつなぎ、証明書が合わなければ HubAuthError
+        （ほかのアドレスは試さない。合わない相手が出たこと自体を知らせる）。
+        """
         last_error: OSError | None = None
         for address in addresses:
             self._address = address
             try:
                 # Origin ヘッダを明示（Hub 側で完全一致検証されるため）
-                self._ws = await connect(
-                    f"ws://{address}",
-                    additional_headers={"Origin": self._origin},
-                    open_timeout=self._connect_timeout,
-                )
+                if fingerprint is None:
+                    self._ws = await connect(
+                        f"ws://{address}",
+                        additional_headers={"Origin": self._origin},
+                        open_timeout=self._connect_timeout,
+                    )
+                else:
+                    self._ws = await connect(
+                        f"wss://{address}",
+                        additional_headers={"Origin": self._origin},
+                        open_timeout=self._connect_timeout,
+                        ssl=client_ssl_context(),
+                    )
+                    await self._check_peer(address, fingerprint, path)
                 return
             except (TimeoutError, asyncio.TimeoutError):
                 # Python 3.11+ では両者は同一だが、古い環境でも安全に拾えるよう両方 catch
@@ -414,6 +443,16 @@ class AutomationClient:
             logger.debug("Could not connect to the Hub at %s: %s", address, last_error)
         assert last_error is not None
         raise last_error
+
+    async def _check_peer(self, address: str, fingerprint: str, path: object) -> None:
+        """つないだ相手の証明書を指紋と照合する。合わなければ切って HubAuthError。"""
+        assert self._ws is not None
+        ssl_object = self._ws.transport.get_extra_info("ssl_object")
+        cert = None if ssl_object is None else ssl_object.getpeercert(binary_form=True)
+        if peer_matches(cert, fingerprint):
+            return
+        await self._hard_close()
+        raise HubAuthError(fingerprint_mismatch_message(address, path))
 
     async def close(self) -> None:
         """切断。reader タスクを止めて WebSocket を閉じる。"""
