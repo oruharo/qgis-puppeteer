@@ -29,15 +29,16 @@ selector・Locator・dialog handler 等の機能リファレンスをまとめ�
 14. [テストのあとに残った状態の検査](#leftover-state)
 15. [MCP の操作記録（探索を pytest に書き起こす元資料）](#mcp-recording)
 16. [複数の QGIS を操作する](#multi-instance)
-17. [Python 実行の許可と信頼モード](#permissions)
-18. [ini 設定・CLI オプション・marker（pytest）](#ini-reference)
-19. [MCP ツール一覧](#mcp-tools)
-20. [`qgis` fixture のメソッド一覧](#qgis-methods)
-21. [環境変数リファレンス](#環境変数リファレンス)
-22. [Troubleshooting](#troubleshooting)
-23. [Roadmap](#roadmap)
-24. [ライセンスとサポート](#ライセンスとサポート)
-25. 付録: [アップグレード（dev を追いかけている場合）](#アップグレードdev-を追いかけている場合)
+17. [別の機械・WSL から操作する](#remote)
+18. [Python 実行の許可と信頼モード](#permissions)
+19. [ini 設定・CLI オプション・marker（pytest）](#ini-reference)
+20. [MCP ツール一覧](#mcp-tools)
+21. [`qgis` fixture のメソッド一覧](#qgis-methods)
+22. [環境変数リファレンス](#環境変数リファレンス)
+23. [Troubleshooting](#troubleshooting)
+24. [Roadmap](#roadmap)
+25. [ライセンスとサポート](#ライセンスとサポート)
+26. 付録: [アップグレード（dev を追いかけている場合）](#アップグレードdev-を追いかけている場合)
 
 ---
 
@@ -711,9 +712,8 @@ Windows の cmd では `set QPUPPETEER_E2E_USE_RUNNING_QGIS=1`、PowerShell で�
 動いていなければ、pytest はテストを始めずに止まる。相乗りする QGIS とは同じ
 Hub ファイルを使う（[Hub 接続関連](#hub-接続関連)）。
 
-別の機械の Hub（`--listen`）の `remote\hub.json` を `QPUPPETEER_HUB_FILE` で指せば、
-その Hub の QGIS で走らせられる。ファイルのアドレスで届かないときは
-`--qgis-hub-address=<host>:<port>` で宛先を渡す（dev モードだけ）。
+別の機械や WSL から Windows の QGIS で走らせるときも dev モードを使う
+（[別の機械・WSL から操作する](#remote)）。
 
 dev モードでは、`fresh_qgis` と `spawn_qgis()` のテストは skip になる。未捕捉例外と
 メッセージログでテストを落とす判定もしない。
@@ -2519,6 +2519,125 @@ ping を送り、2 秒以内に pong が無ければ新しい方が label を引
 
 ---
 
+<a id="remote"></a>
+
+## 別の機械・WSL から操作する
+
+QGIS を動かす機械（Windows の VM、別の PC）と操作する側（Claude Desktop の
+MCP gateway・pytest・Python スクリプト）の機械が違うとき、または WSL の中から
+Windows の QGIS を操作するときの手順。
+
+- Hub はいつも **QGIS と同じ機械**で動かす。別の機械にあってよいのは操作する側だけ。
+- ネットワークは **TLS だけ**。つなぐには、QGIS の機械の Hub が書く接続情報の
+  ファイル（`remote\hub.json`）が要る。中に token と証明書の指紋が入っている。
+- **`remote\hub.json` を渡した相手は、その QGIS に任意の Python を実行させられる。**
+  パスワードと同じように扱い、信頼できる相手と機械にだけ写す。写した先でも
+  本人だけが読めるようにする（POSIX なら `chmod 600`）。漏れたら
+  [作り直す](#token-と鍵を作り直す)。
+- 別の機械の QGIS を操作する側から起こすことは、まだできない。QGIS の機械で QGIS を
+  起こしておき、pytest は [dev モード](#6-dev-モード既存-qgis-に相乗り) で走らせる。
+- スクリーンショットの保存先などのパスは、QGIS の機械のパスになる（QGIS が自分の
+  機械に書く）。
+
+### 1. QGIS の機械で Hub を起こす
+
+QGIS を起こす前に（動いていれば全部閉じてから）、QGIS 付属の Python でプラグインの
+フォルダの `_hub_bootstrap.py` を走らせる。QGIS のフォルダとプロファイルは自分の
+ものに置き換える:
+
+```bat
+"C:\Program Files\QGIS 3.34.6\bin\python-qgis-ltr.bat" "%APPDATA%\QGIS\QGIS3\profiles\default\python\plugins\qgis_puppeteer\_hub_bootstrap.py" --listen 0.0.0.0:9876
+```
+
+- `python-qgis-ltr.bat -m qgis_puppeteer.hub` では起きない（bat が `PYTHONPATH` を
+  消すので、QGIS の Python から `qgis_puppeteer` が見えない）。
+- `--listen` には IP とポートを書く。`0.0.0.0` ならすべての IPv4 のアドレスで、自機の
+  アドレス（`192.168.1.20:9876` など）ならそこだけで待つ。ポートは固定で、起こし直しても
+  変わらないので、写したファイルはそのまま使える。
+- 初めて起こすときは token・証明書・鍵を作るので数秒かかる。起きると、ウィンドウと
+  Hub ファイルの隣の `hub.log` に次のように出る:
+
+  ```text
+  Hub listening for network clients on 0.0.0.0:9876 (TLS, certificate ED:1E:E2:...)
+  Network Hub file (copy it to the client machine): C:\Users\<名前>\AppData\Local\qgis_puppeteer\remote\hub.json
+  ```
+
+- この Hub は既定の Hub ファイルも書くので、あとで起こした QGIS は自分で Hub を
+  起こさずに、この Hub につなぐ。idle になっても止まらない。止めるときはウィンドウで
+  Ctrl+C。
+- 先に QGIS が自分の Hub を起こしていると、「A live Hub already uses ...」と出して
+  終わる（終了コード 3）。QGIS を全部閉じ、その Hub が止まってから（最後の QGIS が
+  切れて 30 秒）起こし直す。
+- ファイアウォール：初めて待ち受けるとき、Windows が QGIS の `python.exe` の通信を
+  許すかを聞くので、使うネットワークで許可する。聞かれなかったときは、管理者の
+  PowerShell で受信の規則を足す:
+
+  ```powershell
+  New-NetFirewallRule -DisplayName "qgis-puppeteer Hub" -Direction Inbound -Protocol TCP -LocalPort 9876 -Action Allow -Profile Private
+  ```
+
+### 2. QGIS を起こす
+
+いつもどおり起こす。プラグインは既定の Hub ファイルを読んで、1 の Hub につなぐ。
+
+### 3. 操作する機械に `remote\hub.json` を写して指す
+
+写し方は問わない（共有フォルダ、`scp` など）。写した先を `QPUPPETEER_HUB_FILE` で指す:
+
+- **Claude Desktop**: `claude_desktop_config.json` の gateway の `env` に
+  `"QPUPPETEER_HUB_FILE": "C:\\Users\\<名前>\\qgis-vm-hub.json"`
+- **Python スクリプト**: `AutomationClient(hub_file=r"C:\Users\<名前>\qgis-vm-hub.json")`、
+  または環境変数
+- **pytest**: 環境変数を立てて dev モードで走らせる:
+
+  ```bash
+  export QPUPPETEER_HUB_FILE=~/qgis-vm-hub.json
+  export QPUPPETEER_E2E_USE_RUNNING_QGIS=1
+  pytest test_e2e/
+  ```
+
+つなぐ側は、Hub の証明書がファイルの指紋（`tls.fingerprint_sha256`）と合うことを
+確かめてから挨拶する。合わなければ何も頼まずに切る
+（[`HubAuthError`](#hubautherror)）。
+
+### 4. ファイルのアドレスで届かないとき
+
+`remote\hub.json` の `addresses` は Hub が見つけた自機のアドレス（`0.0.0.0` なら
+ループバック以外の IPv4）で、つなぐ側は上から順に試す。VM の NAT のポート転送の先
+など、Hub の知らない宛先でしか届かないときは、token と指紋はファイルのものを
+使ったまま、宛先だけを変える:
+
+- ファイルの `addresses` を書き換える（Claude Desktop の gateway はこれで）
+- `AutomationClient(hub_file=..., address="host:port")`
+- pytest の `--qgis-hub-address=host:port`（dev モードだけ）
+
+### token と鍵を作り直す
+
+`--rotate` を付けて Hub を起こし直し、`remote\hub.json` を写し直す。古いファイルでは
+つながらなくなる（指紋が合わない）。token・証明書・鍵・`hub.json` の置き場所を
+変えるときは `--remote-dir <フォルダ>`。
+
+### WSL から
+
+WSL の中の pytest・スクリプト・MCP gateway から Windows の QGIS を操作するときも、
+Windows で 1 の `--listen` の Hub を起こし、その `remote\hub.json` を指す。写さずに
+`/mnt/c` から直接指してもよい:
+
+```bash
+export QPUPPETEER_HUB_FILE=/mnt/c/Users/<名前>/AppData/Local/qgis_puppeteer/remote/hub.json
+```
+
+- WSL の既定のネットワーク（NAT モード）では、WSL から Windows の 127.0.0.1 に
+  届かないので、`--listen` の Hub が要る。ファイルのアドレスで届かなければ、WSL から
+  見た Windows のアドレス（`ip route show default` の `via` の後ろ）を
+  `--qgis-hub-address` / `address=` で渡す。WSL の仮想のネットワークは、
+  ファイアウォールでパブリックのネットワークとして扱われることがある。
+- mirrored モード（`.wslconfig` の `networkingMode=mirrored`）でも同じ手順を使う。
+  Windows の既定の Hub ファイル（`qgis_puppeteer\hub.json`）を直接指すのは避ける。
+  中の pid は Windows のプロセスのもので WSL からは見えないので、pytest の dev モードは
+  「Hub が動いていない」とみなして止まる。
+- WSL の pytest は Windows の QGIS を起こせないので、dev モードで走らせる。
+
 <a id="permissions"></a>
 
 ## Python 実行の許可と信頼モード
@@ -2814,25 +2933,9 @@ pytest の fixture のように、Hub を別に起こす使い方のための動
 
 #### 別の機械からつなぐ（`--listen`）
 
-Hub は既定では 127.0.0.1 でしか待たない。別の機械（WSL を含む）のクライアントから
-つなぐときは、QGIS の機械で QGIS より先に、QGIS 付属の Python で Hub を起こしておく:
-
-```bat
-python-qgis-ltr.bat -m qgis_puppeteer.hub --listen 0.0.0.0:9876
-```
-
-- ネットワーク側は **TLS だけ**で、つなげるのはクライアント（MCP gateway・
-  `AutomationClient`・pytest）だけ。QGIS は Hub と同じ機械で動かす。
-- Hub は既定の Hub ファイルも書くので、その機械の QGIS はいつもどおりこの Hub に
-  つなぐ。`--listen` の Hub は idle になっても止まらない。
-- ネットワーク用の token と証明書は `%LOCALAPPDATA%\qgis_puppeteer\remote\` に一度だけ
-  作られ、起こし直しても変わらない。その中の `hub.json` を相手の機械へ写し、
-  `QPUPPETEER_HUB_FILE` で指す。クライアントは証明書がこのファイルの指紋と合うことを
-  確かめてからつなぐ。
-- token と鍵を作り直すときは `--rotate` を付けて起こし、`hub.json` を写し直す。
-- 写した `hub.json` のアドレスで届かない（VM の NAT の先など）ときは、`addresses` を
-  書き換えるか、`AutomationClient(address=...)`・pytest の `--qgis-hub-address`
-  （dev モードだけ）で宛先を渡す。token と指紋はファイルのものを使う。
+QGIS の機械で `--listen` を付けて起こした Hub は、ネットワーク用の Hub ファイル
+（`remote\hub.json`）も書く。操作する機械ではそれを写し、`QPUPPETEER_HUB_FILE` で
+指す。手順は [別の機械・WSL から操作する](#remote)。
 
 ### Worker 関連
 
@@ -2944,6 +3047,92 @@ Hub ファイルが無い・読めないときも `hub_unreachable` になる（
    （[Hub 接続関連](#hub-接続関連)）
 5. QGIS を起こした直後なら、Hub がまだ待ち受けていないだけのことがある。
    `qgis_wait_ready` を先に呼ぶ。これは Hub が現れるまで `timeout_s` の内で待つ
+6. `details.reason` が `register failed: unauthorized` なら [`unauthorized`](#unauthorized)、
+   `register failed: protocol_version_mismatch` なら
+   [`protocol_version_mismatch`](#protocol_version_mismatch)、`details.type` が
+   `HubAuthError` なら [`HubAuthError`](#hubautherror) へ
+
+### `unauthorized`
+
+**症状**: Python なら `RegisterError: register failed: unauthorized (The Hub did not
+accept the proof. ...)`。MCP ツールなら `hub_unreachable` で、`details.reason` が
+同じ文。QGIS ならメッセージバーに「QGIS Puppeteer: register failed (unauthorized)」。
+
+**原因**: Hub が、つないだ側の token を認めなかった。つなぐ側が使った token が、
+そのアドレスで待っている Hub のものでない。
+
+1. `AutomationClient(token=...)` で token を渡したあとで、Hub が起こし直された。
+   ローカルの token は Hub が起きるたびに変わる。`hub_file=` か `QPUPPETEER_HUB_FILE`
+   で Hub ファイルを読ませれば、つなぐたびに読み直す
+2. ローカル用とネットワーク用を混ぜた。`remote\hub.json` の token は `--listen` の
+   アドレスでしか通らず、既定の `hub.json` の token は 127.0.0.1 でしか通らない。
+   `address=` / `--qgis-hub-address` で、ファイルと違う側のアドレスを渡していないか
+3. QGIS を `remote\hub.json` に向けた。ネットワークのアドレスは操作する側だけを受け、
+   QGIS の登録は断る（"QGIS registers with the Hub on 127.0.0.1 of its own machine;
+   ..."）。QGIS の環境から `QPUPPETEER_HUB_FILE` を外し、既定の Hub ファイルを使わせる
+
+### `protocol_version_mismatch`
+
+**症状**: Python なら `RegisterError: register failed: protocol_version_mismatch (The
+Hub speaks protocol 2..2 (qgis-puppeteer 0.1.0), but the client asked for protocol 3
+...)`。QGIS ならメッセージバーに「QGIS Puppeteer: register failed
+(protocol_version_mismatch: the Hub runs qgis-puppeteer … and this plugin is …; install
+the same version)」。MCP ツールなら `hub_unreachable` で、`details.reason` が同じ文。
+
+**原因**: Hub とつなぐ側で qgis-puppeteer の版が違い、話すプロトコルの版が重ならない。
+エラーの `details` に、双方の版の範囲と `package_version` が入る。
+
+**対処**: 全部を同じ版にそろえる。
+
+- QGIS のプラグインのフォルダ、pytest の環境の `qgis-puppeteer` /
+  `pytest-qgis-puppeteer`、MCP gateway（`uvx --from` の先）
+- Hub は、それを起こしたものの版で動く。QGIS のプラグインが起こした Hub はプラグインの
+  フォルダの版、pytest が起こした Hub は pytest の環境の版、`--listen` の Hub は
+  `_hub_bootstrap.py` を走らせたフォルダの版。古い版の Hub が残っていれば止める
+  （プラグインが起こした Hub は、QGIS を全部閉じれば 30 秒で止まる。`--listen` の Hub は
+  そのウィンドウで Ctrl+C）
+- 版が同じでも中身が違うことがある（dev を追いかけているとき）。
+  [版の食い違い](#qgis-のプラグインと-pytest-側の版の食い違い) を参照
+
+<a id="hubautherror"></a>
+
+### `HubAuthError`（つないだ相手を Hub として信用できない）
+
+**症状**: Python なら `HubAuthError`。MCP ツールなら `hub_unreachable` で、
+`details.type` が `HubAuthError`。pytest の dev モードは「Dev mode: no live Hub ...
+behind the Hub file ...」とだけ出して止まる。QGIS のプラグインはログに "Ignoring a
+register_ack without a valid Hub proof (not our Hub?); will reconnect" を出して、
+つなぎ直し続ける。どの場合も、相手には何も頼んでいない。
+
+**原因と対処**（メッセージで分かれる）:
+
+- `The TLS certificate of <address> does not match the fingerprint in <file>` —
+  証明書が、写した `remote\hub.json` の指紋と合わない。Hub が `--rotate` で鍵を作り
+  直した、`--remote-dir` を変えた、別の Hub につないだ、のどれか。QGIS の機械の
+  `remote\hub.json` を写し直す。Hub のログの `certificate ...` の指紋と、ファイルの
+  `tls.fingerprint_sha256` を比べられる。両方同じなのに出るなら、間に TLS を
+  終える何か（proxy など）がいる
+- `<address> sent no hello within Ns` / `<address> did not greet with hello` — 相手が
+  qgis-puppeteer の Hub でない（Hub が止まったあと、そのポートを別のプログラムが
+  使っている）か、挨拶をしない古い版の Hub（プロトコル 1）。古い Hub なら止めて、
+  同じ版の Hub を起こす
+- `<address> answered register without a valid Hub proof` — 相手は Hub だが、Hub
+  ファイルの token を知らない。Hub ファイルが古く、そのアドレスで別の Hub が待っている。
+  Hub を起こし直すか、その Hub のファイルを指す
+
+pytest の dev モードでは理由が出ないので、同じ Hub ファイルで `AutomationClient` から
+つないでみると、上のどれかが例外の文で分かる:
+
+```python
+import asyncio
+from qgis_puppeteer import AutomationClient
+
+async def main():
+    async with AutomationClient(hub_file=r"C:\Users\<名前>\qgis-vm-hub.json") as client:
+        print("connected to", client.address, "qgis-puppeteer", client.hub_package_version)
+
+asyncio.run(main())
+```
 
 ### `instance_timeout`
 

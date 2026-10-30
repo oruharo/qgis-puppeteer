@@ -61,7 +61,7 @@
 | **Flaky 自動検出** | 3d | 🛡️ 安定 / 📊 可視 | CI 履歴解析で quarantine 候補レポート |
 | **Summary HTML レンダラー** | 4d | 📊 可視 | `summary.json` → スタンドアロン HTML + PR コメント |
 | **動画録画 diagnostic** | 3d | 🔍 解析 | Qt 連続キャプチャ（アニメ解析用） |
-| **remote / caller_role 転送** | 3d | 🌐 適用 | 別 PC 越しでの遠隔実行対応 |
+| **remote / caller_role 転送** | 3d | 🌐 適用 | 別 PC 越しでの遠隔実行対応。別の機械からの接続（TLS と token）は済んだ（ADR-0006）。残りは別の機械での QGIS の起動と、ファイルの受け渡し |
 
 ### カテゴリ別サマリー
 
@@ -95,3 +95,5 @@
 - [ADR-0002: E2E テストアーキテクチャ](architecture/0002-e2e-test-architecture.md)
 - [ADR-0003: Test Environments](architecture/0003-test-environments.md)
 - [ADR-0004: Inline QGIS Spawn Helper](architecture/0004-inline-qgis-spawn-helper.md)
+- [ADR-0005: Label のライフサイクルと安定 identity](architecture/0005-label-lifecycle-and-stable-identity.md)
+- [ADR-0006: Hub につなぐ相手の確かめ方・版の確かめ合い・別の機械からの接続](architecture/0006-hub-authentication-and-remote-clients.md)

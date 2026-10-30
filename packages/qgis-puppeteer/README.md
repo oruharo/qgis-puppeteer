@@ -10,7 +10,7 @@ Control QGIS from Claude Desktop, pytest, or any Python script via WebSocket.
 - **Multi-instance** — multiple QGIS processes managed by a single Hub
 - **MCP server** — first-class Claude Desktop integration via [Model Context Protocol](https://modelcontextprotocol.io/)
 - **Direct API** — `AutomationClient` for scripts, pytest, etc.
-- **Local-only by default** — `127.0.0.1` binding, Origin header validation
+- **Local-only by default** — `127.0.0.1` binding, a token in a file only you can read (the Hub file), Origin header validation; clients on other machines over TLS only when the Hub is started with `--listen`
 - **Auto-managed lifecycle** — Hub spawns on demand, terminates 30s after last client disconnects
 - **Permission system** — confirm-before-execute for arbitrary Python code (bypassable via env for CI)
 

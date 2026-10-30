@@ -109,12 +109,13 @@ def test_login(qgis):
 - [Test Environments (ADR-0003)](docs/architecture/0003-test-environments.md) — declarative QGIS launch configurations per test set (partition model)
 - [Inline spawn helper (ADR-0004)](docs/architecture/0004-inline-qgis-spawn-helper.md) — `spawn_qgis()` context manager for tests where QGIS startup options *are* the test subject
 - [Label lifecycle & stable identity (ADR-0005)](docs/architecture/0005-label-lifecycle-and-stable-identity.md) — *Accepted*: same-label restart as a first-class flow; pid-independent instance_id; `launch_token` correlation; supersedes ADR-0001 §5 label/identity rules
+- [Hub authentication & remote clients (ADR-0006)](docs/architecture/0006-hub-authentication-and-remote-clients.md) — *Accepted*: the Hub file and token, the hello/proof greeting (protocol 2), tolerant decoding, and clients on other machines over TLS (`--listen`)
 
 ## Roadmap
 
 Forward-looking items are tracked in the ADRs:
 
-- ADR-0001 `## Roadmap`: remote operation (TLS + token auth), `qgis_launch_instance` MCP tool, MCP `entry_points` mixin pattern, dynamic handler load/unload
+- ADR-0001 `## Roadmap`: configurable `Origin` allow-list, `qgis_launch_instance` MCP tool, MCP `entry_points` mixin pattern, dynamic handler load/unload
 - ADR-0002 `## Roadmap`: pytest-xdist parallel execution, multi-instance test scenarios, HTML summary reporter, signal-based test handlers, flaky auto-detection
 
 ## License

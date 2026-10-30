@@ -5,6 +5,7 @@
 - **Deciders**: qgis-puppeteer maintainers
 - **Related**: `plugins/qgis_puppet/` と `packages/qgis-puppeteer/src/qgis_puppeteer/gateways/mcp.py` が本 ADR のランタイム実装
 - **Superseded (partial)**: 「instance 命名」「selector 解決順（特に `pid`）」「Worker 再接続時の instance_id 引き継ぎ」「label 一意制約」は [ADR-0005](0005-label-lifecycle-and-stable-identity.md) が見直す。本 ADR を読む際は ADR-0005 を併読のこと。
+- **Amended**: 「2026-10-30」の改訂・追記（§3 の挨拶と寛容な復号、§4 と §6 の Hub ファイルによる見つけ方、§9 のセキュリティ境界と `--listen`）は [ADR-0006](0006-hub-authentication-and-remote-clients.md) が決めた。決めた理由と採らなかった案はそちらにある。プロトコルの細部は本 ADR に書く。
 
 ## Context
 
@@ -189,7 +190,7 @@ plugins/qgis_puppet_test_helpers/      ← Tier 3 Test 用 extension plugin
 
 #### 挨拶（hello と proof）
 
-> **2026-10-30 追記（プロトコル 2）**: Hub につなぐには、Hub ファイル（§9.3）の token を知っていることを示す。版 1 とは互換を取らない（版 1 の相手には `protocol_version_mismatch` を返す）。
+> **2026-10-30 追記（プロトコル 2、ADR-0006）**: Hub につなぐには、Hub ファイル（§9.3）の token を知っていることを示す。版 1 とは互換を取らない（版 1 の相手には `protocol_version_mismatch` を返す）。
 
 1. 接続するとすぐ、Hub が `hello` を送る。応答を待つメッセージではないので `id` は無い：
 
@@ -790,7 +791,7 @@ Claude Desktop の `claude_desktop_config.json` には以下で登録：
 | Hub クラッシュ | WS 切断検知 → 再 spawn 試行 | — | WS 切断 → 次回ツール呼び出し時に再接続 |
 | Worker クラッシュ | — | 該当接続削除、カウント減、他 Worker と Client は継続 | 該当 instance への呼び出しは `instance_not_found` で即時エラー |
 | McpGateway クラッシュ | — | 該当接続削除、処理継続 | Claude Desktop が再 spawn |
-| ネットワーク（remote 時） | — | TLS + トークン認証（Roadmap） | 同左 |
+| ネットワーク（remote 時） | — | TLS + token（`--listen`。§9.1・ADR-0006） | 同左 |
 
 ### 9. セキュリティ境界
 
@@ -847,7 +848,7 @@ Origin 検証はブラウザしか防がない。同じ機械のほかのプロ�
 
 詳細は末尾の `## Roadmap` を参照。主な項目:
 
-- **remote 運用**: 別マシンの Hub に接続できるよう、`127.0.0.1` 固定を緩和し TLS + トークン認証を追加。プロトコルは現行のまま流用可能なので、接続層の拡張で済む。（2026-10-30：`--listen` で済んだ。§9.1・§9.3）
+- **remote 運用**: 別マシンの Hub に接続できるよう、`127.0.0.1` 固定を緩和し TLS + トークン認証を追加。プロトコルは現行のまま流用可能なので、接続層の拡張で済む。（2026-10-30：`--listen` で済んだ。§9.1・§9.3、ADR-0006）
 - **`qgis_launch_instance` ツール**: Gateway から QGIS プロセス自体を起動する MCP ツール。現状は QGIS を手動起動しないと Worker が存在しないため、完全自動化シナリオでブロックになる。実装は `subprocess.Popen` + `list_instances` poll で `register` 到達を検出する。
 - **`InstanceInfo.project` フィールドの扱い**: register 時点のスナップショットしか持っておらず常に `null` になりがち。選択肢: (a) `fileNameChanged` シグナル連動 push、(b) register payload に乗せる、(c) フィールド削除。暫定方針は (c)。
 
@@ -1268,9 +1269,9 @@ MCP / LLM レイヤのオーバーヘッド：
 - バインドアドレス指定の解放（`0.0.0.0` / 任意 IP）
 - TLS（`wss://`）の終端を Hub または前段 reverse proxy で
 - トークン認証：同じ機械の中では済んだ（§3「挨拶」、§9.3）。別のマシンへは Hub ファイルの token をどう渡すかを決める
-
-> **2026-10-30 追記**: バインドアドレス・TLS（Hub が終端する）・別の機械へのトークンは `--listen` で済んだ（§9.1・§9.3）。別の機械のクライアントは、Hub が書く `remote/hub.json` を写して使う。Origin の設定化は残っている。
 - `Origin` 検証ホワイトリストの設定化
+
+> **2026-10-30 追記**: バインドアドレス・TLS（Hub が終端する）・別の機械へのトークンは `--listen` で済んだ（§9.1・§9.3、ADR-0006）。別の機械のクライアントは、Hub が書く `remote/hub.json` を写して使う。Origin の設定化は残っている。
 
 プロトコル本体は現行のまま流用可能。接続層と register payload の拡張で済む。
 
